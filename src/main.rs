@@ -7,7 +7,11 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "hardmoney", version, about = "FEC campaign-finance data: parse .fec filings, load bulk data, serve a REST API")]
+#[command(
+    name = "hardmoney",
+    version,
+    about = "FEC campaign-finance data: parse .fec filings, load bulk data, serve a REST API"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -105,10 +109,16 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Parse { path } => {
             let bytes = std::fs::read(&path)?;
             let filing = hardmoney::Filing::parse_bytes(&bytes)?;
-            let header: serde_json::Map<String, serde_json::Value> =
-                filing.headers.iter().map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone()))).collect();
-            let summary: serde_json::Map<String, serde_json::Value> =
-                filing.summary.iter().map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone()))).collect();
+            let header: serde_json::Map<String, serde_json::Value> = filing
+                .headers
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect();
+            let summary: serde_json::Map<String, serde_json::Value> = filing
+                .summary
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect();
             let out = serde_json::json!({
                 "form_type": filing.raw_form_type,
                 "base_form_type": filing.base_form_type,
@@ -127,39 +137,77 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             println!("schema applied");
         }
 
-        Command::BulkLoad { database_url, source, cycle, file, limit } => {
+        Command::BulkLoad {
+            database_url,
+            source,
+            cycle,
+            file,
+            limit,
+        } => {
             let pool = connect(&database_url).await?;
             hardmoney::db::ensure_schema(&pool).await?;
-            let src = hardmoney::bulk::find_source(&source).ok_or_else(|| format!("unknown source '{source}'"))?;
+            let src = hardmoney::bulk::find_source(&source)
+                .ok_or_else(|| format!("unknown source '{source}'"))?;
             let input = match file {
                 Some(path) => hardmoney::bulk::Input::LocalFile(path),
-                None => hardmoney::bulk::Input::Url(hardmoney::bulk::source::download_url(src, cycle)),
+                None => {
+                    hardmoney::bulk::Input::Url(hardmoney::bulk::source::download_url(src, cycle))
+                }
             };
             let report = hardmoney::bulk::load(&pool, src, input, cycle, limit).await?;
             println!("loaded {} rows into {}", report.rows_loaded, report.table);
         }
 
-        Command::BulkLoadAll { database_url, cycle, limit } => {
+        Command::BulkLoadAll {
+            database_url,
+            cycle,
+            limit,
+        } => {
             let pool = connect(&database_url).await?;
             hardmoney::db::ensure_schema(&pool).await?;
             for src in hardmoney::bulk::source::ALL {
                 let url = hardmoney::bulk::source::download_url(src, cycle);
                 println!("loading {} from {url} ...", src.name);
-                match hardmoney::bulk::load(&pool, src, hardmoney::bulk::Input::Url(url), cycle, limit).await {
+                match hardmoney::bulk::load(
+                    &pool,
+                    src,
+                    hardmoney::bulk::Input::Url(url),
+                    cycle,
+                    limit,
+                )
+                .await
+                {
                     Ok(report) => println!("  {} rows into {}", report.rows_loaded, report.table),
                     Err(e) => eprintln!("  failed: {e}"),
                 }
             }
         }
 
-        Command::BulkRestoreDump { database_url, name, allow_large, cache_dir } => {
-            let src = hardmoney::bulk::dump::find(&name).ok_or_else(|| format!("unknown dump '{name}'"))?;
-            let path = hardmoney::bulk::dump::restore(&database_url, src, &cache_dir, allow_large).await?;
-            println!("restored {} into disclosure.{} (cached at {})", src.name, src.disclosure_table, path.display());
-            println!("re-run `schema-init` to (re)create the friendly `independent_expenditures` view over it");
+        Command::BulkRestoreDump {
+            database_url,
+            name,
+            allow_large,
+            cache_dir,
+        } => {
+            let src = hardmoney::bulk::dump::find(&name)
+                .ok_or_else(|| format!("unknown dump '{name}'"))?;
+            let path =
+                hardmoney::bulk::dump::restore(&database_url, src, &cache_dir, allow_large).await?;
+            println!(
+                "restored {} into disclosure.{} (cached at {})",
+                src.name,
+                src.disclosure_table,
+                path.display()
+            );
+            println!(
+                "re-run `schema-init` to (re)create the friendly `independent_expenditures` view over it"
+            );
         }
 
-        Command::BulkLoadFiling { database_url, filing } => {
+        Command::BulkLoadFiling {
+            database_url,
+            filing,
+        } => {
             let pool = connect(&database_url).await?;
             hardmoney::db::ensure_schema(&pool).await?;
 
@@ -178,12 +226,21 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let filing_id: i64 = std::path::Path::new(&filing)
                     .file_stem()
                     .and_then(|s| s.to_str())
-                    .and_then(|s| s.chars().filter(|c| c.is_ascii_digit()).collect::<String>().parse().ok())
+                    .and_then(|s| {
+                        s.chars()
+                            .filter(|c| c.is_ascii_digit())
+                            .collect::<String>()
+                            .parse()
+                            .ok()
+                    })
                     .unwrap_or(0);
                 hardmoney::bulk::ingest_filing_bytes(&pool, filing_id, &bytes).await?
             };
 
-            println!("ingested {} ({} Schedule E lines)", report.form_type, report.schedule_e_lines);
+            println!(
+                "ingested {} ({} Schedule E lines)",
+                report.form_type, report.schedule_e_lines
+            );
         }
 
         Command::Serve { database_url, bind } => {
@@ -196,5 +253,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn connect(database_url: &str) -> Result<sqlx::PgPool, sqlx::Error> {
-    sqlx::postgres::PgPoolOptions::new().max_connections(10).connect(database_url).await
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(10)
+        .connect(database_url)
+        .await
 }

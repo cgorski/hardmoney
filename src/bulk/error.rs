@@ -11,11 +11,18 @@ pub enum BulkError {
     /// A source row had fewer pipe-delimited fields than its
     /// [`crate::bulk::source::BulkSource`] declares, or more than are
     /// permitted by `allow_extra_trailing_fields`.
-    MalformedRow { line_no: u64, expected: usize, found: usize },
+    MalformedRow {
+        line_no: u64,
+        expected: usize,
+        found: usize,
+    },
     UnknownSource(String),
     /// `pg_restore` (or `pg_dump`'s companion tool) was not found on PATH,
     /// or exited non-zero.
-    ExternalTool { tool: &'static str, detail: String },
+    ExternalTool {
+        tool: &'static str,
+        detail: String,
+    },
 }
 
 impl fmt::Display for BulkError {
@@ -25,7 +32,11 @@ impl fmt::Display for BulkError {
             BulkError::Io(e) => write!(f, "I/O error: {e}"),
             BulkError::Zip(msg) => write!(f, "zip error: {msg}"),
             BulkError::Database(e) => write!(f, "database error: {e}"),
-            BulkError::MalformedRow { line_no, expected, found } => write!(
+            BulkError::MalformedRow {
+                line_no,
+                expected,
+                found,
+            } => write!(
                 f,
                 "malformed row at line {line_no}: expected {expected} fields, found {found}"
             ),

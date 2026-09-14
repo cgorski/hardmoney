@@ -29,8 +29,8 @@ pub mod routes;
 
 use std::net::SocketAddr;
 
-use axum::routing::get;
 use axum::Router;
+use axum::routing::get;
 use sqlx::PgPool;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -45,9 +45,15 @@ pub fn router(pool: PgPool) -> Router {
         .route("/committees/{cmte_id}", get(routes::committees::get))
         .route("/schedule-a", get(routes::schedule_a::search))
         .route("/disbursements", get(routes::disbursements::search))
-        .route("/independent-expenditures", get(routes::independent_expenditures::search))
+        .route(
+            "/independent-expenditures",
+            get(routes::independent_expenditures::search),
+        )
         .route("/filings/{filing_id}", get(routes::filings::get))
-        .route("/filings/{filing_id}/schedule-e", get(routes::filings::schedule_e))
+        .route(
+            "/filings/{filing_id}/schedule-e",
+            get(routes::filings::schedule_e),
+        )
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(pool)

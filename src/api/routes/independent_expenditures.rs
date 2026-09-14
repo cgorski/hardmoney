@@ -1,5 +1,5 @@
-use axum::extract::{Query, State};
 use axum::Json;
+use axum::extract::{Query, State};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
@@ -40,7 +40,10 @@ pub struct SearchParams {
     pub offset: Option<i64>,
 }
 
-pub async fn search(State(pool): State<PgPool>, Query(params): Query<SearchParams>) -> Result<Json<Vec<IndependentExpenditure>>, ApiError> {
+pub async fn search(
+    State(pool): State<PgPool>,
+    Query(params): Query<SearchParams>,
+) -> Result<Json<Vec<IndependentExpenditure>>, ApiError> {
     let page = Pagination::new(params.limit, params.offset);
     let rows = sqlx::query_as::<_, IndependentExpenditure>(
         "SELECT sub_id, cmte_id, committee_name, payee_name, candidate_id, candidate_name, \

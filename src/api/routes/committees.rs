@@ -1,5 +1,5 @@
-use axum::extract::{Path, Query, State};
 use axum::Json;
+use axum::extract::{Path, Query, State};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
@@ -31,7 +31,10 @@ pub struct ListParams {
     pub offset: Option<i64>,
 }
 
-pub async fn list(State(pool): State<PgPool>, Query(params): Query<ListParams>) -> Result<Json<Vec<Committee>>, ApiError> {
+pub async fn list(
+    State(pool): State<PgPool>,
+    Query(params): Query<ListParams>,
+) -> Result<Json<Vec<Committee>>, ApiError> {
     let page = Pagination::new(params.limit, params.offset);
     let rows = sqlx::query_as::<_, Committee>(
         "SELECT cmte_id, cycle, cmte_nm, tres_nm, cmte_city, cmte_st, cmte_dsgn, cmte_tp, \
@@ -52,7 +55,10 @@ pub async fn list(State(pool): State<PgPool>, Query(params): Query<ListParams>) 
     Ok(Json(rows))
 }
 
-pub async fn get(State(pool): State<PgPool>, Path(cmte_id): Path<String>) -> Result<Json<Vec<Committee>>, ApiError> {
+pub async fn get(
+    State(pool): State<PgPool>,
+    Path(cmte_id): Path<String>,
+) -> Result<Json<Vec<Committee>>, ApiError> {
     let rows = sqlx::query_as::<_, Committee>(
         "SELECT cmte_id, cycle, cmte_nm, tres_nm, cmte_city, cmte_st, cmte_dsgn, cmte_tp, \
                 cmte_pty_affiliation, org_tp, connected_org_nm, cand_id \
@@ -62,7 +68,9 @@ pub async fn get(State(pool): State<PgPool>, Path(cmte_id): Path<String>) -> Res
     .fetch_all(&pool)
     .await?;
     if rows.is_empty() {
-        return Err(ApiError::NotFound(format!("no committee with cmte_id {cmte_id}")));
+        return Err(ApiError::NotFound(format!(
+            "no committee with cmte_id {cmte_id}"
+        )));
     }
     Ok(Json(rows))
 }

@@ -88,8 +88,16 @@ fn renamed_fields_use_their_new_distinct_canonical_names() {
                 "col_b_total_receipts_recap",
             ],
         ),
-        ("F3P", "8.5", &["col_a_total_receipts", "col_a_total_receipts_recap"]),
-        ("F4", "8.5", &["col_a_total_receipts", "col_a_total_receipts_recap"]),
+        (
+            "F3P",
+            "8.5",
+            &["col_a_total_receipts", "col_a_total_receipts_recap"],
+        ),
+        (
+            "F4",
+            "8.5",
+            &["col_a_total_receipts", "col_a_total_receipts_recap"],
+        ),
         ("F2", "8.5", &["candidate_state", "candidate_office_state"]),
         (
             "SchC1",
@@ -119,7 +127,8 @@ fn renamed_fields_use_their_new_distinct_canonical_names() {
             .find(|(name, _)| name == form)
             .unwrap_or_else(|| panic!("no bundled format table named '{form}'"))
             .1;
-        let line = Line::from_csv_str(form, csv).unwrap_or_else(|e| panic!("{form} failed to parse: {e}"));
+        let line =
+            Line::from_csv_str(form, csv).unwrap_or_else(|e| panic!("{form} failed to parse: {e}"));
         let cols = line
             .column_locations(version)
             .unwrap_or_else(|| panic!("no {version} bucket for {form}"));

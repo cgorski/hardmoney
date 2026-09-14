@@ -80,7 +80,12 @@ pub fn find(name: &str) -> Option<&'static DumpSource> {
 /// into the `disclosure` schema of the database at `database_url`.
 /// `pg_restore` must be on `PATH`. Returns without doing anything if
 /// `source.is_large` and `allow_large` is `false`.
-pub async fn restore(database_url: &str, source: &'static DumpSource, cache_dir: &Path, allow_large: bool) -> Result<PathBuf> {
+pub async fn restore(
+    database_url: &str,
+    source: &'static DumpSource,
+    cache_dir: &Path,
+    allow_large: bool,
+) -> Result<PathBuf> {
     if source.is_large && !allow_large {
         return Err(BulkError::ExternalTool {
             tool: "pg_restore",
@@ -98,15 +103,24 @@ pub async fn restore(database_url: &str, source: &'static DumpSource, cache_dir:
         download_dump(source.url, &dump_path)?;
     }
 
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(database_url).await?;
-    sqlx::query("CREATE SCHEMA IF NOT EXISTS disclosure").execute(&pool).await?;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(database_url)
+        .await?;
+    sqlx::query("CREATE SCHEMA IF NOT EXISTS disclosure")
+        .execute(&pool)
+        .await?;
     // Best-effort: these extensions back full-text/trigram indexes some
     // dumps' DDL references. If they're unavailable (e.g. no superuser),
     // restoration still succeeds for the table + data + primary key; only
     // ancillary indexes/triggers may be skipped, matching what was
     // observed restoring fec_fitem_sched_e.dump in development.
-    let _ = sqlx::query("CREATE EXTENSION IF NOT EXISTS pg_trgm").execute(&pool).await;
-    let _ = sqlx::query("CREATE EXTENSION IF NOT EXISTS btree_gin").execute(&pool).await;
+    let _ = sqlx::query("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("CREATE EXTENSION IF NOT EXISTS btree_gin")
+        .execute(&pool)
+        .await;
     pool.close().await;
 
     let database_url = database_url.to_string();
@@ -119,7 +133,9 @@ pub async fn restore(database_url: &str, source: &'static DumpSource, cache_dir:
 }
 
 fn download_dump(url: &str, dest: &Path) -> Result<()> {
-    let resp = ureq::get(url).call().map_err(|e| BulkError::Http(e.to_string()))?;
+    let resp = ureq::get(url)
+        .call()
+        .map_err(|e| BulkError::Http(e.to_string()))?;
     let body = resp.into_body();
     let pb = match body.content_length() {
         Some(len) => indicatif::ProgressBar::new(len).with_style(download_style()),
@@ -145,7 +161,10 @@ fn run_pg_restore(database_url: &str, dump_path: &Path) -> Result<()> {
         .args(["--no-owner", "--no-acl", "-d", database_url])
         .arg(dump_path)
         .output()
-        .map_err(|e| BulkError::ExternalTool { tool: "pg_restore", detail: e.to_string() })?;
+        .map_err(|e| BulkError::ExternalTool {
+            tool: "pg_restore",
+            detail: e.to_string(),
+        })?;
 
     if !output.status.success() {
         return Err(BulkError::ExternalTool {

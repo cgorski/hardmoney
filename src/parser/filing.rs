@@ -205,8 +205,14 @@ impl Filing {
             .from_reader(content.as_bytes());
         let mut records = reader.records();
 
-        let header_record = records.next().transpose()?.ok_or(FecError::MissingFormLine)?;
-        let summary_record = records.next().transpose()?.ok_or(FecError::MissingFormLine)?;
+        let header_record = records
+            .next()
+            .transpose()?
+            .ok_or(FecError::MissingFormLine)?;
+        let summary_record = records
+            .next()
+            .transpose()?
+            .ok_or(FecError::MissingFormLine)?;
         let header_fields: Vec<String> = header_record.iter().map(utf8_clean).collect();
         let summary_fields: Vec<String> = summary_record.iter().map(utf8_clean).collect();
 
@@ -234,7 +240,10 @@ impl Filing {
     /// Shared header + summary-line parsing, common to both delimiter
     /// styles. Returns a `Filing` with an empty `lines` vec -- callers fill
     /// that in afterward.
-    fn parse_headers_and_summary(header_fields: &[String], summary_fields: &[String]) -> Result<Filing> {
+    fn parse_headers_and_summary(
+        header_fields: &[String],
+        summary_fields: &[String],
+    ) -> Result<Filing> {
         let headers = header::parse(header_fields, false)?;
         let version = clean_entry(headers.get("fec_version").map(|s| s.as_str()).unwrap_or(""));
 
@@ -250,9 +259,11 @@ impl Filing {
         let is_amendment = raw_form_type.ends_with('A');
         let amends_filing = if is_amendment {
             let report_id = headers.get("report_id").map(|s| s.as_str()).unwrap_or("");
-            let captures = AMENDS_RE.captures(report_id).ok_or_else(|| FecError::AmendmentOriginalNotFound {
-                filing_number: String::new(),
-                report_id: report_id.to_string(),
+            let captures = AMENDS_RE.captures(report_id).ok_or_else(|| {
+                FecError::AmendmentOriginalNotFound {
+                    filing_number: String::new(),
+                    report_id: report_id.to_string(),
+                }
             })?;
             Some(captures.get(1).unwrap().as_str().to_string())
         } else {
@@ -280,7 +291,10 @@ impl Filing {
 /// `get_next_fields` for the new-delimiter path (`utf8_clean(i) for i in
 /// nextline.split(new_delimiter)`).
 fn split_new_delimited(raw: &str) -> Vec<String> {
-    raw.trim_end_matches('\r').split(NEW_DELIMITER).map(utf8_clean).collect()
+    raw.trim_end_matches('\r')
+        .split(NEW_DELIMITER)
+        .map(utf8_clean)
+        .collect()
 }
 
 /// Dispatches one non-blank body line to its format table and parses it.
@@ -297,7 +311,8 @@ fn parse_body_line(fields: &[String], version: &str) -> Result<Option<ParsedLine
     let parsed = parser.parse_line(fields, version)?;
     Ok(Some(ParsedLine {
         raw_form_type: form_type,
-        table: table.expect("line_parser_for_form_type only succeeds when table_name_for_form_type does"),
+        table: table
+            .expect("line_parser_for_form_type only succeeds when table_name_for_form_type does"),
         fields: parsed,
     }))
 }

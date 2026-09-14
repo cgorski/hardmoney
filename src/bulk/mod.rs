@@ -15,6 +15,6 @@ pub mod loader;
 pub mod source;
 
 pub use error::{BulkError, Result};
-pub use ingest::{ingest_filing, ingest_filing_bytes, IngestReport};
-pub use loader::{load, Input, LoadReport};
-pub use source::{find as find_source, BulkSource};
+pub use ingest::{IngestReport, ingest_filing, ingest_filing_bytes};
+pub use loader::{Input, LoadReport, load};
+pub use source::{BulkSource, find as find_source};

@@ -93,9 +93,8 @@ static DISPATCH: Lazy<Vec<CompiledDispatch>> = Lazy::new(|| {
             // re.I (case-insensitive) in the original; `(?i)` reproduces it.
             let anchored = format!("(?i)^(?:{})", pattern);
             CompiledDispatch {
-                regex: Regex::new(&anchored).unwrap_or_else(|e| {
-                    panic!("invalid built-in dispatch regex '{pattern}': {e}")
-                }),
+                regex: Regex::new(&anchored)
+                    .unwrap_or_else(|e| panic!("invalid built-in dispatch regex '{pattern}': {e}")),
                 table,
             }
         })
@@ -130,11 +129,14 @@ pub fn table_name_for_form_type(form_type: &str) -> Option<&'static str> {
 /// `Form.get_line_parser` + the `ParserMissingError` path of
 /// `Form.parse_form_line`.
 pub fn line_parser_for_form_type(form_type: &str) -> Result<&'static Line> {
-    let table_name = table_name_for_form_type(form_type).ok_or_else(|| FecError::ParserMissing {
-        form_type: form_type.to_string(),
-        version: String::new(),
-    })?;
-    Ok(TABLES.get(table_name).expect("dispatch table always registered"))
+    let table_name =
+        table_name_for_form_type(form_type).ok_or_else(|| FecError::ParserMissing {
+            form_type: form_type.to_string(),
+            version: String::new(),
+        })?;
+    Ok(TABLES
+        .get(table_name)
+        .expect("dispatch table always registered"))
 }
 
 #[cfg(test)]

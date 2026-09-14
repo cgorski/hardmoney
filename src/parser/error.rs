@@ -27,7 +27,9 @@ pub enum FecError {
     #[error("filing has no summary/form line")]
     MissingFormLine,
 
-    #[error("can't find original filing number in amended report {filing_number} (report_id was '{report_id}')")]
+    #[error(
+        "can't find original filing number in amended report {filing_number} (report_id was '{report_id}')"
+    )]
     AmendmentOriginalNotFound {
         filing_number: String,
         report_id: String,

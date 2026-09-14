@@ -36,14 +36,21 @@ pub fn parse_money_cents(raw: &str) -> Option<i64> {
         Some((w, f)) => (w, f),
         None => (unsigned, ""),
     };
-    if frac.len() > 2 || !whole.chars().all(|c| c.is_ascii_digit()) || !frac.chars().all(|c| c.is_ascii_digit()) {
+    if frac.len() > 2
+        || !whole.chars().all(|c| c.is_ascii_digit())
+        || !frac.chars().all(|c| c.is_ascii_digit())
+    {
         return None;
     }
     if whole.is_empty() && frac.is_empty() {
         return None;
     }
 
-    let whole_cents: i64 = if whole.is_empty() { 0 } else { whole.parse().ok()? };
+    let whole_cents: i64 = if whole.is_empty() {
+        0
+    } else {
+        whole.parse().ok()?
+    };
     let frac_cents: i64 = match frac.len() {
         0 => 0,
         1 => frac.parse::<i64>().ok()? * 10,
@@ -78,7 +85,10 @@ pub struct TypedViewError {
 }
 
 fn field<'a>(line: &'a ParsedLine, name: &'static str) -> Result<&'a str, TypedViewError> {
-    line.get(name).ok_or(TypedViewError { table: line.table, field: name })
+    line.get(name).ok_or(TypedViewError {
+        table: line.table,
+        field: name,
+    })
 }
 
 /// Ergonomic view over a Schedule A line (itemized receipts/contributions).
@@ -107,19 +117,52 @@ impl TryFrom<&ParsedLine> for ScheduleA {
     fn try_from(line: &ParsedLine) -> Result<Self, Self::Error> {
         Ok(ScheduleA {
             filer_committee_id: field(line, "filer_committee_id_number")?.to_string(),
-            transaction_id: line.get("transaction_id").filter(|s| !s.is_empty()).map(str::to_string),
-            entity_type: line.get("entity_type").filter(|s| !s.is_empty()).map(str::to_string),
-            contributor_name: line.get("contributor_name").filter(|s| !s.is_empty()).map(str::to_string),
-            contributor_city: line.get("contributor_city").filter(|s| !s.is_empty()).map(str::to_string),
-            contributor_state: line.get("contributor_state").filter(|s| !s.is_empty()).map(str::to_string),
-            contributor_zip_code: line.get("contributor_zip_code").filter(|s| !s.is_empty()).map(str::to_string),
-            contributor_employer: line.get("contributor_employer").filter(|s| !s.is_empty()).map(str::to_string),
-            contributor_occupation: line.get("contributor_occupation").filter(|s| !s.is_empty()).map(str::to_string),
+            transaction_id: line
+                .get("transaction_id")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            entity_type: line
+                .get("entity_type")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            contributor_name: line
+                .get("contributor_name")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            contributor_city: line
+                .get("contributor_city")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            contributor_state: line
+                .get("contributor_state")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            contributor_zip_code: line
+                .get("contributor_zip_code")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            contributor_employer: line
+                .get("contributor_employer")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            contributor_occupation: line
+                .get("contributor_occupation")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
             contribution_date: line.get("contribution_date").and_then(parse_fec_date),
             contribution_amount_cents: line.get("contribution_amount").and_then(parse_money_cents),
-            contribution_purpose_descrip: line.get("contribution_purpose_descrip").filter(|s| !s.is_empty()).map(str::to_string),
-            memo_code: line.get("memo_code").filter(|s| !s.is_empty()).map(str::to_string),
-            memo_text_description: line.get("memo_text_description").filter(|s| !s.is_empty()).map(str::to_string),
+            contribution_purpose_descrip: line
+                .get("contribution_purpose_descrip")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            memo_code: line
+                .get("memo_code")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            memo_text_description: line
+                .get("memo_text_description")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
         })
     }
 }
@@ -149,18 +192,48 @@ impl TryFrom<&ParsedLine> for ScheduleB {
     fn try_from(line: &ParsedLine) -> Result<Self, Self::Error> {
         Ok(ScheduleB {
             filer_committee_id: field(line, "filer_committee_id_number")?.to_string(),
-            transaction_id: line.get("transaction_id_number").filter(|s| !s.is_empty()).map(str::to_string),
-            entity_type: line.get("entity_type").filter(|s| !s.is_empty()).map(str::to_string),
-            payee_name: line.get("payee_name").filter(|s| !s.is_empty()).map(str::to_string),
-            payee_city: line.get("payee_city").filter(|s| !s.is_empty()).map(str::to_string),
-            payee_state: line.get("payee_state").filter(|s| !s.is_empty()).map(str::to_string),
-            payee_zip_code: line.get("payee_zip_code").filter(|s| !s.is_empty()).map(str::to_string),
+            transaction_id: line
+                .get("transaction_id_number")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            entity_type: line
+                .get("entity_type")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            payee_name: line
+                .get("payee_name")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            payee_city: line
+                .get("payee_city")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            payee_state: line
+                .get("payee_state")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            payee_zip_code: line
+                .get("payee_zip_code")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
             expenditure_date: line.get("expenditure_date").and_then(parse_fec_date),
             expenditure_amount_cents: line.get("expenditure_amount").and_then(parse_money_cents),
-            expenditure_purpose_descrip: line.get("expenditure_purpose_descrip").filter(|s| !s.is_empty()).map(str::to_string),
-            category_code: line.get("category_code").filter(|s| !s.is_empty()).map(str::to_string),
-            memo_code: line.get("memo_code").filter(|s| !s.is_empty()).map(str::to_string),
-            memo_text_description: line.get("memo_text_description").filter(|s| !s.is_empty()).map(str::to_string),
+            expenditure_purpose_descrip: line
+                .get("expenditure_purpose_descrip")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            category_code: line
+                .get("category_code")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            memo_code: line
+                .get("memo_code")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            memo_text_description: line
+                .get("memo_text_description")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
         })
     }
 }
@@ -192,20 +265,53 @@ impl TryFrom<&ParsedLine> for ScheduleE {
     fn try_from(line: &ParsedLine) -> Result<Self, Self::Error> {
         Ok(ScheduleE {
             filer_committee_id: field(line, "filer_committee_id_number")?.to_string(),
-            transaction_id: line.get("transaction_id_number").filter(|s| !s.is_empty()).map(str::to_string),
-            payee_name: line.get("payee_name").filter(|s| !s.is_empty()).map(str::to_string),
-            support_oppose_code: line.get("support_oppose_code").filter(|s| !s.is_empty()).map(str::to_string),
-            candidate_id_number: line.get("candidate_id_number").filter(|s| !s.is_empty()).map(str::to_string),
-            candidate_name: line.get("candidate_name").filter(|s| !s.is_empty()).map(str::to_string),
-            candidate_office: line.get("candidate_office").filter(|s| !s.is_empty()).map(str::to_string),
-            candidate_state: line.get("candidate_state").filter(|s| !s.is_empty()).map(str::to_string),
-            candidate_district: line.get("candidate_district").filter(|s| !s.is_empty()).map(str::to_string),
+            transaction_id: line
+                .get("transaction_id_number")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            payee_name: line
+                .get("payee_name")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            support_oppose_code: line
+                .get("support_oppose_code")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            candidate_id_number: line
+                .get("candidate_id_number")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            candidate_name: line
+                .get("candidate_name")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            candidate_office: line
+                .get("candidate_office")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            candidate_state: line
+                .get("candidate_state")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            candidate_district: line
+                .get("candidate_district")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
             dissemination_date: line.get("dissemination_date").and_then(parse_fec_date),
             disbursement_date: line.get("disbursement_date").and_then(parse_fec_date),
             expenditure_amount_cents: line.get("expenditure_amount").and_then(parse_money_cents),
-            expenditure_purpose_descrip: line.get("expenditure_purpose_descrip").filter(|s| !s.is_empty()).map(str::to_string),
-            memo_code: line.get("memo_code").filter(|s| !s.is_empty()).map(str::to_string),
-            memo_text_description: line.get("memo_text_description").filter(|s| !s.is_empty()).map(str::to_string),
+            expenditure_purpose_descrip: line
+                .get("expenditure_purpose_descrip")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            memo_code: line
+                .get("memo_code")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            memo_text_description: line
+                .get("memo_text_description")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
         })
     }
 }
@@ -238,20 +344,29 @@ impl TryFrom<&indexmap::IndexMap<String, String>> for Form3XSummary {
         let get = |name: &str| fields.get(name).map(|s| s.as_str());
         let filer_committee_id = get("filer_committee_id_number")
             .filter(|s| !s.is_empty())
-            .ok_or(TypedViewError { table: "F3X", field: "filer_committee_id_number" })?
+            .ok_or(TypedViewError {
+                table: "F3X",
+                field: "filer_committee_id_number",
+            })?
             .to_string();
 
         Ok(Form3XSummary {
             filer_committee_id,
-            committee_name: get("committee_name").filter(|s| !s.is_empty()).map(str::to_string),
-            report_code: get("report_code").filter(|s| !s.is_empty()).map(str::to_string),
+            committee_name: get("committee_name")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            report_code: get("report_code")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
             coverage_from_date: get("coverage_from_date").and_then(parse_fec_date),
             coverage_through_date: get("coverage_through_date").and_then(parse_fec_date),
-            cash_on_hand_close_of_period_cents: get("col_a_cash_on_hand_close_of_period").and_then(parse_money_cents),
+            cash_on_hand_close_of_period_cents: get("col_a_cash_on_hand_close_of_period")
+                .and_then(parse_money_cents),
             total_receipts_cents: get("col_a_total_receipts").and_then(parse_money_cents),
             total_disbursements_cents: get("col_a_total_disbursements").and_then(parse_money_cents),
             cycle_total_receipts_cents: get("col_b_total_receipts").and_then(parse_money_cents),
-            cycle_total_disbursements_cents: get("col_b_total_disbursements").and_then(parse_money_cents),
+            cycle_total_disbursements_cents: get("col_b_total_disbursements")
+                .and_then(parse_money_cents),
         })
     }
 }
@@ -291,7 +406,10 @@ mod tests {
 
     #[test]
     fn parses_fec_dates() {
-        assert_eq!(parse_fec_date("20260914"), NaiveDate::from_ymd_opt(2026, 9, 14));
+        assert_eq!(
+            parse_fec_date("20260914"),
+            NaiveDate::from_ymd_opt(2026, 9, 14)
+        );
         assert_eq!(parse_fec_date(""), None);
         assert_eq!(parse_fec_date("00000000"), None);
         assert_eq!(parse_fec_date("garbage"), None);
@@ -300,11 +418,18 @@ mod tests {
     #[test]
     fn schedule_a_try_from_maps_fields() {
         let mut fields = IndexMap::new();
-        fields.insert("filer_committee_id_number".to_string(), "C00123456".to_string());
+        fields.insert(
+            "filer_committee_id_number".to_string(),
+            "C00123456".to_string(),
+        );
         fields.insert("contributor_name".to_string(), "SMITH, JANE".to_string());
         fields.insert("contribution_date".to_string(), "20260101".to_string());
         fields.insert("contribution_amount".to_string(), "500.00".to_string());
-        let line = ParsedLine { raw_form_type: "SA11AI".to_string(), table: "SchA", fields };
+        let line = ParsedLine {
+            raw_form_type: "SA11AI".to_string(),
+            table: "SchA",
+            fields,
+        };
 
         let sa = ScheduleA::try_from(&line).unwrap();
         assert_eq!(sa.filer_committee_id, "C00123456");
@@ -315,7 +440,11 @@ mod tests {
 
     #[test]
     fn schedule_a_try_from_errors_on_missing_required_field() {
-        let line = ParsedLine { raw_form_type: "SA11AI".to_string(), table: "SchA", fields: IndexMap::new() };
+        let line = ParsedLine {
+            raw_form_type: "SA11AI".to_string(),
+            table: "SchA",
+            fields: IndexMap::new(),
+        };
         assert!(ScheduleA::try_from(&line).is_err());
     }
 }

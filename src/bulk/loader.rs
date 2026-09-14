@@ -22,8 +22,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 
-use sqlx::postgres::PgPoolCopyExt;
 use sqlx::PgPool;
+use sqlx::postgres::PgPoolCopyExt;
 
 use super::error::{BulkError, Result};
 use super::source::BulkSource;
@@ -44,16 +44,26 @@ pub struct LoadReport {
 /// into `source.table` tagged with `cycle`. `limit` caps the number of
 /// data rows read (useful for sampling multi-gigabyte sources without a
 /// full download); `None` loads every row.
-pub async fn load(pool: &PgPool, source: &'static BulkSource, input: Input, cycle: u16, limit: Option<u64>) -> Result<LoadReport> {
-    let staged = tokio::task::spawn_blocking(move || stage_to_temp_csv(source, input, cycle, limit))
-        .await
-        .map_err(|e| BulkError::Io(std::io::Error::other(e)))??;
+pub async fn load(
+    pool: &PgPool,
+    source: &'static BulkSource,
+    input: Input,
+    cycle: u16,
+    limit: Option<u64>,
+) -> Result<LoadReport> {
+    let staged =
+        tokio::task::spawn_blocking(move || stage_to_temp_csv(source, input, cycle, limit))
+            .await
+            .map_err(|e| BulkError::Io(std::io::Error::other(e)))??;
 
     let rows_loaded = copy_into_table(pool, source, &staged.path).await?;
     // Best-effort cleanup; a leftover temp file is harmless.
     let _ = std::fs::remove_file(&staged.path);
 
-    Ok(LoadReport { rows_loaded, table: source.table })
+    Ok(LoadReport {
+        rows_loaded,
+        table: source.table,
+    })
 }
 
 struct StagedFile {
@@ -63,11 +73,18 @@ struct StagedFile {
 /// Blocking: reads the zip (local file or streamed HTTP body), decodes the
 /// first entry, re-delimits + appends `cycle`, and writes to a fresh temp
 /// file. Runs entirely off the async runtime.
-fn stage_to_temp_csv(source: &BulkSource, input: Input, cycle: u16, limit: Option<u64>) -> Result<StagedFile> {
+fn stage_to_temp_csv(
+    source: &BulkSource,
+    input: Input,
+    cycle: u16,
+    limit: Option<u64>,
+) -> Result<StagedFile> {
     let reader: Box<dyn Read> = match input {
         Input::LocalFile(path) => Box::new(BufReader::new(File::open(path)?)),
         Input::Url(url) => {
-            let resp = ureq::get(&url).call().map_err(|e| BulkError::Http(e.to_string()))?;
+            let resp = ureq::get(&url)
+                .call()
+                .map_err(|e| BulkError::Http(e.to_string()))?;
             let body = resp.into_body();
             let pb = match body.content_length() {
                 Some(len) => indicatif::ProgressBar::new(len).with_style(
@@ -85,35 +102,46 @@ fn stage_to_temp_csv(source: &BulkSource, input: Input, cycle: u16, limit: Optio
     };
 
     let mut reader = reader;
-    let entry = loop {
-        match zip::read::read_zipfile_from_stream(&mut reader)? {
-            Some(file) => break file,
-            None => {
-                return Err(BulkError::Zip(format!("no entries found in {} archive", source.name)));
-            }
+    let entry = match zip::read::read_zipfile_from_stream(&mut reader)? {
+        Some(file) => file,
+        None => {
+            return Err(BulkError::Zip(format!(
+                "no entries found in {} archive",
+                source.name
+            )));
         }
     };
 
-    let out_path = std::env::temp_dir().join(format!("hardmoney-{}-{}.stage.csv", source.name, std::process::id()));
+    let out_path = std::env::temp_dir().join(format!(
+        "hardmoney-{}-{}.stage.csv",
+        source.name,
+        std::process::id()
+    ));
     let mut out = std::io::BufWriter::new(File::create(&out_path)?);
 
-    let mut lines = BufReader::new(entry).lines();
+    let lines = BufReader::new(entry).lines();
     let expected = source.columns.len();
-    let mut line_no: u64 = 0;
     let mut written: u64 = 0;
-    while let Some(line) = lines.next() {
+    for (line_no, line) in (1u64..).zip(lines) {
         let line = line?;
-        line_no += 1;
         if line.trim().is_empty() {
             continue;
         }
         let mut fields: Vec<&str> = line.split('|').collect();
         if fields.len() < expected {
-            return Err(BulkError::MalformedRow { line_no, expected, found: fields.len() });
+            return Err(BulkError::MalformedRow {
+                line_no,
+                expected,
+                found: fields.len(),
+            });
         }
         if fields.len() > expected {
             if !source.allow_extra_trailing_fields {
-                return Err(BulkError::MalformedRow { line_no, expected, found: fields.len() });
+                return Err(BulkError::MalformedRow {
+                    line_no,
+                    expected,
+                    found: fields.len(),
+                });
             }
             fields.truncate(expected);
         }
@@ -122,13 +150,13 @@ fn stage_to_temp_csv(source: &BulkSource, input: Input, cycle: u16, limit: Optio
             write_csv_field(&mut out, field)?;
             out.write_all(b"|")?;
         }
-        write!(out, "{cycle}\n")?;
+        writeln!(out, "{cycle}")?;
         written += 1;
 
-        if let Some(limit) = limit {
-            if written >= limit {
-                break;
-            }
+        if let Some(limit) = limit
+            && written >= limit
+        {
+            break;
         }
     }
     out.flush()?;

@@ -65,10 +65,11 @@ fn parse_column_position(cell: &str) -> Option<usize> {
     if let Ok(n) = cell.parse::<usize>() {
         return (n >= 1).then_some(n);
     }
-    if let Ok(f) = cell.parse::<f64>() {
-        if f >= 1.0 && f.fract() == 0.0 {
-            return Some(f as usize);
-        }
+    if let Ok(f) = cell.parse::<f64>()
+        && f >= 1.0
+        && f.fract() == 0.0
+    {
+        return Some(f as usize);
     }
     None
 }
@@ -115,23 +116,23 @@ impl Line {
                 continue;
             }
             for &i in &bucket_order {
-                if let Some(pos_str) = row.get(i) {
-                    if let Some(pos_1indexed) = parse_column_position(pos_str) {
-                        let zero_indexed = pos_1indexed - 1;
-                        let columns = bucket_columns.get_mut(&i).unwrap();
-                        if let Some(&existing) = columns.get(&canonical) {
-                            if existing != zero_indexed {
-                                return Err(FecError::DuplicateCanonicalField {
-                                    form: form.to_string(),
-                                    version_bucket: header.get(i).unwrap_or("").to_string(),
-                                    canonical: canonical.clone(),
-                                    first_position: existing + 1,
-                                    second_position: pos_1indexed,
-                                });
-                            }
-                        } else {
-                            columns.insert(canonical.clone(), zero_indexed);
+                if let Some(pos_str) = row.get(i)
+                    && let Some(pos_1indexed) = parse_column_position(pos_str)
+                {
+                    let zero_indexed = pos_1indexed - 1;
+                    let columns = bucket_columns.get_mut(&i).unwrap();
+                    if let Some(&existing) = columns.get(&canonical) {
+                        if existing != zero_indexed {
+                            return Err(FecError::DuplicateCanonicalField {
+                                form: form.to_string(),
+                                version_bucket: header.get(i).unwrap_or("").to_string(),
+                                canonical: canonical.clone(),
+                                first_position: existing + 1,
+                                second_position: pos_1indexed,
+                            });
                         }
+                    } else {
+                        columns.insert(canonical.clone(), zero_indexed);
                     }
                 }
             }
@@ -162,11 +163,17 @@ impl Line {
     /// Port of `Line.parse_line`: parses one split raw line into a
     /// canonical-field-name -> cleaned-value map, using the column
     /// positions for the bucket matching `version`.
-    pub fn parse_line(&self, line_array: &[String], version: &str) -> Result<IndexMap<String, String>> {
-        let bucket = self.find_bucket(version).ok_or_else(|| FecError::NoMatchingVersionBucket {
-            form: self.form.clone(),
-            version: version.to_string(),
-        })?;
+    pub fn parse_line(
+        &self,
+        line_array: &[String],
+        version: &str,
+    ) -> Result<IndexMap<String, String>> {
+        let bucket =
+            self.find_bucket(version)
+                .ok_or_else(|| FecError::NoMatchingVersionBucket {
+                    form: self.form.clone(),
+                    version: version.to_string(),
+                })?;
 
         let mut out = IndexMap::with_capacity(bucket.columns.len());
         for (field, &pos) in &bucket.columns {

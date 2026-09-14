@@ -1,5 +1,5 @@
-use axum::extract::{Path, Query, State};
 use axum::Json;
+use axum::extract::{Path, Query, State};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
@@ -35,7 +35,10 @@ pub struct ListParams {
     pub offset: Option<i64>,
 }
 
-pub async fn list(State(pool): State<PgPool>, Query(params): Query<ListParams>) -> Result<Json<Vec<Candidate>>, ApiError> {
+pub async fn list(
+    State(pool): State<PgPool>,
+    Query(params): Query<ListParams>,
+) -> Result<Json<Vec<Candidate>>, ApiError> {
     let page = Pagination::new(params.limit, params.offset);
     let rows = sqlx::query_as::<_, Candidate>(
         "SELECT cand_id, cycle, cand_name, cand_pty_affiliation, cand_election_yr, cand_office_st, \
@@ -59,7 +62,10 @@ pub async fn list(State(pool): State<PgPool>, Query(params): Query<ListParams>) 
     Ok(Json(rows))
 }
 
-pub async fn get(State(pool): State<PgPool>, Path(cand_id): Path<String>) -> Result<Json<Vec<Candidate>>, ApiError> {
+pub async fn get(
+    State(pool): State<PgPool>,
+    Path(cand_id): Path<String>,
+) -> Result<Json<Vec<Candidate>>, ApiError> {
     let rows = sqlx::query_as::<_, Candidate>(
         "SELECT cand_id, cycle, cand_name, cand_pty_affiliation, cand_election_yr, cand_office_st, \
                 cand_office, cand_office_district, cand_ici, cand_status, cand_pcc, cand_city, cand_st, cand_zip \
@@ -69,7 +75,9 @@ pub async fn get(State(pool): State<PgPool>, Path(cand_id): Path<String>) -> Res
     .fetch_all(&pool)
     .await?;
     if rows.is_empty() {
-        return Err(ApiError::NotFound(format!("no candidate with cand_id {cand_id}")));
+        return Err(ApiError::NotFound(format!(
+            "no candidate with cand_id {cand_id}"
+        )));
     }
     Ok(Json(rows))
 }

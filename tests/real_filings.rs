@@ -13,7 +13,9 @@ use std::path::Path;
 use hardmoney::Filing;
 
 fn fixture(name: &str) -> Filing {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name);
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("reading fixture {name}: {e}"));
     Filing::parse_bytes(&bytes).unwrap_or_else(|e| panic!("parsing fixture {name}: {e}"))
 }
@@ -36,12 +38,19 @@ fn fixture_names() -> Vec<String> {
 #[test]
 fn every_fixture_parses_and_dispatches_cleanly() {
     let names = fixture_names();
-    assert!(names.len() >= 17, "expected at least 17 real-filing fixtures, found {}", names.len());
+    assert!(
+        names.len() >= 17,
+        "expected at least 17 real-filing fixtures, found {}",
+        names.len()
+    );
 
     for name in names {
         let filing = fixture(&name);
         assert!(!filing.version.is_empty(), "{name}: missing version");
-        assert!(!filing.raw_form_type.is_empty(), "{name}: missing form type");
+        assert!(
+            !filing.raw_form_type.is_empty(),
+            "{name}: missing form type"
+        );
         assert!(
             filing.is_allowed(),
             "{name}: base form type '{}' is not in the allowed top-level forms",
@@ -98,9 +107,20 @@ fn older_spec_version_fixtures_use_the_correct_bucket() {
     assert_eq!(v3.version, "3.00");
     assert_eq!(v3.base_form_type, "F3X");
     assert!(v3.is_amendment);
-    assert_eq!(v3.summary.get("col_a_total_receipts").map(String::as_str), Some("180046.52"));
-    assert_eq!(v3.summary.get("col_a_total_contributions_refunds").map(String::as_str), Some("538.36"));
-    assert!(!v3.lines.is_empty(), "v3 filing should have real Schedule A/B body lines");
+    assert_eq!(
+        v3.summary.get("col_a_total_receipts").map(String::as_str),
+        Some("180046.52")
+    );
+    assert_eq!(
+        v3.summary
+            .get("col_a_total_contributions_refunds")
+            .map(String::as_str),
+        Some("538.36")
+    );
+    assert!(
+        !v3.lines.is_empty(),
+        "v3 filing should have real Schedule A/B body lines"
+    );
     assert!(v3.lines.iter().any(|l| l.table == "SchA"));
     assert!(v3.lines.iter().any(|l| l.table == "SchB"));
 
@@ -117,7 +137,10 @@ fn older_spec_version_fixtures_use_the_correct_bucket() {
     assert_eq!(v6_1.version, "6.1");
     assert_eq!(v6_1.base_form_type, "F3X");
     assert!(v6_1.summary.contains_key("col_a_total_receipts"));
-    assert!(v6_1.summary.contains_key("col_a_federal_election_activity_total"));
+    assert!(
+        v6_1.summary
+            .contains_key("col_a_federal_election_activity_total")
+    );
 }
 
 /// `F3XN_2011835.fec`'s header has a real stray trailing space on the
@@ -136,12 +159,18 @@ fn f24n_dispatches_to_schedule_e_with_correct_fields() {
     assert_eq!(filing.raw_form_type, "F24N");
     assert_eq!(filing.base_form_type, "F24");
     assert!(!filing.is_amendment);
-    assert_eq!(filing.summary.get("committee_name").map(String::as_str), Some("OHIO FLYER PAC"));
+    assert_eq!(
+        filing.summary.get("committee_name").map(String::as_str),
+        Some("OHIO FLYER PAC")
+    );
 
     assert_eq!(filing.lines.len(), 1);
     let se = &filing.lines[0];
     assert_eq!(se.table, "SchE");
-    assert_eq!(se.get("payee_organization_name"), Some("STRATEGIC MEDIA PLACEMENT INC."));
+    assert_eq!(
+        se.get("payee_organization_name"),
+        Some("STRATEGIC MEDIA PLACEMENT INC.")
+    );
     assert_eq!(se.get("expenditure_amount"), Some("1074900.00"));
     assert_eq!(se.get("candidate_last_name"), Some("BROWN"));
     assert_eq!(se.get("candidate_first_name"), Some("SHERROD"));
@@ -153,8 +182,14 @@ fn f24n_second_sample_has_two_schedule_e_lines() {
     let filing = fixture("F24N_2011832.fec");
     assert_eq!(filing.lines.len(), 2);
     assert!(filing.lines.iter().all(|l| l.table == "SchE"));
-    assert_eq!(filing.lines[0].get("payee_organization_name"), Some("DECLARATION MEDIA LLC"));
-    assert_eq!(filing.lines[1].get("payee_organization_name"), Some("MVAR MEDIA, LLC"));
+    assert_eq!(
+        filing.lines[0].get("payee_organization_name"),
+        Some("DECLARATION MEDIA LLC")
+    );
+    assert_eq!(
+        filing.lines[1].get("payee_organization_name"),
+        Some("MVAR MEDIA, LLC")
+    );
 }
 
 /// Structurally the richest fixture: a 132KB real Form 3A amendment with
@@ -169,11 +204,24 @@ fn f3a_large_filing_covers_diverse_schedules() {
     assert_eq!(filing.amends_filing.as_deref(), Some("1997089"));
 
     let tables: HashSet<&str> = filing.lines.iter().map(|l| l.table).collect();
-    assert!(tables.contains("SchA"), "expected at least one Schedule A line");
-    assert!(tables.contains("SchB"), "expected at least one Schedule B line");
-    assert!(tables.contains("SchC"), "expected the legacy SC/10 line to dispatch to SchC");
+    assert!(
+        tables.contains("SchA"),
+        "expected at least one Schedule A line"
+    );
+    assert!(
+        tables.contains("SchB"),
+        "expected at least one Schedule B line"
+    );
+    assert!(
+        tables.contains("SchC"),
+        "expected the legacy SC/10 line to dispatch to SchC"
+    );
 
-    let sc10 = filing.lines.iter().find(|l| l.raw_form_type == "SC/10").expect("SC/10 line present");
+    let sc10 = filing
+        .lines
+        .iter()
+        .find(|l| l.raw_form_type == "SC/10")
+        .expect("SC/10 line present");
     assert_eq!(sc10.table, "SchC");
 
     // Real SA11AI and SA11D lines are both present and both dispatch to
@@ -181,8 +229,20 @@ fn f3a_large_filing_covers_diverse_schedules() {
     // schedules).
     assert!(filing.lines.iter().any(|l| l.raw_form_type == "SA11AI"));
     assert!(filing.lines.iter().any(|l| l.raw_form_type == "SA11D"));
-    assert!(filing.lines.iter().filter(|l| l.raw_form_type == "SA11AI").all(|l| l.table == "SchA"));
-    assert!(filing.lines.iter().filter(|l| l.raw_form_type == "SA11D").all(|l| l.table == "SchA"));
+    assert!(
+        filing
+            .lines
+            .iter()
+            .filter(|l| l.raw_form_type == "SA11AI")
+            .all(|l| l.table == "SchA")
+    );
+    assert!(
+        filing
+            .lines
+            .iter()
+            .filter(|l| l.raw_form_type == "SA11D")
+            .all(|l| l.table == "SchA")
+    );
 }
 
 #[test]
@@ -191,8 +251,14 @@ fn f3a_second_sample_has_schedule_d_debt_lines() {
     let tables: HashSet<&str> = filing.lines.iter().map(|l| l.table).collect();
     assert!(tables.contains("SchA"));
     assert!(tables.contains("SchB"));
-    assert!(tables.contains("SchC"), "SC/10 line should dispatch to SchC");
-    assert!(tables.contains("SchD"), "SD10 lines should dispatch to SchD");
+    assert!(
+        tables.contains("SchC"),
+        "SC/10 line should dispatch to SchC"
+    );
+    assert!(
+        tables.contains("SchD"),
+        "SD10 lines should dispatch to SchD"
+    );
 }
 
 /// `F3XA_2011821.fec` is the other structurally rich fixture: Schedule A,
@@ -209,12 +275,20 @@ fn f3xa_covers_schedule_e_and_delimited_text_records() {
 
     let tables: HashSet<&str> = filing.lines.iter().map(|l| l.table).collect();
     for expected in ["SchA", "SchB", "SchD", "SchE", "TEXT"] {
-        assert!(tables.contains(expected), "expected table '{expected}' among: {tables:?}");
+        assert!(
+            tables.contains(expected),
+            "expected table '{expected}' among: {tables:?}"
+        );
     }
 
     let text_lines: Vec<_> = filing.lines.iter().filter(|l| l.table == "TEXT").collect();
     assert_eq!(text_lines.len(), 3);
-    assert!(text_lines[0].get("back_reference_tran_id_number").map(|s| !s.is_empty()).unwrap_or(false));
+    assert!(
+        text_lines[0]
+            .get("back_reference_tran_id_number")
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+    );
     assert!(text_lines[0].get("text").unwrap().contains("EARMARKED"));
 }
 
@@ -238,7 +312,11 @@ fn f3xn_large_filing_is_not_an_amendment() {
     // case-insensitively against the original lowercase bytes, which this
     // assertion (indirectly, via the line surviving to become a ParsedLine
     // at all) confirms.
-    let line = filing.lines.iter().find(|l| l.raw_form_type == "SB21B").expect("SB21B line present");
+    let line = filing
+        .lines
+        .iter()
+        .find(|l| l.raw_form_type == "SB21B")
+        .expect("SB21B line present");
     assert_eq!(line.table, "SchB");
 }
 
@@ -277,36 +355,63 @@ fn f3n_dispatches_delimited_text_record() {
 fn f99_single_paragraph_begintext_block_is_recovered() {
     let filing = fixture("F99_2011828.fec");
     assert_eq!(filing.base_form_type, "F99");
-    assert!(filing.lines.is_empty(), "F99's only content is the summary line + free text block");
+    assert!(
+        filing.lines.is_empty(),
+        "F99's only content is the summary line + free text block"
+    );
 
     // The delimited `text` column (position 18 in the 8.5 bucket) is blank
     // in the raw bytes; Filing::parse must splice the BEGINTEXT block's
     // content into it rather than leaving it empty.
-    let text = filing.summary.get("text").expect("text field recovered from BEGINTEXT block");
+    let text = filing
+        .summary
+        .get("text")
+        .expect("text field recovered from BEGINTEXT block");
     assert!(text.starts_with("The independent expenditure was timely and correctly filed"));
     assert!(text.ends_with("This amended report corrects that error."));
 
-    assert_eq!(filing.summary.get("committee_name").map(String::as_str), Some("REVIVE OREGON"));
-    assert_eq!(filing.summary.get("treasurer_last_name").map(String::as_str), Some("MARSTON"));
+    assert_eq!(
+        filing.summary.get("committee_name").map(String::as_str),
+        Some("REVIVE OREGON")
+    );
+    assert_eq!(
+        filing
+            .summary
+            .get("treasurer_last_name")
+            .map(String::as_str),
+        Some("MARSTON")
+    );
 }
 
 #[test]
 fn f99_multi_paragraph_begintext_block_preserves_line_structure_and_case() {
     let filing = fixture("F99_2011833.fec");
-    let text = filing.summary.get("text").expect("text field recovered from BEGINTEXT block");
+    let text = filing
+        .summary
+        .get("text")
+        .expect("text field recovered from BEGINTEXT block");
 
     // Real multi-paragraph letter: must preserve blank lines between
     // paragraphs and must NOT be uppercased like ordinary delimited fields
     // (clean_entry uppercases; free text must bypass that).
-    assert!(text.contains("Michael Dobi"), "mixed case must survive: {text}");
-    assert!(text.contains("\n\n"), "blank line between paragraphs must survive: {text}");
+    assert!(
+        text.contains("Michael Dobi"),
+        "mixed case must survive: {text}"
+    );
+    assert!(
+        text.contains("\n\n"),
+        "blank line between paragraphs must survive: {text}"
+    );
     assert!(text.starts_with("September 14, 2026"));
     assert!(text.trim_end().ends_with("C00466482"));
 
     // Ordinary delimited fields (unlike the free-text block) go through
     // clean_entry, which uppercases -- the real filing's own casing was
     // "Families for James Lankford".
-    assert_eq!(filing.summary.get("committee_name").map(String::as_str), Some("FAMILIES FOR JAMES LANKFORD"));
+    assert_eq!(
+        filing.summary.get("committee_name").map(String::as_str),
+        Some("FAMILIES FOR JAMES LANKFORD")
+    );
 }
 
 #[test]

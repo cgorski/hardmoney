@@ -40,8 +40,8 @@
 
 pub mod error;
 pub mod filing;
-pub mod format_data;
 pub mod form;
+pub mod format_data;
 pub mod header;
 pub mod line;
 pub mod typed;
@@ -50,4 +50,7 @@ pub mod utils;
 pub use error::{FecError, Result};
 pub use filing::{Filing, ParsedLine};
 pub use header::HeaderMap;
-pub use typed::{Form3XSummary, ScheduleA, ScheduleB, ScheduleE, TypedViewError, parse_fec_date, parse_money_cents};
+pub use typed::{
+    Form3XSummary, ScheduleA, ScheduleB, ScheduleE, TypedViewError, parse_fec_date,
+    parse_money_cents,
+};

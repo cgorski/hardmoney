@@ -22,8 +22,13 @@ fn indexmap_to_json(map: &indexmap::IndexMap<String, String>) -> serde_json::Val
 /// Parses `bytes` as a `.fec` filing and stores it (plus any Schedule E
 /// lines it contains) under `filing_id`, replacing any prior ingestion of
 /// the same id.
-pub async fn ingest_filing_bytes(pool: &PgPool, filing_id: i64, bytes: &[u8]) -> Result<IngestReport> {
-    let filing = Filing::parse_bytes(bytes).map_err(|e| super::error::BulkError::Zip(e.to_string()))?;
+pub async fn ingest_filing_bytes(
+    pool: &PgPool,
+    filing_id: i64,
+    bytes: &[u8],
+) -> Result<IngestReport> {
+    let filing =
+        Filing::parse_bytes(bytes).map_err(|e| super::error::BulkError::Zip(e.to_string()))?;
     ingest_filing(pool, filing_id, &filing).await
 }
 
@@ -36,7 +41,8 @@ pub async fn ingest_filing(pool: &PgPool, filing_id: i64, filing: &Filing) -> Re
     let header_json = indexmap_to_json(&filing.headers);
     let summary_json = indexmap_to_json(&filing.summary);
     let committee_id = filing.summary.get("filer_committee_id_number").cloned();
-    let amends_filing_id: Option<i64> = filing.amends_filing.as_deref().and_then(|s| s.parse().ok());
+    let amends_filing_id: Option<i64> =
+        filing.amends_filing.as_deref().and_then(|s| s.parse().ok());
 
     let mut tx = pool.begin().await?;
 
@@ -59,11 +65,16 @@ pub async fn ingest_filing(pool: &PgPool, filing_id: i64, filing: &Filing) -> Re
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query("DELETE FROM schedule_e_lines WHERE filing_id = $1").bind(filing_id).execute(&mut *tx).await?;
+    sqlx::query("DELETE FROM schedule_e_lines WHERE filing_id = $1")
+        .bind(filing_id)
+        .execute(&mut *tx)
+        .await?;
 
     let mut schedule_e_lines = 0usize;
     for (idx, line) in filing.lines.iter().enumerate() {
-        let Ok(se) = ScheduleE::try_from(line) else { continue };
+        let Ok(se) = ScheduleE::try_from(line) else {
+            continue;
+        };
         let amt = se.expenditure_amount_cents.map(|c| c as f64 / 100.0);
         sqlx::query(
             "INSERT INTO schedule_e_lines \
@@ -93,5 +104,8 @@ pub async fn ingest_filing(pool: &PgPool, filing_id: i64, filing: &Filing) -> Re
 
     tx.commit().await?;
 
-    Ok(IngestReport { form_type: filing.raw_form_type.clone(), schedule_e_lines })
+    Ok(IngestReport {
+        form_type: filing.raw_form_type.clone(),
+        schedule_e_lines,
+    })
 }
