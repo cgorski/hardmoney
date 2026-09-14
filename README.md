@@ -1,5 +1,7 @@
 # hardmoney
 
+[![CI](https://github.com/cgorski/hardmoney/actions/workflows/ci.yml/badge.svg)](https://github.com/cgorski/hardmoney/actions/workflows/ci.yml)
+
 A single Rust crate for FEC campaign-finance data, usable as a library or
 as a CLI: a parser for raw `.fec` electronic filings, a Postgres ETL for
 the FEC's bulk-data downloads, and an Axum REST API serving the tables it
