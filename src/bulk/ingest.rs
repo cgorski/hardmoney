@@ -7,9 +7,27 @@
 
 use sqlx::PgPool;
 
-use crate::parser::{Filing, ScheduleE};
+use crate::parser::{Filing, ParsedLine, ScheduleE};
 
 use super::error::Result;
+
+/// Picks out the genuine Schedule E (independent expenditure) lines from a
+/// parsed filing, paired with their original position in `filing.lines`.
+///
+/// This restricts to `table == "SchE"` before attempting the typed-view
+/// conversion. `ScheduleE::try_from` only requires `filer_committee_id_number`
+/// to succeed -- a field present on nearly every schedule (SchA, SchB, SchC,
+/// ...) -- so calling it on lines from other tables would misfile them here
+/// as all-null "Schedule E" rows instead of being skipped as not applicable.
+fn schedule_e_lines(filing: &Filing) -> Vec<(usize, ScheduleE)> {
+    filing
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l): &(usize, &ParsedLine)| l.table == "SchE")
+        .filter_map(|(idx, line)| ScheduleE::try_from(line).ok().map(|se| (idx, se)))
+        .collect()
+}
 
 fn indexmap_to_json(map: &indexmap::IndexMap<String, String>) -> serde_json::Value {
     let mut obj = serde_json::Map::with_capacity(map.len());
@@ -70,11 +88,9 @@ pub async fn ingest_filing(pool: &PgPool, filing_id: i64, filing: &Filing) -> Re
         .execute(&mut *tx)
         .await?;
 
-    let mut schedule_e_lines = 0usize;
-    for (idx, line) in filing.lines.iter().enumerate() {
-        let Ok(se) = ScheduleE::try_from(line) else {
-            continue;
-        };
+    let extracted = schedule_e_lines(filing);
+    let mut inserted = 0usize;
+    for (idx, se) in &extracted {
         let amt = se.expenditure_amount_cents.map(|c| c as f64 / 100.0);
         sqlx::query(
             "INSERT INTO schedule_e_lines \
@@ -88,7 +104,7 @@ pub async fn ingest_filing(pool: &PgPool, filing_id: i64, filing: &Filing) -> Re
                 candidate_office_state = EXCLUDED.candidate_office_state, raw = EXCLUDED.raw",
         )
         .bind(filing_id)
-        .bind(idx as i32)
+        .bind(*idx as i32)
         .bind(&se.payee_name)
         .bind(amt)
         .bind(se.disbursement_date.or(se.dissemination_date))
@@ -96,16 +112,82 @@ pub async fn ingest_filing(pool: &PgPool, filing_id: i64, filing: &Filing) -> Re
         .bind(&se.candidate_id_number)
         .bind(&se.candidate_name)
         .bind(&se.candidate_state)
-        .bind(indexmap_to_json(&line.fields))
+        .bind(indexmap_to_json(&filing.lines[*idx].fields))
         .execute(&mut *tx)
         .await?;
-        schedule_e_lines += 1;
+        inserted += 1;
     }
 
     tx.commit().await?;
 
     Ok(IngestReport {
         form_type: filing.raw_form_type.clone(),
-        schedule_e_lines,
+        schedule_e_lines: inserted,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::filing::ParsedLine as PL;
+
+    fn line(table: &'static str, fields: &[(&str, &str)]) -> PL {
+        let mut map = indexmap::IndexMap::new();
+        for (k, v) in fields {
+            map.insert(k.to_string(), v.to_string());
+        }
+        PL {
+            raw_form_type: table.to_string(),
+            table,
+            fields: map,
+        }
+    }
+
+    // Regression test for the bug where `schedule_e_lines` accepted ANY
+    // line with a `filer_committee_id_number` (which is nearly every
+    // schedule), silently misfiling Schedule A/B/C rows as all-null
+    // "Schedule E" lines. Only genuine `table == "SchE"` lines must pass.
+    #[test]
+    fn only_genuine_schedule_e_lines_are_extracted() {
+        let filing = Filing {
+            raw_form_type: "F3A".to_string(),
+            base_form_type: "F3A".to_string(),
+            version: "8.5".to_string(),
+            is_amendment: false,
+            amends_filing: None,
+            headers: indexmap::IndexMap::new(),
+            summary: indexmap::IndexMap::new(),
+            lines: vec![
+                line(
+                    "SchA",
+                    &[
+                        ("filer_committee_id_number", "C00111111"),
+                        ("contribution_amount", "100.00"),
+                    ],
+                ),
+                line(
+                    "SchE",
+                    &[
+                        ("filer_committee_id_number", "C00111111"),
+                        ("payee_organization_name", "ACME MEDIA"),
+                        ("expenditure_amount", "250.00"),
+                    ],
+                ),
+                line(
+                    "SchB",
+                    &[
+                        ("filer_committee_id_number", "C00111111"),
+                        ("expenditure_amount", "75.00"),
+                    ],
+                ),
+            ],
+        };
+
+        let extracted = schedule_e_lines(&filing);
+        assert_eq!(extracted.len(), 1, "only the SchE line should be extracted");
+        let (idx, se) = &extracted[0];
+        assert_eq!(*idx, 1);
+        assert_eq!(se.payee_name.as_deref(), Some("ACME MEDIA"));
+        assert_eq!(se.expenditure_amount_cents, Some(25_000));
+    }
 }

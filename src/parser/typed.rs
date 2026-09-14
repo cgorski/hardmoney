@@ -91,6 +91,58 @@ fn field<'a>(line: &'a ParsedLine, name: &'static str) -> Result<&'a str, TypedV
     })
 }
 
+fn non_empty(line: &ParsedLine, name: &str) -> Option<String> {
+    line.get(name).filter(|s| !s.is_empty()).map(str::to_string)
+}
+
+/// Field names for the name-shaped columns a schedule/form may use --
+/// see [`combined_name`] for why both shapes need to be checked. Pass
+/// `""` for `organization` on schedules that have no such column (e.g. a
+/// Schedule E candidate, who is always an individual).
+struct NameFields {
+    single: &'static str,
+    organization: &'static str,
+    prefix: &'static str,
+    first: &'static str,
+    middle: &'static str,
+    last: &'static str,
+    suffix: &'static str,
+}
+
+/// Resolves a display name from the fields FEC uses across spec versions.
+///
+/// Older spec versions (roughly pre-8.0) report a single pre-joined name
+/// field (e.g. `contributor_name`, `payee_name`, `candidate_name`).
+/// Current spec versions (8.0 and later, which is what real-world filings
+/// use today) drop that combined field entirely and instead split the name
+/// into `*_organization_name` (for a committee/business payee or
+/// contributor) or `*_prefix`/`*_first_name`/`*_middle_name`/`*_last_name`/
+/// `*_suffix` (for a person). Without this fallback, every typed-view name
+/// field would be `None` for virtually all present-day filings even though
+/// the name is right there in the raw line -- so this checks both shapes
+/// to give a usable name across spec versions.
+fn combined_name(line: &ParsedLine, f: NameFields) -> Option<String> {
+    if let Some(name) = non_empty(line, f.single) {
+        return Some(name);
+    }
+    if let Some(org) = non_empty(line, f.organization) {
+        return Some(org);
+    }
+    let parts = [
+        non_empty(line, f.prefix),
+        non_empty(line, f.first),
+        non_empty(line, f.middle),
+        non_empty(line, f.last),
+        non_empty(line, f.suffix),
+    ];
+    let joined = parts.into_iter().flatten().collect::<Vec<_>>().join(" ");
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined)
+    }
+}
+
 /// Ergonomic view over a Schedule A line (itemized receipts/contributions).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScheduleA {
@@ -125,10 +177,18 @@ impl TryFrom<&ParsedLine> for ScheduleA {
                 .get("entity_type")
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
-            contributor_name: line
-                .get("contributor_name")
-                .filter(|s| !s.is_empty())
-                .map(str::to_string),
+            contributor_name: combined_name(
+                line,
+                NameFields {
+                    single: "contributor_name",
+                    organization: "contributor_organization_name",
+                    prefix: "contributor_prefix",
+                    first: "contributor_first_name",
+                    middle: "contributor_middle_name",
+                    last: "contributor_last_name",
+                    suffix: "contributor_suffix",
+                },
+            ),
             contributor_city: line
                 .get("contributor_city")
                 .filter(|s| !s.is_empty())
@@ -200,10 +260,18 @@ impl TryFrom<&ParsedLine> for ScheduleB {
                 .get("entity_type")
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
-            payee_name: line
-                .get("payee_name")
-                .filter(|s| !s.is_empty())
-                .map(str::to_string),
+            payee_name: combined_name(
+                line,
+                NameFields {
+                    single: "payee_name",
+                    organization: "payee_organization_name",
+                    prefix: "payee_prefix",
+                    first: "payee_first_name",
+                    middle: "payee_middle_name",
+                    last: "payee_last_name",
+                    suffix: "payee_suffix",
+                },
+            ),
             payee_city: line
                 .get("payee_city")
                 .filter(|s| !s.is_empty())
@@ -269,10 +337,18 @@ impl TryFrom<&ParsedLine> for ScheduleE {
                 .get("transaction_id_number")
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
-            payee_name: line
-                .get("payee_name")
-                .filter(|s| !s.is_empty())
-                .map(str::to_string),
+            payee_name: combined_name(
+                line,
+                NameFields {
+                    single: "payee_name",
+                    organization: "payee_organization_name",
+                    prefix: "payee_prefix",
+                    first: "payee_first_name",
+                    middle: "payee_middle_name",
+                    last: "payee_last_name",
+                    suffix: "payee_suffix",
+                },
+            ),
             support_oppose_code: line
                 .get("support_oppose_code")
                 .filter(|s| !s.is_empty())
@@ -281,10 +357,21 @@ impl TryFrom<&ParsedLine> for ScheduleE {
                 .get("candidate_id_number")
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
-            candidate_name: line
-                .get("candidate_name")
-                .filter(|s| !s.is_empty())
-                .map(str::to_string),
+            // Schedule E has no `candidate_organization_name` (candidates
+            // are always individuals), so the organization slot is an
+            // empty field name that never matches anything.
+            candidate_name: combined_name(
+                line,
+                NameFields {
+                    single: "candidate_name",
+                    organization: "",
+                    prefix: "candidate_prefix",
+                    first: "candidate_first_name",
+                    middle: "candidate_middle_name",
+                    last: "candidate_last_name",
+                    suffix: "candidate_suffix",
+                },
+            ),
             candidate_office: line
                 .get("candidate_office")
                 .filter(|s| !s.is_empty())
@@ -446,5 +533,71 @@ mod tests {
             fields: IndexMap::new(),
         };
         assert!(ScheduleA::try_from(&line).is_err());
+    }
+
+    // Current spec versions (8.0+, what real-world filings use today) never
+    // populate the single combined `contributor_name`/`payee_name`/
+    // `candidate_name` fields -- they only ever populate the split
+    // organization/last/first/middle fields. Without `combined_name`
+    // falling back to those, every typed-view name would silently be
+    // `None` for present-day filings. These tests cover both shapes that
+    // split form can take: an organization, and an individual.
+    #[test]
+    fn schedule_a_falls_back_to_organization_name_for_modern_spec_versions() {
+        let mut fields = IndexMap::new();
+        fields.insert(
+            "filer_committee_id_number".to_string(),
+            "C00123456".to_string(),
+        );
+        fields.insert(
+            "contributor_organization_name".to_string(),
+            "ACME WIDGETS PAC".to_string(),
+        );
+        let line = ParsedLine {
+            raw_form_type: "SA11AI".to_string(),
+            table: "SchA",
+            fields,
+        };
+
+        let sa = ScheduleA::try_from(&line).unwrap();
+        assert_eq!(sa.contributor_name.as_deref(), Some("ACME WIDGETS PAC"));
+    }
+
+    #[test]
+    fn schedule_a_falls_back_to_split_individual_name_for_modern_spec_versions() {
+        let mut fields = IndexMap::new();
+        fields.insert(
+            "filer_committee_id_number".to_string(),
+            "C00123456".to_string(),
+        );
+        fields.insert("contributor_first_name".to_string(), "JANE".to_string());
+        fields.insert("contributor_last_name".to_string(), "SMITH".to_string());
+        let line = ParsedLine {
+            raw_form_type: "SA11AI".to_string(),
+            table: "SchA",
+            fields,
+        };
+
+        let sa = ScheduleA::try_from(&line).unwrap();
+        assert_eq!(sa.contributor_name.as_deref(), Some("JANE SMITH"));
+    }
+
+    #[test]
+    fn schedule_e_candidate_name_falls_back_to_split_fields() {
+        let mut fields = IndexMap::new();
+        fields.insert(
+            "filer_committee_id_number".to_string(),
+            "C00123456".to_string(),
+        );
+        fields.insert("candidate_first_name".to_string(), "BERT".to_string());
+        fields.insert("candidate_last_name".to_string(), "MIZUSAWA".to_string());
+        let line = ParsedLine {
+            raw_form_type: "SE".to_string(),
+            table: "SchE",
+            fields,
+        };
+
+        let se = ScheduleE::try_from(&line).unwrap();
+        assert_eq!(se.candidate_name.as_deref(), Some("BERT MIZUSAWA"));
     }
 }

@@ -3,9 +3,9 @@
 [![CI](https://github.com/cgorski/hardmoney/actions/workflows/ci.yml/badge.svg)](https://github.com/cgorski/hardmoney/actions/workflows/ci.yml)
 
 A single Rust crate for FEC campaign-finance data, usable as a library or
-as a CLI: a parser for raw `.fec` electronic filings, a Postgres ETL for
-the FEC's bulk-data downloads, and an Axum REST API serving the tables it
-builds.
+as a CLI: a parser for raw `.fec` electronic filings, ergonomic typed views
+over the schedules people actually use, a Postgres ETL for the FEC's
+bulk-data downloads, and an Axum REST API serving the tables it builds.
 
 License: `Apache-2.0 OR BSD-3-Clause`. See [`LICENSE-APACHE`](./LICENSE-APACHE),
 [`LICENSE-BSD`](./LICENSE-BSD), and [`NOTICE`](./NOTICE) for third-party
@@ -13,7 +13,7 @@ data attribution.
 
 ## What's here
 
-Three things, independent or combined:
+Four things, independent or combined:
 
 1. **`hardmoney::parser`** -- parses raw FEC electronic filings (`.fec`
    files) into header, summary, and itemized line data. Handles every
@@ -21,12 +21,17 @@ Three things, independent or combined:
    (spec 3.x), the transitional comma-delimited format (spec 5.x), and
    the modern ASCII-28-delimited format (spec 6.x through the current
    8.5), each with correct version-bucketed field positions per form.
-2. **`hardmoney::bulk`** -- a Postgres ETL that loads the FEC's own
+2. **Typed views** (`ScheduleA`, `ScheduleB`, `ScheduleE`, `Form3XSummary`)
+   -- an ergonomic layer over the raw parser output: exact-cents money
+   (never lossy `f64`), real `NaiveDate` values, and a name that resolves
+   correctly whether a filing uses an old-format combined name field or
+   the current split organization/first/last fields.
+3. **`hardmoney::bulk`** -- a Postgres ETL that loads the FEC's own
    pre-aggregated bulk-data downloads (candidates, committees,
    contributions, disbursements, summaries, ...) into a normalized
    schema, plus direct single-filing ingestion via the parser for precise
    Schedule E (independent expenditure) extraction.
-3. **`hardmoney::api`** -- an Axum REST API serving the tables `bulk`
+4. **`hardmoney::api`** -- an Axum REST API serving the tables `bulk`
    builds (candidates, committees, Schedule A search, disbursements,
    independent expenditures, filing lookups).
 
@@ -34,8 +39,11 @@ Three things, independent or combined:
 
 ### As a library
 
+The crate root re-exports everything you need for the common path, so you
+don't have to reach into `hardmoney::parser`:
+
 ```rust
-use hardmoney::parser::Filing;
+use hardmoney::Filing;
 
 let bytes = std::fs::read("filing.fec").unwrap();
 let filing = Filing::parse_bytes(&bytes).unwrap();
@@ -70,11 +78,70 @@ hardmoney bulk-restore-dump --database-url $DATABASE_URL schedule_e
 
 # Ingest a single raw filing (by local path or FEC filing id) for precise
 # Schedule E extraction, complementing the aggregate bulk tables.
-hardmoney bulk-load-filing --database-url $DATABASE_URL 1666999
+hardmoney bulk-load-filing --database-url $DATABASE_URL 2011831
 
 # Run the REST API server.
 hardmoney serve --database-url $DATABASE_URL --bind 0.0.0.0:8080
 ```
+
+Every command above was run against this crate's own test fixtures and a
+live local Postgres instance while writing this README -- see
+[Examples](#examples) for the same coverage as runnable library code.
+
+## Ergonomic typed views
+
+Raw parser output (`filing.lines`) hands back an
+`IndexMap<String, String>` per line -- faithful to the wire format, but
+every caller has to remember field names, hand-parse dates and money, and
+work around the fact that a schedule's "name" field is genuinely shaped
+differently depending on which spec era a filing was submitted under.
+The typed views in `hardmoney::parser::typed` (re-exported at the crate
+root) handle that:
+
+```rust
+use hardmoney::{Filing, ScheduleA};
+
+let bytes = std::fs::read("filing.fec")?;
+let filing = Filing::parse_bytes(&bytes)?;
+
+for line in filing.lines.iter().filter(|l| l.table == "SchA") {
+    let contribution: ScheduleA = line.try_into()?;
+    println!(
+        "{}: ${:.2} on {:?}",
+        contribution.contributor_name.as_deref().unwrap_or("(no name)"),
+        contribution.contribution_amount_cents.unwrap_or(0) as f64 / 100.0,
+        contribution.contribution_date,
+    );
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+What this buys you over the raw layer:
+
+- **Exact money.** [`parse_money_cents`] parses amounts into integer
+  cents, not `f64` -- floating point cannot represent decimal currency
+  exactly, and that error compounds across millions of transactions.
+- **Real dates.** [`parse_fec_date`] parses the FEC's `YYYYMMDD` fields
+  into `chrono::NaiveDate`, treating blank and all-zero dates (both
+  common in real filings) as `None` rather than a parse error.
+- **Cross-version names.** FEC spec versions before 8.0 report a single
+  combined name field (`contributor_name`, `payee_name`,
+  `candidate_name`). Spec 8.0 and later -- what virtually all real-world
+  electronic filings use today -- drops that field entirely in favor of
+  `*_organization_name` or split `*_first_name`/`*_middle_name`/
+  `*_last_name`. Each typed view's name field checks both shapes, so it
+  resolves correctly regardless of which era a filing came from instead
+  of silently returning `None` for every current filing.
+- **A real error type**, not a panic. `TryFrom<&ParsedLine>` returns
+  `Result<_, TypedViewError>` if a genuinely required field (the filer
+  committee id) is missing -- everything else degrades to `None`, since
+  real-world FEC data is routinely incomplete on optional fields.
+
+`ScheduleA` (itemized receipts), `ScheduleB` (itemized disbursements),
+`ScheduleE` (independent expenditures), and `Form3XSummary` (committee
+period/cycle totals) all follow this pattern. See
+[`examples/typed_schedule_a_totals.rs`](./examples/typed_schedule_a_totals.rs)
+for a complete runnable example.
 
 ## Feature flags
 
@@ -88,20 +155,44 @@ hardmoney serve --database-url $DATABASE_URL --bind 0.0.0.0:8080
 
 ## REST API
 
-Once `serve` is running:
+Once `serve` is running, all list/search routes accept `limit`/`offset`
+for pagination in addition to the filters below:
 
-| Route | Description |
-|---|---|
-| `GET /health` | liveness check |
-| `GET /candidates` | search candidates |
-| `GET /candidates/{cand_id}` | one candidate |
-| `GET /committees` | search committees |
-| `GET /committees/{cmte_id}` | one committee |
-| `GET /schedule-a` | search Schedule A (individual contributions) |
-| `GET /disbursements` | search Schedule B disbursements |
-| `GET /independent-expenditures` | search Schedule E independent expenditures |
-| `GET /filings/{filing_id}` | one raw filing's parsed header/summary |
-| `GET /filings/{filing_id}/schedule-e` | one filing's Schedule E line items |
+| Route | Description | Query parameters |
+|---|---|---|
+| `GET /health` | liveness check | -- |
+| `GET /candidates` | search candidates | `cycle`, `state`, `office`, `q` |
+| `GET /candidates/{cand_id}` | one candidate | -- |
+| `GET /committees` | search committees | `cycle`, `cmte_tp`, `q` |
+| `GET /committees/{cmte_id}` | one committee | -- |
+| `GET /schedule-a` | search Schedule A (individual contributions) | `cmte_id`, `cycle`, `name`, `employer`, `min_amount` |
+| `GET /disbursements` | search Schedule B disbursements | `cmte_id`, `name`, `city`, `state`, `transaction_dt`, `purpose` |
+| `GET /independent-expenditures` | search Schedule E independent expenditures | `candidate_id`, `cmte_id`, `support_oppose_code` |
+| `GET /filings/{filing_id}` | one raw filing's parsed header/summary | -- |
+| `GET /filings/{filing_id}/schedule-e` | one filing's Schedule E line items | -- |
+
+Exact field lists live in `src/api/routes/*.rs`; the tables above cover
+the filters you'll reach for in practice.
+
+## Examples
+
+Runnable, self-contained programs under [`examples/`](./examples/), each
+verified against real fixture data (and, where noted, a live network
+call):
+
+| Example | Use case | Run with |
+|---|---|---|
+| [`parse_filing.rs`](./examples/parse_filing.rs) | Common: parse a `.fec` file and print header/summary/line-count breakdown. | `cargo run --example parse_filing -- path/to/filing.fec` |
+| [`typed_schedule_a_totals.rs`](./examples/typed_schedule_a_totals.rs) | Common, ergonomic: sum itemized Schedule A contributions and find the largest, via the typed-view layer. | `cargo run --example typed_schedule_a_totals -- path/to/filing.fec` |
+| [`fetch_live_filing.rs`](./examples/fetch_live_filing.rs) | Less common, very useful: download a filing directly from `docquery.fec.gov` (requires network and the `fetch` feature) and summarize it with `Form3XSummary`. | `cargo run --example fetch_live_filing -- 2011831` |
+| [`handle_parse_errors.rs`](./examples/handle_parse_errors.rs) | Less common, very useful: `hardmoney`'s error type is designed to be matched on, including the field-name collision guard described below. | `cargo run --example handle_parse_errors` |
+
+All four build under the minimal `--no-default-features --features fetch`
+set as well as `--all-features`. The bulk-ETL and REST-API flows
+(`bulk-load-filing`, `serve`, and the routes above) need a live Postgres
+instance, so they're demonstrated as CLI commands in
+[Quick start](#as-a-cli) rather than as zero-setup `cargo run --example`
+programs.
 
 ## Parser correctness: the field-name collision fix
 
@@ -190,18 +281,36 @@ synthetic strings, in `tests/real_filings.rs`:
   `DROP VIEW` + `CREATE VIEW` rather than `CREATE OR REPLACE VIEW`, because
   Postgres refuses in-place column type changes through `REPLACE`; the
   schema migration in `src/db/schema.sql` accounts for this.
+- **Schedule E ingestion is scoped to genuine Schedule E lines**:
+  `ScheduleE::try_from` only strictly requires a `filer_committee_id_number`
+  field, which is present on nearly every schedule (Schedule A, B, C,
+  ...). `bulk-load-filing`'s single-filing ingest now filters to
+  `table == "SchE"` before attempting that conversion, so a filing with no
+  independent expenditures correctly stores zero Schedule E rows instead
+  of misfiling every other schedule's lines as all-null "Schedule E"
+  entries. Covered by `bulk::ingest::tests::only_genuine_schedule_e_lines_are_extracted`.
+- **Cross-version name resolution**: as described in
+  [Ergonomic typed views](#ergonomic-typed-views), the `contributor_name`
+  (Schedule A), `payee_name` (Schedule B/E), and `candidate_name`
+  (Schedule E) typed fields fall back from the old-format combined name to
+  the modern split organization/first/middle/last fields, so they resolve
+  correctly for present-day (spec 8.x) filings rather than always
+  returning `None`.
 
 ## Development
 
 ```bash
 cargo build --all-features
 cargo test --all-features
+cargo fmt --all -- --check
+cargo clippy --all-features --all-targets -- -D warnings
 ```
 
-Test suite: unit tests colocated with parser modules, `tests/real_filings.rs`
-(live-downloaded real filings across every spec era), and
-`tests/format_table_integrity.rs` (collision/regression guard over every
-vendored format table).
+Test suite: unit tests colocated with parser/typed-view/bulk-ingest
+modules, `tests/real_filings.rs` (live-downloaded real filings across
+every spec era), and `tests/format_table_integrity.rs`
+(collision/regression guard over every vendored format table). CI runs
+all of the commands above on every push and pull request to `main`.
 
 ## Sources and provenance
 
@@ -216,3 +325,6 @@ vendored format table).
 - Real filing test fixtures: the FEC's own `docquery.fec.gov` document
   store and RSS feed, and [`esonderegger/fecfile`](https://github.com/esonderegger/fecfile)'s
   bundled historical test data.
+
+[`parse_money_cents`]: https://docs.rs/hardmoney/latest/hardmoney/fn.parse_money_cents.html
+[`parse_fec_date`]: https://docs.rs/hardmoney/latest/hardmoney/fn.parse_fec_date.html
