@@ -8,22 +8,35 @@
 //! money by hand, and re-derive things like "is this an individual or a
 //! committee contributor" from raw entity-type codes.
 //!
-//! Money is parsed with [`parse_money_cents`] into integer cents rather
-//! than `f64`, because FEC amounts are decimal currency values and floating
-//! point cannot represent them exactly (`f64` would silently corrupt sums
-//! across millions of transactions).
+//! Money is parsed with [`parse_money`] into a [`Decimal`] rather than
+//! `f64`, because FEC amounts are decimal currency values and binary
+//! floating point cannot represent every decimal fraction exactly (`f64`
+//! would silently corrupt sums across millions of transactions, and would
+//! silently corrupt individual values once amounts get large enough --
+//! `Decimal` never does either, no matter the value). This exactness is
+//! carried all the way through the crate: the same `Decimal` type is what
+//! gets written to and read back from Postgres's `NUMERIC` columns (via
+//! `sqlx`'s native `rust_decimal` support) and what the REST API returns
+//! in JSON, so money is never round-tripped through `f64` at any layer.
 
 use chrono::NaiveDate;
+use rust_decimal::Decimal;
 
 use crate::parser::filing::ParsedLine;
 
-/// Parses an FEC amount field (e.g. `"1000"`, `"250.50"`, `"-75"`) into
-/// integer cents, avoiding the rounding error `f64` would introduce.
-/// Returns `None` for blank or unparseable input.
+/// Parses an FEC amount field (e.g. `"1000"`, `"250.50"`, `"-75"`) into an
+/// exact [`Decimal`]. Returns `None` for blank or unparseable input.
 ///
 /// FEC amounts always have at most two decimal places in practice, but this
-/// tolerates fewer (or a bare integer) and rejects more than two.
-pub fn parse_money_cents(raw: &str) -> Option<i64> {
+/// tolerates fewer (or a bare integer) and rejects more than two -- a
+/// third decimal place in a supposedly-cents field is far more likely to
+/// indicate a column-alignment bug upstream than a genuine sub-cent value,
+/// so this fails closed rather than silently accepting it.
+///
+/// The parse itself never goes through `f64`: the validated digits are
+/// assembled directly into a scaled integer and handed to
+/// [`Decimal::new`], which represents `value * 10^-scale` exactly.
+pub fn parse_money(raw: &str) -> Option<Decimal> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -58,8 +71,13 @@ pub fn parse_money_cents(raw: &str) -> Option<i64> {
         _ => unreachable!("checked above"),
     };
 
-    let total = whole_cents.checked_mul(100)?.checked_add(frac_cents)?;
-    Some(if negative { -total } else { total })
+    let total_cents = whole_cents.checked_mul(100)?.checked_add(frac_cents)?;
+    let total_cents = if negative { -total_cents } else { total_cents };
+    // `Decimal::new(value, scale)` represents `value * 10^-scale` exactly,
+    // with no intermediate float -- this is the entire reason to build the
+    // amount from validated cents rather than parsing the string directly
+    // with `Decimal::from_str`.
+    Some(Decimal::new(total_cents, 2))
 }
 
 /// Parses an FEC date field (`YYYYMMDD`) into a [`NaiveDate`]. Returns
@@ -156,8 +174,8 @@ pub struct ScheduleA {
     pub contributor_employer: Option<String>,
     pub contributor_occupation: Option<String>,
     pub contribution_date: Option<NaiveDate>,
-    /// Contribution amount in integer cents (see [`parse_money_cents`]).
-    pub contribution_amount_cents: Option<i64>,
+    /// Exact contribution amount in dollars (see [`parse_money`]).
+    pub contribution_amount: Option<Decimal>,
     pub contribution_purpose_descrip: Option<String>,
     pub memo_code: Option<String>,
     pub memo_text_description: Option<String>,
@@ -210,7 +228,7 @@ impl TryFrom<&ParsedLine> for ScheduleA {
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
             contribution_date: line.get("contribution_date").and_then(parse_fec_date),
-            contribution_amount_cents: line.get("contribution_amount").and_then(parse_money_cents),
+            contribution_amount: line.get("contribution_amount").and_then(parse_money),
             contribution_purpose_descrip: line
                 .get("contribution_purpose_descrip")
                 .filter(|s| !s.is_empty())
@@ -238,8 +256,8 @@ pub struct ScheduleB {
     pub payee_state: Option<String>,
     pub payee_zip_code: Option<String>,
     pub expenditure_date: Option<NaiveDate>,
-    /// Expenditure amount in integer cents (see [`parse_money_cents`]).
-    pub expenditure_amount_cents: Option<i64>,
+    /// Exact expenditure amount in dollars (see [`parse_money`]).
+    pub expenditure_amount: Option<Decimal>,
     pub expenditure_purpose_descrip: Option<String>,
     pub category_code: Option<String>,
     pub memo_code: Option<String>,
@@ -285,7 +303,7 @@ impl TryFrom<&ParsedLine> for ScheduleB {
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
             expenditure_date: line.get("expenditure_date").and_then(parse_fec_date),
-            expenditure_amount_cents: line.get("expenditure_amount").and_then(parse_money_cents),
+            expenditure_amount: line.get("expenditure_amount").and_then(parse_money),
             expenditure_purpose_descrip: line
                 .get("expenditure_purpose_descrip")
                 .filter(|s| !s.is_empty())
@@ -320,8 +338,8 @@ pub struct ScheduleE {
     pub candidate_district: Option<String>,
     pub dissemination_date: Option<NaiveDate>,
     pub disbursement_date: Option<NaiveDate>,
-    /// Expenditure amount in integer cents (see [`parse_money_cents`]).
-    pub expenditure_amount_cents: Option<i64>,
+    /// Exact expenditure amount in dollars (see [`parse_money`]).
+    pub expenditure_amount: Option<Decimal>,
     pub expenditure_purpose_descrip: Option<String>,
     pub memo_code: Option<String>,
     pub memo_text_description: Option<String>,
@@ -386,7 +404,7 @@ impl TryFrom<&ParsedLine> for ScheduleE {
                 .map(str::to_string),
             dissemination_date: line.get("dissemination_date").and_then(parse_fec_date),
             disbursement_date: line.get("disbursement_date").and_then(parse_fec_date),
-            expenditure_amount_cents: line.get("expenditure_amount").and_then(parse_money_cents),
+            expenditure_amount: line.get("expenditure_amount").and_then(parse_money),
             expenditure_purpose_descrip: line
                 .get("expenditure_purpose_descrip")
                 .filter(|s| !s.is_empty())
@@ -412,16 +430,16 @@ pub struct Form3XSummary {
     pub report_code: Option<String>,
     pub coverage_from_date: Option<NaiveDate>,
     pub coverage_through_date: Option<NaiveDate>,
-    /// Column A ("this period") cash on hand at close of period, in cents.
-    pub cash_on_hand_close_of_period_cents: Option<i64>,
-    /// Column A total receipts this period, in cents.
-    pub total_receipts_cents: Option<i64>,
-    /// Column A total disbursements this period, in cents.
-    pub total_disbursements_cents: Option<i64>,
-    /// Column B (election-cycle-to-date) total receipts, in cents.
-    pub cycle_total_receipts_cents: Option<i64>,
-    /// Column B (election-cycle-to-date) total disbursements, in cents.
-    pub cycle_total_disbursements_cents: Option<i64>,
+    /// Column A ("this period") cash on hand at close of period.
+    pub cash_on_hand_close_of_period: Option<Decimal>,
+    /// Column A total receipts this period.
+    pub total_receipts: Option<Decimal>,
+    /// Column A total disbursements this period.
+    pub total_disbursements: Option<Decimal>,
+    /// Column B (election-cycle-to-date) total receipts.
+    pub cycle_total_receipts: Option<Decimal>,
+    /// Column B (election-cycle-to-date) total disbursements.
+    pub cycle_total_disbursements: Option<Decimal>,
 }
 
 impl TryFrom<&indexmap::IndexMap<String, String>> for Form3XSummary {
@@ -447,13 +465,12 @@ impl TryFrom<&indexmap::IndexMap<String, String>> for Form3XSummary {
                 .map(str::to_string),
             coverage_from_date: get("coverage_from_date").and_then(parse_fec_date),
             coverage_through_date: get("coverage_through_date").and_then(parse_fec_date),
-            cash_on_hand_close_of_period_cents: get("col_a_cash_on_hand_close_of_period")
-                .and_then(parse_money_cents),
-            total_receipts_cents: get("col_a_total_receipts").and_then(parse_money_cents),
-            total_disbursements_cents: get("col_a_total_disbursements").and_then(parse_money_cents),
-            cycle_total_receipts_cents: get("col_b_total_receipts").and_then(parse_money_cents),
-            cycle_total_disbursements_cents: get("col_b_total_disbursements")
-                .and_then(parse_money_cents),
+            cash_on_hand_close_of_period: get("col_a_cash_on_hand_close_of_period")
+                .and_then(parse_money),
+            total_receipts: get("col_a_total_receipts").and_then(parse_money),
+            total_disbursements: get("col_a_total_disbursements").and_then(parse_money),
+            cycle_total_receipts: get("col_b_total_receipts").and_then(parse_money),
+            cycle_total_disbursements: get("col_b_total_disbursements").and_then(parse_money),
         })
     }
 }
@@ -462,33 +479,55 @@ impl TryFrom<&indexmap::IndexMap<String, String>> for Form3XSummary {
 mod tests {
     use super::*;
     use indexmap::IndexMap;
+    use rust_decimal_macros::dec;
 
     #[test]
     fn parses_whole_dollar_amounts() {
-        assert_eq!(parse_money_cents("1000"), Some(100_000));
-        assert_eq!(parse_money_cents("0"), Some(0));
+        assert_eq!(parse_money("1000"), Some(dec!(1000.00)));
+        assert_eq!(parse_money("0"), Some(dec!(0.00)));
     }
 
     #[test]
     fn parses_cents_exactly_without_float_error() {
-        assert_eq!(parse_money_cents("250.50"), Some(25_050));
-        assert_eq!(parse_money_cents("0.01"), Some(1));
-        assert_eq!(parse_money_cents("19.99"), Some(1_999));
-        assert_eq!(parse_money_cents("100.1"), Some(10_010));
+        // These are exact `Decimal` equality checks, not `f64` ones -- if
+        // `parse_money` ever regressed to building the amount via
+        // `whole as f64 + frac as f64 / 100.0` instead of assembling exact
+        // scaled integers, values like `19.99` (which has no exact binary
+        // floating-point representation) would fail this comparison.
+        assert_eq!(parse_money("250.50"), Some(dec!(250.50)));
+        assert_eq!(parse_money("0.01"), Some(dec!(0.01)));
+        assert_eq!(parse_money("19.99"), Some(dec!(19.99)));
+        assert_eq!(parse_money("100.1"), Some(dec!(100.10)));
     }
 
     #[test]
     fn parses_negative_amounts() {
-        assert_eq!(parse_money_cents("-75"), Some(-7_500));
-        assert_eq!(parse_money_cents("-75.25"), Some(-7_525));
+        assert_eq!(parse_money("-75"), Some(dec!(-75.00)));
+        assert_eq!(parse_money("-75.25"), Some(dec!(-75.25)));
+    }
+
+    #[test]
+    fn sums_many_amounts_with_zero_drift() {
+        // The property that actually matters for real filings: summing a
+        // long run of parsed amounts must reproduce the exact integer-cent
+        // total, with no accumulated rounding drift. `f64` is not
+        // guaranteed to hold this property in general (individual amounts
+        // like `19.99` are already inexact in binary before any summing
+        // happens); `Decimal` holds it by construction, since each value
+        // is an exact multiple of one cent.
+        let raw = [
+            "10.99", "25.49", "3.75", "88.01", "123.99", "0.45", "67.33", "9.99", "150.00", "2.33",
+        ];
+        let sum: Decimal = raw.iter().filter_map(|s| parse_money(s)).sum();
+        assert_eq!(sum, dec!(482.33));
     }
 
     #[test]
     fn rejects_malformed_amounts() {
-        assert_eq!(parse_money_cents(""), None);
-        assert_eq!(parse_money_cents("abc"), None);
-        assert_eq!(parse_money_cents("1.234"), None);
-        assert_eq!(parse_money_cents("1,000"), None);
+        assert_eq!(parse_money(""), None);
+        assert_eq!(parse_money("abc"), None);
+        assert_eq!(parse_money("1.234"), None);
+        assert_eq!(parse_money("1,000"), None);
     }
 
     #[test]
@@ -521,7 +560,7 @@ mod tests {
         let sa = ScheduleA::try_from(&line).unwrap();
         assert_eq!(sa.filer_committee_id, "C00123456");
         assert_eq!(sa.contributor_name.as_deref(), Some("SMITH, JANE"));
-        assert_eq!(sa.contribution_amount_cents, Some(50_000));
+        assert_eq!(sa.contribution_amount, Some(dec!(500.00)));
         assert_eq!(sa.contribution_date, NaiveDate::from_ymd_opt(2026, 1, 1));
     }
 

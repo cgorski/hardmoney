@@ -1,11 +1,51 @@
 # hardmoney
 
 [![CI](https://github.com/cgorski/hardmoney/actions/workflows/ci.yml/badge.svg)](https://github.com/cgorski/hardmoney/actions/workflows/ci.yml)
+[![Book](https://github.com/cgorski/hardmoney/actions/workflows/book.yml/badge.svg)](https://cgorski.github.io/hardmoney/)
 
-A single Rust crate for FEC campaign-finance data, usable as a library or
-as a CLI: a parser for raw `.fec` electronic filings, ergonomic typed views
-over the schedules people actually use, a Postgres ETL for the FEC's
-bulk-data downloads, and an Axum REST API serving the tables it builds.
+## What this tool does, in plain English
+
+Every U.S. political campaign and PAC has to periodically file a report
+with the Federal Election Commission (FEC) disclosing who gave them money
+and who they spent it on. The FEC publishes these reports as raw text
+files (`.fec` filings) and as large pre-aggregated bulk-data downloads.
+Both are useful, and both are harder to work with correctly than they
+look: the file format has changed several times over the years, and money
+amounts need to stay *exact* -- not approximated the way ordinary
+floating-point math would approximate them.
+
+`hardmoney` is a single Rust crate (usable as a code library or as a
+command-line tool) that:
+
+- **Reads a raw `.fec` filing** and turns it into structured data --
+  who filed it, what period it covers, and every itemized contribution or
+  expenditure in it -- correctly, no matter which year or format version
+  the filing was submitted under.
+- **Gives you exact dollar amounts, real dates, and resolved names**
+  instead of raw, unparsed text fields, via an easy-to-use "typed view"
+  layer.
+- **Loads the FEC's own bulk-data downloads into a normal Postgres
+  database** you can query with ordinary SQL -- candidates, committees,
+  contributions, disbursements, and more, for an entire election cycle at
+  once.
+- **Serves that database over a REST API**, so other programs (or a
+  website) can look up candidates, committees, and transactions with
+  simple HTTP requests instead of needing direct database access.
+
+You can use any one of these four things on its own, or all of them
+together.
+
+### New to this? Read the book
+
+**[The hardmoney Book](https://cgorski.github.io/hardmoney/)** is a
+beginner-friendly tutorial that walks through all of this step by step --
+what's actually inside a `.fec` file, why the money handling is built the
+way it is, and a full walkthrough of the bulk-data loading and REST API --
+with real commands and real output at every step, not made-up examples.
+It includes a quick-start tutorial, worked examples for every part of the
+crate, a full CLI reference, and a troubleshooting/FAQ chapter. Start
+there if you're new to FEC data or new to this crate; keep reading this
+README for a denser, example-and-reference-style overview.
 
 License: `Apache-2.0 OR BSD-3-Clause`. See [`LICENSE-APACHE`](./LICENSE-APACHE),
 [`LICENSE-BSD`](./LICENSE-BSD), and [`NOTICE`](./NOTICE) for third-party
@@ -22,10 +62,11 @@ Four things, independent or combined:
    the modern ASCII-28-delimited format (spec 6.x through the current
    8.5), each with correct version-bucketed field positions per form.
 2. **Typed views** (`ScheduleA`, `ScheduleB`, `ScheduleE`, `Form3XSummary`)
-   -- an ergonomic layer over the raw parser output: exact-cents money
-   (never lossy `f64`), real `NaiveDate` values, and a name that resolves
-   correctly whether a filing uses an old-format combined name field or
-   the current split organization/first/last fields.
+   -- an ergonomic layer over the raw parser output: exact
+   `rust_decimal::Decimal` money (never lossy `f64`), real `NaiveDate`
+   values, and a name that resolves correctly whether a filing uses an
+   old-format combined name field or the current split
+   organization/first/last fields.
 3. **`hardmoney::bulk`** -- a Postgres ETL that loads the FEC's own
    pre-aggregated bulk-data downloads (candidates, committees,
    contributions, disbursements, summaries, ...) into a normalized
@@ -100,6 +141,7 @@ root) handle that:
 
 ```rust
 use hardmoney::{Filing, ScheduleA};
+use rust_decimal::Decimal;
 
 let bytes = std::fs::read("filing.fec")?;
 let filing = Filing::parse_bytes(&bytes)?;
@@ -107,9 +149,9 @@ let filing = Filing::parse_bytes(&bytes)?;
 for line in filing.lines.iter().filter(|l| l.table == "SchA") {
     let contribution: ScheduleA = line.try_into()?;
     println!(
-        "{}: ${:.2} on {:?}",
+        "{}: ${} on {:?}",
         contribution.contributor_name.as_deref().unwrap_or("(no name)"),
-        contribution.contribution_amount_cents.unwrap_or(0) as f64 / 100.0,
+        contribution.contribution_amount.unwrap_or(Decimal::ZERO),
         contribution.contribution_date,
     );
 }
@@ -118,9 +160,14 @@ for line in filing.lines.iter().filter(|l| l.table == "SchA") {
 
 What this buys you over the raw layer:
 
-- **Exact money.** [`parse_money_cents`] parses amounts into integer
-  cents, not `f64` -- floating point cannot represent decimal currency
-  exactly, and that error compounds across millions of transactions.
+- **Exact money, end to end.** [`parse_money`] parses amounts into an
+  exact [`rust_decimal::Decimal`], never `f64` -- binary floating point
+  cannot represent every decimal currency value exactly, and that error
+  compounds across millions of transactions. This isn't just the parser:
+  the same `Decimal` type is what gets written to and read back from
+  Postgres's `NUMERIC` columns and what the REST API returns in JSON, so
+  a contribution amount is never round-tripped through `f64` at any layer
+  from raw filing bytes to the JSON response you get back.
 - **Real dates.** [`parse_fec_date`] parses the FEC's `YYYYMMDD` fields
   into `chrono::NaiveDate`, treating blank and all-zero dates (both
   common in real filings) as `None` rather than a parse error.
@@ -326,5 +373,6 @@ all of the commands above on every push and pull request to `main`.
   store and RSS feed, and [`esonderegger/fecfile`](https://github.com/esonderegger/fecfile)'s
   bundled historical test data.
 
-[`parse_money_cents`]: https://docs.rs/hardmoney/latest/hardmoney/fn.parse_money_cents.html
+[`parse_money`]: https://docs.rs/hardmoney/latest/hardmoney/fn.parse_money.html
+[`rust_decimal::Decimal`]: https://docs.rs/rust_decimal/latest/rust_decimal/struct.Decimal.html
 [`parse_fec_date`]: https://docs.rs/hardmoney/latest/hardmoney/fn.parse_fec_date.html

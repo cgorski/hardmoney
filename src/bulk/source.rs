@@ -329,3 +329,63 @@ pub fn download_url(source: &BulkSource, cycle: u16) -> String {
         yy = yy
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_every_registered_source_by_its_cli_name() {
+        // If a source were ever added to `ALL` without matching its own
+        // `name` field (e.g. copy-paste error), this catches it --
+        // `find` is exactly what the CLI's `bulk-load <name>` argument
+        // relies on to resolve user input.
+        for source in ALL {
+            let found = find(source.name).unwrap_or_else(|| {
+                panic!(
+                    "BulkSource {:?} is in ALL but find() can't locate it by name",
+                    source.name
+                )
+            });
+            assert_eq!(found.name, source.name);
+        }
+    }
+
+    #[test]
+    fn find_returns_none_for_an_unregistered_name() {
+        assert!(find("not_a_real_source").is_none());
+    }
+
+    #[test]
+    fn download_url_pads_the_two_digit_year_and_uses_the_full_cycle_in_the_path() {
+        // The FEC's real layout mixes a full 4-digit cycle in the path
+        // with a zero-padded 2-digit year in the filename (e.g.
+        // `.../2026/cn26.zip`) -- a source cycle like 2008 has to come
+        // out as `08`, not `8`, or the resulting URL 404s against the
+        // FEC's real bulk-download server.
+        assert_eq!(
+            download_url(&CANDIDATES, 2026),
+            "https://www.fec.gov/files/bulk-downloads/2026/cn26.zip"
+        );
+        assert_eq!(
+            download_url(&CANDIDATES, 2008),
+            "https://www.fec.gov/files/bulk-downloads/2008/cn08.zip"
+        );
+        assert_eq!(
+            download_url(&DISBURSEMENTS, 2026),
+            "https://www.fec.gov/files/bulk-downloads/2026/oppexp26.zip"
+        );
+    }
+
+    #[test]
+    fn schedule_a_derived_sources_reuse_its_column_layout_exactly() {
+        // `COMMITTEE_TO_COMMITTEE_TRANSACTIONS` (`oth`) shares Schedule
+        // A's column layout by construction (`columns: SCHEDULE_A.columns`)
+        // -- this pins that relationship so it can't silently drift if
+        // `SCHEDULE_A.columns` is ever edited without noticing the alias.
+        assert_eq!(
+            COMMITTEE_TO_COMMITTEE_TRANSACTIONS.columns,
+            SCHEDULE_A.columns
+        );
+    }
+}

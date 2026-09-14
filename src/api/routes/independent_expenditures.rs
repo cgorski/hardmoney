@@ -1,5 +1,6 @@
 use axum::Json;
 use axum::extract::{Query, State};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
@@ -23,11 +24,18 @@ pub struct IndependentExpenditure {
     pub candidate_office_state: Option<String>,
     pub support_oppose_code: Option<String>,
     pub support_oppose_desc: Option<String>,
-    pub expenditure_amt: Option<f64>,
+    /// Read straight from the source `NUMERIC` column as an exact
+    /// `Decimal` -- never cast through `::float8`, which would
+    /// round-trip the amount through binary floating point and risk
+    /// corrupting it.
+    pub expenditure_amt: Option<Decimal>,
     pub expenditure_date: Option<chrono::NaiveDateTime>,
     pub expenditure_description: Option<String>,
-    pub rpt_yr: Option<f64>,
-    pub election_cycle: Option<f64>,
+    /// A calendar year, so an integer -- not `f64`, which was never the
+    /// right type here even before the decimal-money cleanup (a year
+    /// has no fractional part to preserve or lose).
+    pub rpt_yr: Option<i32>,
+    pub election_cycle: Option<i32>,
 }
 
 #[derive(Deserialize)]
@@ -48,8 +56,8 @@ pub async fn search(
     let rows = sqlx::query_as::<_, IndependentExpenditure>(
         "SELECT sub_id, cmte_id, committee_name, payee_name, candidate_id, candidate_name, \
                 candidate_office_state, support_oppose_code, support_oppose_desc, \
-                expenditure_amt::float8 AS expenditure_amt, expenditure_date, \
-                expenditure_description, rpt_yr::float8 AS rpt_yr, election_cycle::float8 AS election_cycle \
+                expenditure_amt, expenditure_date, \
+                expenditure_description, rpt_yr::int4 AS rpt_yr, election_cycle::int4 AS election_cycle \
          FROM independent_expenditures \
          WHERE ($1::text IS NULL OR candidate_id = $1) \
            AND ($2::text IS NULL OR cmte_id = $2) \

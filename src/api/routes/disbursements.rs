@@ -1,5 +1,6 @@
 use axum::Json;
 use axum::extract::{Query, State};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
@@ -17,7 +18,10 @@ pub struct Disbursement {
     pub city: Option<String>,
     pub state: Option<String>,
     pub transaction_dt: Option<String>,
-    pub transaction_amt: Option<f64>,
+    /// Read straight from the `NUMERIC` column as an exact `Decimal` --
+    /// never cast through `::float8`, which would round-trip the amount
+    /// through binary floating point and risk corrupting it.
+    pub transaction_amt: Option<Decimal>,
     pub purpose: Option<String>,
     pub category_desc: Option<String>,
     pub memo_text: Option<String>,
@@ -29,7 +33,7 @@ pub struct SearchParams {
     pub cycle: Option<i32>,
     /// Case-insensitive substring match against the payee `name`.
     pub name: Option<String>,
-    pub min_amount: Option<f64>,
+    pub min_amount: Option<Decimal>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
@@ -41,12 +45,12 @@ pub async fn search(
     let page = Pagination::new(params.limit, params.offset);
     let rows = sqlx::query_as::<_, Disbursement>(
         "SELECT sub_id, cycle, cmte_id, name, city, state, transaction_dt, \
-                transaction_amt::float8 AS transaction_amt, purpose, category_desc, memo_text \
+                transaction_amt, purpose, category_desc, memo_text \
          FROM disbursements \
          WHERE ($1::text IS NULL OR cmte_id = $1) \
            AND ($2::int IS NULL OR cycle = $2) \
            AND ($3::text IS NULL OR name ILIKE '%' || $3 || '%') \
-           AND ($4::float8 IS NULL OR transaction_amt >= $4) \
+           AND ($4::numeric IS NULL OR transaction_amt >= $4) \
          ORDER BY transaction_dt DESC NULLS LAST \
          LIMIT $5 OFFSET $6",
     )

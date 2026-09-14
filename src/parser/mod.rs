@@ -51,6 +51,5 @@ pub use error::{FecError, Result};
 pub use filing::{Filing, ParsedLine};
 pub use header::HeaderMap;
 pub use typed::{
-    Form3XSummary, ScheduleA, ScheduleB, ScheduleE, TypedViewError, parse_fec_date,
-    parse_money_cents,
+    Form3XSummary, ScheduleA, ScheduleB, ScheduleE, TypedViewError, parse_fec_date, parse_money,
 };

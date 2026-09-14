@@ -27,13 +27,18 @@ once_cell = "1.19"
 thiserror = "2"
 indexmap = "2"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+# Exact base-10 decimal money type, used everywhere hardmoney represents a
+# dollar amount (parsing, typed views, bulk ETL, REST API). Never round-trips
+# money through `f64`: FEC amounts are decimal currency values, and binary
+# floating point cannot represent every decimal fraction exactly.
+rust_decimal = { version = "1", default-features = false, features = ["std"] }
 encoding_rs = "0.8"
 ureq = { version = "3", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 
 # bulk ETL (optional)
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "macros"], optional = true }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "macros", "rust_decimal"], optional = true }
 zip = { version = "8", default-features = false, features = ["deflate"], optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "net"], optional = true }
 indicatif = { version = "0.18", optional = true }
@@ -51,12 +56,13 @@ dotenvy = { version = "0.15", optional = true }
 [features]
 default = ["fetch", "bulk", "api", "cli"]
 fetch = ["dep:ureq"]
-serde = ["dep:serde", "dep:serde_json"]
+serde = ["dep:serde", "dep:serde_json", "rust_decimal/serde"]
 bulk = ["dep:sqlx", "dep:zip", "dep:tokio", "dep:ureq", "dep:indicatif", "serde"]
 api = ["dep:axum", "dep:tower-http", "dep:tracing", "dep:tracing-subscriber", "dep:tokio", "bulk", "serde"]
 cli = ["dep:clap", "dep:dotenvy", "bulk", "api", "fetch"]
 
 [dev-dependencies]
+rust_decimal_macros = "1"
 
 [profile.release]
 opt-level = 3

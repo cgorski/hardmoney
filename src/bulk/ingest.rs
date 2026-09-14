@@ -91,7 +91,11 @@ pub async fn ingest_filing(pool: &PgPool, filing_id: i64, filing: &Filing) -> Re
     let extracted = schedule_e_lines(filing);
     let mut inserted = 0usize;
     for (idx, se) in &extracted {
-        let amt = se.expenditure_amount_cents.map(|c| c as f64 / 100.0);
+        // Bound directly as `Decimal` -- `sqlx`'s native `rust_decimal`
+        // support encodes it straight to Postgres `NUMERIC` wire format,
+        // so the exact value `ScheduleE::expenditure_amount` already holds
+        // is what lands in the database, with no `f64` in between.
+        let amt = se.expenditure_amount;
         sqlx::query(
             "INSERT INTO schedule_e_lines \
                 (filing_id, line_index, payee_name, expenditure_amt, expenditure_date, \
@@ -130,6 +134,7 @@ pub async fn ingest_filing(pool: &PgPool, filing_id: i64, filing: &Filing) -> Re
 mod tests {
     use super::*;
     use crate::parser::filing::ParsedLine as PL;
+    use rust_decimal_macros::dec;
 
     fn line(table: &'static str, fields: &[(&str, &str)]) -> PL {
         let mut map = indexmap::IndexMap::new();
@@ -188,6 +193,6 @@ mod tests {
         let (idx, se) = &extracted[0];
         assert_eq!(*idx, 1);
         assert_eq!(se.payee_name.as_deref(), Some("ACME MEDIA"));
-        assert_eq!(se.expenditure_amount_cents, Some(25_000));
+        assert_eq!(se.expenditure_amount, Some(dec!(250.00)));
     }
 }

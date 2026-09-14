@@ -1,5 +1,6 @@
 use axum::Json;
 use axum::extract::{Path, State};
+use rust_decimal::Decimal;
 use serde::Serialize;
 use sqlx::PgPool;
 
@@ -42,7 +43,10 @@ pub async fn get(
 pub struct ScheduleELine {
     pub line_index: i32,
     pub payee_name: Option<String>,
-    pub expenditure_amt: Option<f64>,
+    /// Read straight from the `NUMERIC` column as an exact `Decimal` --
+    /// never cast through `::float8`, which would round-trip the amount
+    /// through binary floating point and risk corrupting it.
+    pub expenditure_amt: Option<Decimal>,
     pub expenditure_date: Option<chrono::NaiveDate>,
     pub support_oppose_code: Option<String>,
     pub candidate_id: Option<String>,
@@ -55,7 +59,7 @@ pub async fn schedule_e(
     Path(filing_id): Path<i64>,
 ) -> Result<Json<Vec<ScheduleELine>>, ApiError> {
     let rows = sqlx::query_as::<_, ScheduleELine>(
-        "SELECT line_index, payee_name, expenditure_amt::float8 AS expenditure_amt, expenditure_date, \
+        "SELECT line_index, payee_name, expenditure_amt, expenditure_date, \
                 support_oppose_code, candidate_id, candidate_name, candidate_office_state \
          FROM schedule_e_lines WHERE filing_id = $1 ORDER BY line_index",
     )

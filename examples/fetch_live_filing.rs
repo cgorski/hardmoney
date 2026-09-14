@@ -10,7 +10,8 @@
 //! (defaults to filing id 2011831, a real Form 3X, if none is given).
 //!
 //! Combines `Filing::fetch` with the `Form3XSummary` typed view to turn a
-//! raw download straight into cents-accurate totals.
+//! raw download straight into exact `Decimal` totals -- no `f64` anywhere
+//! in the path from the FEC's own bytes to what's printed below.
 
 use hardmoney::{Filing, Form3XSummary};
 
@@ -33,16 +34,16 @@ fn main() {
             Ok(summary) => {
                 println!("committee:            {:?}", summary.committee_name);
                 println!(
-                    "receipts this period: {:?} cents",
-                    summary.total_receipts_cents
+                    "receipts this period: ${}",
+                    summary.total_receipts.unwrap_or_default()
                 );
                 println!(
-                    "disbursements period: {:?} cents",
-                    summary.total_disbursements_cents
+                    "disbursements period: ${}",
+                    summary.total_disbursements.unwrap_or_default()
                 );
                 println!(
-                    "cash on hand (close): {:?} cents",
-                    summary.cash_on_hand_close_of_period_cents
+                    "cash on hand (close): ${}",
+                    summary.cash_on_hand_close_of_period.unwrap_or_default()
                 );
             }
             Err(e) => eprintln!("could not build a Form3XSummary: {e}"),

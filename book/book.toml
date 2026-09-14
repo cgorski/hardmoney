@@ -1,0 +1,16 @@
+[book]
+title = "The hardmoney Book"
+description = "A beginner-friendly tutorial and reference for hardmoney, a Rust crate for FEC campaign-finance data."
+authors = ["cgorski"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/cgorski/hardmoney"
+edit-url-template = "https://github.com/cgorski/hardmoney/edit/main/book/{path}"
+default-theme = "light"
+preferred-dark-theme = "navy"
+
+[output.html.fold]
+enable = true
+level = 1

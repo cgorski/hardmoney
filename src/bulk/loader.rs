@@ -194,3 +194,47 @@ async fn copy_into_table(pool: &PgPool, source: &BulkSource, staged_path: &PathB
     let rows = copy_in.finish().await?;
     Ok(rows)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn written_field(field: &str) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        write_csv_field(&mut buf, field).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn plain_fields_are_written_bare() {
+        // The overwhelmingly common case for real FEC bulk rows -- no
+        // quoting overhead for a field that doesn't need it.
+        assert_eq!(written_field("SMITH, JANE"), "SMITH, JANE");
+        assert_eq!(written_field(""), "");
+    }
+
+    #[test]
+    fn a_field_containing_the_pipe_delimiter_is_quoted() {
+        // If this weren't quoted, a stray `|` in a free-text field (a
+        // memo, a payee name) would silently shift every later column in
+        // the row -- exactly the kind of corruption RFC 4180 quoting is
+        // meant to prevent.
+        assert_eq!(written_field("A|B"), "\"A|B\"");
+    }
+
+    #[test]
+    fn an_embedded_double_quote_is_doubled_and_the_field_is_quoted() {
+        assert_eq!(written_field(r#"say "hi"#), "\"say \"\"hi\"");
+    }
+
+    #[test]
+    fn embedded_newlines_and_carriage_returns_are_quoted() {
+        assert_eq!(written_field("line1\nline2"), "\"line1\nline2\"");
+        assert_eq!(written_field("a\rb"), "\"a\rb\"");
+    }
+
+    #[test]
+    fn a_field_needing_both_quote_doubling_and_pipe_quoting_handles_both() {
+        assert_eq!(written_field(r#"a|"b"#), "\"a|\"\"b\"");
+    }
+}

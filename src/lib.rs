@@ -54,6 +54,5 @@ pub mod api;
 // crate's top-level API so `use hardmoney::Filing` reads naturally.
 pub use parser::{FecError, Filing, HeaderMap, ParsedLine, Result};
 pub use parser::{
-    Form3XSummary, ScheduleA, ScheduleB, ScheduleE, TypedViewError, parse_fec_date,
-    parse_money_cents,
+    Form3XSummary, ScheduleA, ScheduleB, ScheduleE, TypedViewError, parse_fec_date, parse_money,
 };

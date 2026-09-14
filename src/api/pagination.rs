@@ -31,3 +31,39 @@ impl Pagination {
         self.offset.unwrap_or(0).max(0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_to_fifty_when_limit_absent() {
+        assert_eq!(Pagination::new(None, None).limit(), 50);
+    }
+
+    #[test]
+    fn clamps_limit_above_the_five_hundred_ceiling() {
+        // The whole point of this clamp: a client can't force an
+        // unbounded scan of a multi-million-row table by passing an
+        // absurd `?limit=`.
+        assert_eq!(Pagination::new(Some(1_000_000), None).limit(), 500);
+    }
+
+    #[test]
+    fn clamps_limit_below_the_floor_of_one() {
+        assert_eq!(Pagination::new(Some(0), None).limit(), 1);
+        assert_eq!(Pagination::new(Some(-10), None).limit(), 1);
+    }
+
+    #[test]
+    fn passes_through_an_in_range_limit_unchanged() {
+        assert_eq!(Pagination::new(Some(200), None).limit(), 200);
+    }
+
+    #[test]
+    fn defaults_offset_to_zero_and_rejects_negative_offsets() {
+        assert_eq!(Pagination::new(None, None).offset(), 0);
+        assert_eq!(Pagination::new(None, Some(-5)).offset(), 0);
+        assert_eq!(Pagination::new(None, Some(200)).offset(), 200);
+    }
+}
