@@ -1,0 +1,118 @@
+hardmoney
+Copyright 2026 Christopher Gorski
+
+This product is licensed under the Apache License, Version 2.0 OR the
+BSD 3-Clause License (SPDX: Apache-2.0 OR BSD-3-Clause). See LICENSE-APACHE
+and LICENSE-BSD.
+
+================================================================================
+Third-party data: fec-csv-sources format tables
+================================================================================
+
+The files under `data/fec-csv-sources/*.csv` -- the column-position tables
+that map each FEC electronic filing spec version to canonical field names --
+are derived from the `fech-sources` project:
+
+    https://github.com/dwillis/fech-sources
+
+That repository's own README states these files "are the same files in the
+sources directory in earlier version[s] of Fech itself," i.e. they originate
+from the `sources/` directory of the Fech Ruby gem (the NYT's FEC filing
+parser, later maintained by Derek Willis):
+
+    https://github.com/dwillis/Fech
+
+The `fech-sources` GitHub repository does not itself carry a LICENSE file.
+However, the Fech gem it was extracted from is licensed Apache-2.0, per its
+official RubyGems.org package metadata:
+
+    https://rubygems.org/api/v1/gems/fech.json  ->  "licenses": ["Apache-2.0"]
+
+hardmoney treats the vendored data/fec-csv-sources/ tables as Apache-2.0
+licensed on that basis, and includes this NOTICE and attribution as required
+by Apache License 2.0, Section 4(d).
+
+Modifications made by hardmoney to this vendored data (Apache License 2.0,
+Section 4(b) requires stating changes):
+
+  A comprehensive audit (see `tests/format_table_integrity.rs`) found that
+  six of the vendored format tables assigned the same canonical field name
+  to two different column positions within a single FEC spec version
+  bucket. Because hardmoney's line parser (src/parser/line.rs) builds an
+  ordered map of canonical-name -> value per line, an unresolved collision
+  meant the second-occurring field silently overwrote the first, discarding
+  real data present in the underlying filing. This was confirmed against
+  real filings (e.g. tests/fixtures/F3XN_2011834.fec), where the two
+  colliding fields held different real dollar values.
+
+  The following canonical field names were renamed to be unique and
+  form-accurate, resolving the collisions with no loss of information:
+
+  F3X.csv (FEC Form 3X, Report of Receipts and Disbursements):
+    - Line 19/31/33 "detailed summary recap" fields renamed with a
+      `_recap` suffix, disambiguating them from the identically-labeled
+      totals used elsewhere on the same form:
+        col_a_total_receipts_recap, col_a_total_disbursements_recap,
+        col_a_total_contributions_recap, col_b_total_receipts_recap,
+        col_b_total_disbursements_recap, col_b_total_contributions_recap
+    - Line 16 "Refunds of Federal Contributions" (receipts side) and
+      Line 34 "Total Contribution Refunds" (disbursement-recap side) were
+      both mapped to the same canonical name in the source data; renamed
+      the Line 16 occurrences to:
+        col_a_refunds_of_federal_contributions,
+        col_b_refunds_of_federal_contributions
+      leaving col_a_total_contributions_refunds /
+      col_b_total_contributions_refunds uniquely referring to Line 34.
+
+  F3P.csv (FEC Form 3P, Presidential) and F4.csv (FEC Form 4, PAC/Party
+  non-authorized):
+    - Same "detailed summary recap" pattern as F3X; renamed the second
+      occurrence of the receipts/disbursements totals to
+      col_a_total_receipts_recap, col_a_total_disbursements_recap
+      (F4 additionally has col_b_total_receipts_recap,
+      col_b_total_disbursements_recap).
+
+  F2.csv (FEC Form 2, Statement of Candidacy):
+    - Two distinct fields -- the mailing-address state and the
+      office-sought state -- were both mapped to canonical name
+      `candidate_state`. Renamed the office-sought occurrence to
+      `candidate_office_state`.
+
+  SchC1.csv (Schedule C-1, Loan/Line of Credit Report):
+    - Two distinct "description" fields (Section D.1 Collateral vs.
+      Section E.2 Future Income) renamed to `collateral_description` and
+      `future_income_description`.
+    - Two distinct "date_signed" fields (Section G Treasurer vs.
+      Section H Authorized Individual) renamed to `treasurer_date_signed`
+      and `authorized_date_signed`.
+
+  SchL.csv (Schedule L, Levin Funds):
+    - Two columns were mislabeled as belonging to Column B when they
+      structurally belong to Column A's own per-period recap section
+      (immediately following the genuine col_a_receipts_period /
+      col_a_subtotal_period fields). Corrected to
+      col_a_disbursements_period and col_a_cash_on_hand_close_of_period.
+      The genuine Column B fields elsewhere in the table are unaffected.
+
+  No numeric or textual filing data was altered by any of the above --
+  only the canonical field *names* used to key into each parsed line's
+  field map.
+
+================================================================================
+Inspiration, not copied code
+================================================================================
+
+hardmoney's FEC-parsing logic (header/version detection, delimiter
+handling, line dispatch, field typing) is an original implementation
+written for this project. In designing it, ideas and general approach were
+informed by reviewing publicly available open-source FEC parsers,
+including:
+
+  - nyt-pyfec (The New York Times), Apache License 2.0,
+    Copyright 2015 The New York Times Company
+    https://github.com/newsdev/nyt-pyfec
+    License: https://raw.githubusercontent.com/newsdev/nyt-pyfec/master/LICENSE
+
+No source code from nyt-pyfec or any other third-party FEC parser was
+copied into hardmoney; only the fec-csv-sources data tables described
+above were vendored, under the terms above.

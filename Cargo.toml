@@ -1,0 +1,62 @@
+[package]
+name = "hardmoney"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR BSD-3-Clause"
+description = "A single Rust crate for FEC campaign-finance data: a .fec electronic-filing parser (nyt-pyfec, kept current through spec 8.5), a Postgres bulk-data ETL, and a REST API -- usable as a library or as the `hardmoney` CLI."
+readme = "README.md"
+repository = "https://github.com/cgorski/hardmoney"
+homepage = "https://github.com/cgorski/hardmoney"
+keywords = ["fec", "campaign-finance", "election", "parser", "government-data"]
+categories = ["parser-implementations", "database"]
+
+[lib]
+name = "hardmoney"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hardmoney"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[dependencies]
+# parser (always available)
+csv = "1.3"
+regex = "1.10"
+once_cell = "1.19"
+thiserror = "2"
+indexmap = "2"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+encoding_rs = "0.8"
+ureq = { version = "3", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+
+# bulk ETL (optional)
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "macros"], optional = true }
+zip = { version = "8", default-features = false, features = ["deflate"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "net"], optional = true }
+indicatif = { version = "0.18", optional = true }
+
+# api (optional)
+axum = { version = "0.8", optional = true }
+tower-http = { version = "0.7", features = ["trace", "cors"], optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", optional = true }
+
+# cli (optional, but required for the `fec` binary)
+clap = { version = "4", features = ["derive", "env"], optional = true }
+dotenvy = { version = "0.15", optional = true }
+
+[features]
+default = ["fetch", "bulk", "api", "cli"]
+fetch = ["dep:ureq"]
+serde = ["dep:serde", "dep:serde_json"]
+bulk = ["dep:sqlx", "dep:zip", "dep:tokio", "dep:ureq", "dep:indicatif", "serde"]
+api = ["dep:axum", "dep:tower-http", "dep:tracing", "dep:tracing-subscriber", "dep:tokio", "bulk", "serde"]
+cli = ["dep:clap", "dep:dotenvy", "bulk", "api", "fetch"]
+
+[dev-dependencies]
+
+[profile.release]
+opt-level = 3
