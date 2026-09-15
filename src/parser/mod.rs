@@ -55,10 +55,14 @@ pub mod error;
 pub mod filing;
 pub mod form;
 pub mod header;
+pub mod reconcile;
 pub mod schema;
+pub mod stream;
 pub mod tables;
 pub mod typed;
 pub mod utils;
+pub mod validate;
+pub mod writer;
 
 pub use error::{FecError, Result};
 pub use filing::{
