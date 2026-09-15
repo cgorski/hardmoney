@@ -1,0 +1,132 @@
+name: Python
+
+# Builds and tests the `hardmoney` Python package (python/): a PyO3 +
+# maturin extension over the parser-only build of the parent crate.
+# Wheels are uploaded as workflow artifacts only; nothing is published
+# to PyPI from CI.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  lint:
+    name: cargo fmt + clippy (python/)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: python
+      - run: cargo fmt --check
+        working-directory: python
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: python
+      - run: cargo doc --no-deps
+        working-directory: python
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  test:
+    name: maturin develop + pytest (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        # The oldest interpreter the abi3-py39 wheel supports and a current one.
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: python
+      - name: Create venv and install build/test tools
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip maturin pytest
+        working-directory: python
+      - name: Build and install the extension into the venv
+        run: .venv/bin/maturin develop --release
+        working-directory: python
+        env:
+          VIRTUAL_ENV: ${{ github.workspace }}/python/.venv
+      - name: pytest (real fixtures from tests/fixtures/)
+        run: .venv/bin/python -m pytest -q
+        working-directory: python
+
+  wheels:
+    name: build wheel (${{ matrix.os }})
+    needs: [lint, test]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64
+          - os: macos-latest
+            target: aarch64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build abi3 wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: python
+          target: ${{ matrix.target }}
+          # manylinux: the parent crate is a path dependency (`..`), which
+          # the container sees because the whole checkout is mounted.
+          manylinux: auto
+          args: --release --out dist
+          sccache: "true"
+      - name: Smoke-test the wheel
+        shell: bash
+        run: |
+          python -m venv smoke
+          smoke/bin/python -m pip install --upgrade pip pytest
+          smoke/bin/python -m pip install dist/*.whl
+          smoke/bin/python -c "import hardmoney; print(hardmoney.__version__, hardmoney.BUNDLED_SPEC_VERSION, len(hardmoney.tables()))"
+          smoke/bin/python -m pytest -q tests
+        working-directory: python
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.target }}
+          path: python/dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    name: build sdist
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: python
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: python/dist/*.tar.gz
+          if-no-files-found: error

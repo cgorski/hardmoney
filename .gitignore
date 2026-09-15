@@ -1,3 +1,7 @@
 /target
 /book/book/
 /tmp/
+python/target
+python/.venv
+python/*.egg-info
+python/dist

@@ -1,0 +1,9 @@
+# A Python extension module must not link libpython itself on macOS: the
+# interpreter that loads it provides the symbols. maturin passes these flags
+# automatically; this lets a bare `cargo build` / `cargo clippy --all-targets`
+# in this directory link too.
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **Python bindings** (`python/`, PyPI package `hardmoney`, PyO3 0.29 +
+  maturin, one `abi3` wheel per platform for CPython >= 3.9). A
+  parser-only wheel -- no tokio/sqlx/axum -- exposing `parse`,
+  `parse_file` (streamed), `fetch`, and `Filing` (`header`, `summary`,
+  `lines`, `lines_for`, `iter_lines`, `skipped`, `to_fec`,
+  `to_fec_string`, `validate`, `reconcile`), `Line` (mapping-style field
+  access, `set`, `amount() -> decimal.Decimal` built from the exact
+  `Decimal` string, `date() -> datetime.date`), `Validation`/`Finding`,
+  `Reconciliation`/`LineCheck`, and the spec helpers `tables`, `layout`,
+  `field_spec`, `BUNDLED_SPEC_VERSION`. Errors are `hardmoney.FecError`
+  (a `ValueError` with `line_no`) and `hardmoney.UnsupportedForm`;
+  unknown fields are `KeyError`; a missing file is `FileNotFoundError`.
+  Every class is frozen and a `Line` is a handle into its `Filing`, so
+  `line.set(...)` is visible to `filing.to_fec()`. Type stubs
+  (`_hardmoney.pyi`, `py.typed`) ship in the wheel and a pytest checks
+  them against the compiled module. pytest runs the real fixtures
+  (`tests/fixtures/*.fec`): every one parses, round-trips through
+  `to_fec`, and validates with no errors; `F3XN_2011831.fec` reconciles.
+  New workflow `python.yml` builds wheels on Linux and macOS (artifacts
+  only; no PyPI publish). The root crate excludes `/python` from
+  `cargo package`. Book: *Python*.
 - **Filing discovery: openFEC and the e-file feed** (`hardmoney::fec`,
   behind `fetch`; the openFEC client also needs `serde`). `OpenFec`
   queries `/filings/` (processed metadata: amendment chains,

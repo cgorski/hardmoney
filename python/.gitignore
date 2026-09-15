@@ -1,0 +1,11 @@
+# Build artifacts of `maturin develop` / `maturin build` / pytest. The
+# compiled extension is copied into the source package by `maturin develop`.
+__pycache__/
+*.pyc
+*.so
+*.pyd
+.pytest_cache/
+.venv/
+dist/
+target/
+*.egg-info/
