@@ -96,270 +96,134 @@
 
 ## 2.0.0 — 2026-09-15
 
-Major release. The parser is rebuilt on a build-time-generated static
-schema, preserves field values as filed, and gains a writer, a cover-page
-reconciler, the FEC's acceptance rules, and a streaming reader. Every
-public parser type changed in some way; see *Upgrading from 1.x* at the
-end of this section.
+The first release with users. Everything below describes the crate as it
+is; earlier tags were development snapshots.
 
-### Breaking
+### Parser
 
-**Field values are verbatim.** A field is now returned exactly as filed,
-except that surrounding ASCII whitespace is trimmed and one pair of
-wrapping double quotes is removed (`"SMITH"` -> `SMITH`; some vendors
-quote every field even in ASCII-28 filings, and the FEC strips them too).
-1.x inherited nyt-pyfec's cleaning, which upper-cased every value,
-deleted `& < > " \`, and turned `|` into `,` -- so `AT&T` came back as
-`ATT` and `Smith, Jane` as `SMITH, JANE`. Codes (form-type tokens, entity
-types, memo flags) are still interpreted case-insensitively at the point
-of use, and `raw_form_type` is still upper-cased, but every string that
-reaches your code, the `parse` JSON, the `JSONB` columns written by
-`bulk-load-filing`, and the API changes. See
-`src/parser/utils.rs` and the book's *Fidelity* chapter.
+- Field values are preserved as filed. The parser trims surrounding ASCII
+  whitespace and removes one pair of wrapping double quotes (some vendors
+  quote every field, and the FEC strips them); it changes nothing else.
+  Form-type tokens, entity types, and memo flags are interpreted
+  case-insensitively where they are used. `raw_form_type` is upper-cased;
+  the `form_type` field keeps the spelling on the wire.
+- The format is data compiled by `build.rs`: `data/fec-csv-sources/*.csv`
+  gives the column layout of every table in every spec version since
+  2001, and `data/fec-spec/spec-8.5.json` (distilled from the FEC's
+  Electronic Filing Specification workbook by
+  `scripts/distill_fec_spec.py`, with `enum`/`pattern` constraints merged
+  from `fecgov/fecfile-validate`) gives each field's type, maximum length,
+  required level, sample, and rule text. The generator rejects a table
+  where two fields share a column, one field has two columns, a position
+  cell is not a number, or two version buckets overlap.
+- `SpecVersion` (numeric, ordered, `FromStr`/`Display`), `Layout` and
+  `FieldDef` (a table's columns at one version), `FieldSpec`, `FieldKind`,
+  `Requirement`.
+- `ParsedLine` holds a `&'static Layout` and a flat value slice. Read with
+  `get` (`Some("")` for blank, `None` for a field this version lacks),
+  `get_non_empty`, `iter`, `field_names`, `to_cells`; write with `set`
+  (`FecError::UnknownField` for a name the table lacks); build with
+  `from_cells` or `from_pairs`.
+- Compile-time-checked field access: one `Field<Marker>` constant per
+  field per table (`tables::sch_a::CONTRIBUTION_AMOUNT`), a zero-sized
+  marker type per table (`tables::markers::SchA`), and
+  `Typed<'_, T>` views (`line.typed::<SchA>()`,
+  `filing.summary_as::<F3X>()`) whose `get`/`money`/`date`/`string` accept
+  only that table's fields. `TypedView` implementations (`ScheduleA`,
+  `ScheduleB`, `ScheduleE`, `Form3XSummary`) are written against these
+  constants.
+- `Header` is a struct: `record_type`, `ef_type`, `fec_version_raw`,
+  `version`, `soft_name`, `soft_ver`, `name_delim` (3.x-5.x), `report_id`,
+  `report_number`, `comment`; `original_filing_id()`,
+  `amendment_number()`, `to_fields()`.
+- `Filing.amends_filing: Option<u64>`; a missing or malformed reference
+  is `None`, not a parse error (`validate` reports it).
+- `Table` derives `Display`, `FromStr` (case-insensitive), and `EnumIter`.
+- Streaming: `FilingReader<R: BufRead>` yields body lines one at a time
+  with a one-record lookahead for `[BEGINTEXT]` blocks; `filter_tables`;
+  `Filing::open` and `Filing::open_with` read a path. Peak memory on a
+  135 MB, 704,651-line presidential filing: 9.8 MB streaming versus
+  1.34 GB for `Filing::parse_bytes`. Output is field-for-field equal to
+  the eager parser on every fixture. Criterion bench in `benches/`.
 
-`Filing`:
-- `filing.headers: HeaderMap` (an `IndexMap<String, String>`) is now
-  `filing.header: Header`, a typed struct (`record_type`, `ef_type`,
-  `fec_version_raw`, `version`, `soft_name`, `soft_ver`, `name_delim`,
-  `report_id`, `report_number`, and the `comment` column that 1.x
-  dropped). `HeaderMap` and `header::parse` are gone;
-  `Header::from_fields`, `to_fields`, `original_filing_id`, and
-  `amendment_number` replace them. The `parse` JSON `header` object and
-  the `filings.header` `JSONB` column now have these keys.
-- `filing.version: String` is now a `SpecVersion` (compares numerically:
-  `8.5 > 8.4 > 6.4`; `Display` prints `3.0`, not `3.00` -- the wire
-  spelling is in `header.fec_version_raw`). The `filings.version` column
-  written by `bulk-load-filing` therefore stores `3.0` for a `3.00`
-  filing.
-- `filing.amends_filing: Option<String>` is now `Option<u64>` (the `n`
-  from `FEC-<n>`), and an amendment whose header lacks a well-formed
-  report id **no longer fails the parse** -- it is `None`, and
-  `hardmoney validate` reports it (`amendment_needs_original_id`).
-  `FecError::AmendmentOriginalNotFound` is removed. In the `parse` JSON,
-  `amends_filing` is a number (or `null`), not a string.
-- `Filing::open_with` and `FilingReader::into_filing` return
-  `Lenient<Filing>` (the same type as `parse_bytes_with`), so streaming
-  and eager callers can be swapped freely. (Both are new in 2.0; noted
-  here because pre-release builds returned a bare `Filing`.)
+### Writer
 
-`ParsedLine`:
-- The public `fields: IndexMap<String, String>` map is gone. A line
-  stores a `&'static Layout` plus a flat value slice; read it with
-  `get(name)` (`Some("")` for a blank field, `None` for a field this
-  version does not have), `get_non_empty`, `iter()` (in layout order),
-  `field_names()`, `to_cells()`; write it with `set(name, value)`
-  (fails with the new `FecError::UnknownField`). `layout()` returns the
-  layout the line was parsed with.
-- `line.table` (a field) is now `line.table()` (a method).
-- `ParsedLine::new` is replaced by `ParsedLine::from_cells` and
-  `ParsedLine::from_pairs`.
-- `ParsedLine` no longer implements `Deserialize`. `Serialize` is
-  unchanged in shape (`raw_form_type`, `table`, `line_no`, `fields`),
-  and `fields` keeps layout order (serde_json `preserve_order`).
+- `Filing::to_fec`, `to_fec_string`, `write_fec`. Output is canonical:
+  CRLF, every record at its layout's full width, ASCII-28 for spec 6.0+
+  and CSV quoting for 3.x-5.x, a Form 99's text as a
+  `[BEGINTEXT]`/`[ENDTEXT]` block, Windows-1252 when every character fits
+  (the FEC's character set) and UTF-8 otherwise. Re-parsing the output
+  gives the same header, cover, and body lines for every fixture; writing
+  again gives identical bytes. Property tests over arbitrary values.
+- `hardmoney write <file> [--out PATH] [--check] [--lenient]`.
 
-`TypedView`:
-- `fn from_fields(&IndexMap<String, String>)` is replaced by
-  `fn from_typed(Typed<'_, Self::Marker>)` with a new associated
-  `type Marker: TableMarker`; `const TABLE` is now derived from the
-  marker. Custom views must be rewritten against the `Typed` accessors
-  (`get`, `money`, `date`, `string`) and the generated field constants.
+### Reconciliation
 
-`Table`:
-- Now derives strum `Display`, `EnumString` (`FromStr`, ASCII
-  case-insensitive), `EnumIter`, and `IntoStaticStr`.
-  `Table::from_name` and `parser::UnknownTable` are removed: use
-  `"SchA".parse::<Table>()`. `Table::ALL`, `as_str`, and the new
-  `layout(version)`, `layouts()`, `spec(name)`, `specs()`,
-  `field_names()`, `supports_version` query the compiled schema.
+- `Filing::reconcile` for Form 3X, 3, and 3P. Column A lines are
+  recomputed from schedule sums (memo entries excluded) or from formulas
+  over the other reported lines; Column B lines from formulas. Lines whose
+  transactions need itemizing only above the $200 aggregate threshold
+  (operating expenditures, offsets, other receipts and disbursements,
+  refunds to individuals) are checked as floors (`Relation::AtLeast`);
+  all others must match exactly. Unitemized lines are inputs. The
+  allocation lines from Schedules H3-H6 are computed from the spec's rule
+  text. The rule tables are written in a small macro in the FEC's own
+  notation. Accepts the `SA11A1` token spelling of 3.x-5.x files.
+- Oracle test: agrees with the FEC's FECfile+ summary calculator on every
+  Column A line of its test dataset. Corpus: 95 of 109 real reports
+  satisfy every rule; the rest are truncated third-party samples or
+  genuine filer discrepancies.
+- `hardmoney reconcile <file> [--all] [--column A|B] [--tolerance N] [--json]`.
 
-Modules and errors:
-- `parser::line` and `parser::format_data` are removed; the format
-  tables are generated by `build.rs` into `parser::tables` and described
-  by `parser::schema`.
-- `FecError::{Regex, UnknownForm, DuplicateCanonicalField,
-  AmendmentOriginalNotFound, UnknownPaperHeaderVersion}` are removed
-  (the first three were runtime data-loading failures that are now build
-  failures). `FecError::UnknownField { table, field }` is new.
-  `NoMatchingVersionBucket` and `ParserMissing` carry a `Table` and a
-  `SpecVersion` instead of strings, and their messages changed
-  (`no format table for form type 'ZZZ' (spec version 8.5) at line 5`).
-  `FecError::line_no` now looks through `LinesSkipped`.
+### Validation
 
-API and CLI:
-- `?limit` outside `1..=500` or a negative `?offset` on any list route is
-  a `400` with an explanatory message instead of being silently clamped
-  (`Pagination::validate` -> `Validated`). `hardmoney query --limit`
-  enforces the same bounds as a usage error (exit 2).
-- `hardmoney parse` output: `header` is the typed header,
-  `amends_filing` is numeric, keys are in source order.
-
-### Added
-
-**Schema as data.** `build.rs` compiles `data/fec-csv-sources/*.csv`
-(column positions for every spec version since 2001) and the new
-`data/fec-spec/spec-8.5.json` (the FEC's own *Electronic Filing
-Specification, Part II* workbook -- field types, lengths, required
-levels, rule text, allowed values -- distilled by
-`scripts/distill_fec_spec.py`; the workbook is public domain) into
-`$OUT_DIR/tables.rs`. The generator rejects inconsistent data: two
-fields at one column, one field at two columns, non-numeric positions,
-overlapping version buckets.
-- `SpecVersion` value type (`electronic(8, 5)`, `paper(3, 4)`, `FromStr`
-  accepting `8.5`, `3.00`, `8.5.0.1`, `P3.4`; `uses_fs_delimiter`,
-  `has_name_delim_header`).
-- `Layout` / `FieldDef` (one layout per version bucket per table, with
-  `field(name)`, `index_of`, `supports`, `width`), `FieldSpec` /
-  `FieldKind` / `Requirement` (the FEC's per-field specification at
-  `BUNDLED_SPEC_VERSION`, `8.5`).
-- Generated `parser::tables::<table>` modules with a zero-sized marker
-  type and one `Field<Marker>` constant per canonical field
-  (`tables::sch_a::CONTRIBUTION_AMOUNT`, `tables::f3x::COL_A_TOTAL_RECEIPTS`),
-  re-exported markers in `tables::markers`, and `Typed<'_, T>` views
-  (`filing.summary_as::<F3X>()`, `line.typed::<SchA>()`) whose
-  `get`/`money`/`date`/`string` accessors only accept that table's
-  fields -- asking an F3X cover page for a Schedule A field is a compile
+- `Filing::validate` applies 32 rules modelled on the FEC's published
+  failing and warning messages: structure (HDR first, cover second, one
+  form per file, schedules allowed with the form), IDs (format, filer id
+  on every line), per-field checks driven by `FieldSpec` (required,
+  length, type, legal characters, dates, amounts, allowed values,
+  patterns), unique transaction ids, resolvable back-references, state
+  and entity codes, F99 text length. `Validation { findings }` with
+  `errors()`, `warnings()`, `is_acceptable()`, `Display`. Zero
+  error-severity findings across 102 filings the FEC accepted; the
+  warnings that remain are the FEC's own (blank addresses, one
+  out-of-range date).
+- `hardmoney validate <file> [--json] [--strict-warnings]`; exit 1 on any
   error.
-- `ParsedLine::from_pairs(table, version, line_no, pairs)` and
-  `from_cells` for building lines; `Header::to_fields`.
 
-**Writer.** `Filing::to_fec` (bytes), `to_fec_string`, and `write_fec`:
-the exact inverse of parsing. Canonical output -- CRLF, ASCII-28 for
-6.0+ and CSV quoting only where needed for 3.x-5.x, every record at its
-layout's full width, Form 99 free text as a `[BEGINTEXT]` block,
-Windows-1252 when every character is representable (the FEC's character
-set) else UTF-8. `parse(write(parse(f)))` equals `parse(f)` on all 25
-real fixtures and under `proptest` over arbitrary field values, and the
-output is idempotent. `hardmoney write <file> [-o out] [--lenient]
-[--check]`; `--check` re-parses the output and exits 1 on any record
-that does not round-trip.
+### Spec as data
 
-**Reconciler.** `Filing::reconcile` recomputes every cover-page line of
-a Form 3X, 3, or 3P with exact `Decimal` arithmetic and reports
-`reported`/`expected`/`delta` per line (`Reconciliation`, `LineCheck`,
-`Column`, `Relation`, `LineRule`, `Source`, `rules_for`). Column A lines
-are schedule sums (memo entries excluded) or formulas over the reported
-values of other lines; Column B lines are formulas only. Lines whose
-transactions need itemizing only above the $200 aggregate (11 CFR
-104.3) are checked as floors (`Relation::AtLeast`); everything else
-must match exactly. Rules are declared in a small macro DSL in the FEC's
-notation, sourced from the spec's `RULE REFERENCE` column and FECfile+
-(the H3-H6 allocation lines FECfile+ stubs to zero are implemented from
-the spec). Oracle test: agrees with FECfile+'s summary calculator on
-every Column A line of its test dataset. Corpus: every periodic-report
-fixture balances; across 109 real reports, 95 satisfy every rule and
-the rest are genuine filer discrepancies or truncated third-party
-samples. `hardmoney reconcile <file> [--all] [--column a|b]
-[--tolerance N] [--json] [--lenient]`, exit 1 if any line disagrees.
+- `hardmoney spec tables`, `spec fields <TABLE> [--version V]`,
+  `spec export` (every layout and every spec row as JSON), and
+  `spec diff <FROM> <TO>` (fields added, removed, and moved between two
+  spec versions).
 
-**Validator.** `Filing::validate` (and `Lenient<Filing>::validate`,
-which adds one `unrecognized_form_type` warning per skipped line)
-reimplements the FEC's acceptance rules that can be evaluated from a
-single file: 32 `Rule`s with fixed `Severity` (`Error` rejects,
-`Warning` does not), each documented with the FEC's own message text
-(`Rule::fec_message`) -- structure, IDs, required/recommended/conditional
-fields, lengths, character set, dates, amounts, code lists, state codes,
-transaction-ID uniqueness and back-references, Form 99 text. Per-field
-rules are driven by the bundled `FieldSpec` data, not hard-coded
-lengths. Deliberate deviations (all documented in
-`src/parser/validate.rs`): a superseded spec version is a warning, and
-demotes `required_field_empty` to a warning on such filings; embedded
-double quotes and out-of-range characters in F99 text are warnings.
-Zero error-severity findings across 102 real FEC-accepted filings.
-`hardmoney validate <file> [--json] [--strict-warnings]`, exit 1 if the
-FEC would reject the filing.
+### Format data corrections
 
-**Streaming.** `FilingReader<R: BufRead>` parses the header and cover
-line eagerly and yields body lines one at a time (`Iterator<Item =
-Result<ParsedLine>>`, fused), holding at most one record plus one
-`[BEGINTEXT]` block in memory: `new` / `with_options`, `preamble()`
-(`Preamble`), `filter_tables`, `skipped`, `lines_read`, `into_filing`.
-`Filing::open(path)` / `open_with(path, options)` stream a file from disk
-into a `Filing` field-for-field equal to `parse_bytes`. On a 135 MB,
-704,651-line presidential F3P: a streaming Schedule A total peaks at
-9.8 MB RSS versus 1.34 GB for `parse_bytes`.
+Six defects in the vendored `fech-sources` tables, found by the build-time
+checks and recorded in `NOTICE`: F3 6.1-6.3 `election_date` shared a column
+with `report_code`; F3X 5.x/3.x `col_b_cash_on_hand_jan_1` read the wrong
+column because of an unquoted comma in its label; F3S 5.x had label text in
+three position cells so those fields were unreadable; F5 5.3
+`individual_occupation` shared a column with `coverage_through_date`; F57
+3.x `payee_street_2` shared a column with `payee_street_1`; HDR had
+overlapping version buckets and listed `name_delim` for 6.x+.
 
-**Spec on the command line.** `hardmoney spec tables` (every table, its
-version buckets, fields, and spec coverage), `spec fields <table>
---version V` (columns with the FEC's description, type, length,
-required level, and rule), `spec export` (the whole schema as JSON), and
-`spec diff <from> <to> [--table T]` (fields added, removed, and moved
-between two versions).
+### API and CLI
 
-Also:
-- `hardmoney query --limit` is validated against the API's `1..=500`.
-- `CONTRIBUTING.md`: the rules every change is held to.
-- `benches/parse.rs` (criterion): eager vs. streaming parse.
-- `tests/fixtures/invalid/`: ten real filings with deliberate defects,
-  each pinned to the exact rules it must trigger.
-- `bulk::BulkError::Json` for a `JSONB` serialisation failure.
-
-### Fixed (format data)
-
-The build-time consistency checks found six defects in the vendored
-fech-sources column tables (`data/fec-csv-sources/`, changes recorded in
-`NOTICE`). For the first five, 1.x silently read the wrong column, or
-nothing, for the field:
-- `F3.csv`: in the `6.1`-`6.3` bucket `election_date` was listed at
-  column 12, the same column as `report_code`; every other bucket and
-  the FEC's own listings place it at 14.
-- `F3X.csv`: `col_b_cash_on_hand_jan_1` (line 6(a), Column B) had an
-  unquoted comma in its FEC label, shifting the rest of the row: at
-  `5.x` the field read column 19 instead of 62, and at `3.x` it was
-  absent.
-- `F3S.csv`: the same unquoted-comma problem on three rows
-  (`19_b_loan_repayments_all_other_loans`,
-  `20_b_refund_political_party_committees`,
-  `20_c_refund_other_political_committees`) made those fields absent in
-  the `5.x`/`3.x` bucket.
-- `F5.csv`: `individual_occupation` at spec `5.3` was listed at column
-  18 (the `6.x` position) instead of 12.
-- `F57.csv`: `payee_street_2` in the `3.x` bucket was listed at column
-  5, the same column as `payee_street_1`; corrected to 6.
-- `HDR.csv`: the `^8.5` and `^[6-8]` buckets overlapped, and the
-  `^[6-8]` bucket carried a `name_delim` column that only 3.x-5.x
-  headers have, so `Table::Hdr` put `report_id`/`report_number`/`comment`
-  one column off for 6.0-8.4. (1.x parsed `Filing.headers` from
-  hard-coded column lists rather than this table, so that path was
-  unaffected -- but those lists omitted `comment`, which is why 1.x never
-  carried it.)
+- `?limit` outside `1..=500` and negative `?offset` return 400 with a
+  message instead of being silently clamped. `hardmoney query --limit`
+  is validated the same way.
+- Book: chapters on the schema, fidelity, writing, reconciling,
+  validating, streaming; CLI reference for every command.
+- `CONTRIBUTING.md`.
 
 ### Dependencies
 
-- Added `compact_str` (inline storage for the short values most FEC
-  fields are; roughly halves the memory of a parsed 700k-line filing),
-  `strum` (enum derives), and as dev-dependencies `proptest` and
-  `criterion`. `csv`, `regex`, and `serde_json` are also
-  build-dependencies now.
-- Removed `indexmap`.
-- `serde_json` is enabled with `preserve_order` so JSON objects keep the
-  FEC's column order.
-- `cargo package` excludes the FEC spec workbook (`data/fec-spec/*.xlsx`);
-  only the distilled JSON is needed to build.
-
-### Upgrading from 1.x
-
-| 1.x | 2.0 |
-|---|---|
-| `filing.headers["soft_name"]` | `filing.header.soft_name` |
-| `filing.headers["fec_version"]` | `filing.header.fec_version_raw` (as filed) or `filing.version` (`SpecVersion`) |
-| `filing.version == "8.5"` | `filing.version == SpecVersion::electronic(8, 5)` or `filing.version.to_string() == "8.5"` |
-| `filing.amends_filing: Option<String>` | `filing.amends_filing: Option<u64>` |
-| `line.table` | `line.table()` |
-| `line.fields.get("x")` / `line.fields["x"]` | `line.get("x")` (`Option<&str>`; `Some("")` when blank, `None` when the version lacks the field) |
-| `for (k, v) in &line.fields` | `for (k, v) in line.iter()` |
-| `line.fields.insert(k, v)` | `line.set(k, &v)?` |
-| `ParsedLine::new(token, table, n, map)` | `ParsedLine::from_pairs(table, version, n, pairs)?` |
-| `Table::from_name("SchA")` | `"SchA".parse::<Table>()` |
-| `impl TypedView { const TABLE; fn from_fields(&IndexMap) }` | `impl TypedView { type Marker = SchA; fn from_typed(Typed<'_, SchA>) }` |
-| `FecError::AmendmentOriginalNotFound` | not an error; check `filing.is_amendment && filing.amends_filing.is_none()` or run `validate` |
-| `FecError::{Regex, UnknownForm, DuplicateCanonicalField}` | cannot occur (build-time checks) |
-| `value.to_uppercase()` comparisons on field text | compare case-insensitively at the point of use (`eq_ignore_ascii_case`); values are as filed |
-| reproducing 1.x text output | upper-case, delete `&<>"\`, replace `\|` with `,` -- the reverse is not possible |
-
-New capabilities that need no migration: `filing.to_fec()`,
-`filing.reconcile()`, `filing.validate()`, `Filing::open(path)`,
-`FilingReader::new(reader)`, `filing.summary_as::<F3X>()`,
-`line.typed::<SchA>()`.
+`compact_str` (inline small strings for field values), `strum` (enum
+derives); dev: `proptest`, `criterion`. `serde_json` with
+`preserve_order` so JSON keeps the FEC's column order. Build
+dependencies: `csv`, `regex`, `serde_json`.
 
 ## 1.1.0 — 2026-09-15
 
