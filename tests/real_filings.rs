@@ -559,3 +559,38 @@ fn typed_views_on_real_filings_respect_tables() {
         Err(hardmoney::TypedViewError::WrongTable { .. })
     ));
 }
+
+/// `Filing::to_fec` is an exact inverse of parsing on every real fixture:
+/// re-parsing the written bytes yields the same header, cover line, and
+/// body lines, field for field. Writing the re-parsed filing again yields
+/// identical bytes (the output is canonical).
+#[test]
+fn every_fixture_round_trips_through_the_writer() {
+    for name in fixture_names() {
+        let filing = fixture(&name);
+        let bytes = filing.to_fec();
+        let again = Filing::parse_bytes(&bytes).unwrap_or_else(|e| panic!("{name}: re-parse: {e}"));
+        assert_eq!(filing.header, again.header, "{name}: header");
+        assert_eq!(filing.raw_form_type, again.raw_form_type, "{name}");
+        assert_eq!(filing.amends_filing, again.amends_filing, "{name}");
+        assert!(
+            filing.summary.iter().eq(again.summary.iter()),
+            "{name}: cover line differs"
+        );
+        assert_eq!(filing.lines.len(), again.lines.len(), "{name}: line count");
+        for (a, b) in filing.lines.iter().zip(&again.lines) {
+            assert_eq!(
+                a.raw_form_type, b.raw_form_type,
+                "{name} line {}",
+                a.line_no
+            );
+            assert_eq!(a.table(), b.table(), "{name} line {}", a.line_no);
+            assert!(
+                a.iter().eq(b.iter()),
+                "{name} line {}: fields differ\n{a:?}\n{b:?}",
+                a.line_no
+            );
+        }
+        assert_eq!(again.to_fec(), bytes, "{name}: writer is not idempotent");
+    }
+}

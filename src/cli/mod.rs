@@ -9,6 +9,7 @@ pub mod schema;
 pub mod serve;
 pub mod spec;
 pub mod validate;
+pub mod write;
 
 use clap::{Parser, Subcommand};
 
@@ -33,6 +34,8 @@ struct Cli {
 enum Command {
     /// Parse a single `.fec` filing and print a JSON summary.
     Parse(parse::ParseArgs),
+    /// Parse a `.fec` filing and write it back out in canonical form.
+    Write(write::WriteArgs),
     /// Check a .fec file against the FEC's acceptance rules.
     Validate(validate::ValidateArgs),
     /// Create or upgrade the Postgres schema in the target namespace.
@@ -63,6 +66,7 @@ pub async fn run() -> CliResult {
     let cli = Cli::parse();
     match cli.command {
         Command::Parse(a) => parse::run(a),
+        Command::Write(a) => write::run(a),
         Command::Validate(a) => validate::run(a),
         Command::SchemaInit(a) => schema::init(a).await,
         Command::SchemaStatus(a) => schema::status(a).await,
