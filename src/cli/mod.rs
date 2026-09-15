@@ -5,6 +5,7 @@ pub mod bulk;
 pub mod db_args;
 pub mod parse;
 pub mod query;
+pub mod reconcile;
 pub mod schema;
 pub mod serve;
 pub mod spec;
@@ -36,6 +37,9 @@ enum Command {
     Parse(parse::ParseArgs),
     /// Parse a `.fec` filing and write it back out in canonical form.
     Write(write::WriteArgs),
+    /// Recompute a report's cover-page totals from its schedules and show
+    /// every line that disagrees.
+    Reconcile(reconcile::ReconcileArgs),
     /// Check a .fec file against the FEC's acceptance rules.
     Validate(validate::ValidateArgs),
     /// Create or upgrade the Postgres schema in the target namespace.
@@ -67,6 +71,7 @@ pub async fn run() -> CliResult {
     match cli.command {
         Command::Parse(a) => parse::run(a),
         Command::Write(a) => write::run(a),
+        Command::Reconcile(a) => reconcile::run(a),
         Command::Validate(a) => validate::run(a),
         Command::SchemaInit(a) => schema::init(a).await,
         Command::SchemaStatus(a) => schema::status(a).await,
