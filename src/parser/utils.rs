@@ -6,20 +6,40 @@
 //! upper-cased every field and silently deleted `&`, `<`, `>`, `"`, `\` and
 //! turned `|` into `,`. That made `AT&T` come out as `ATT` and made a
 //! byte-faithful writer impossible. Since 2.0 the parser preserves every
-//! field **verbatim except for surrounding ASCII whitespace**, which is
-//! trimmed because the FEC's own ingestion trims it and because several
-//! historical vendors padded fields to fixed widths. Anything that needs to
-//! *interpret* a value (entity-type codes, memo flags, form-type tokens)
-//! does so case-insensitively at the point of interpretation instead.
+//! field **verbatim except for two wire-format conventions**:
+//!
+//! * surrounding ASCII whitespace is trimmed (the FEC's own ingestion trims
+//!   it, and several historical vendors padded fields to fixed widths);
+//! * one pair of surrounding double quotes is removed (`"BRABANT"` ->
+//!   `BRABANT`, `""` -> empty). Some vendors -- CMDI Crimson Filer among
+//!   them -- quote every text field even in ASCII-28-delimited files, and
+//!   the FEC accepts and strips them (its validator's message #26 is
+//!   "Invalid double-quote surround text field", #30 "Embedded double-quotes
+//!   not allowed"). A lone or unbalanced quote is data and is kept.
+//!
+//! Anything that needs to *interpret* a value (entity-type codes, memo
+//! flags, form-type tokens) does so case-insensitively at the point of
+//! interpretation instead.
 
-/// Trims leading and trailing ASCII whitespace (space, tab, CR, LF, FF, VT)
-/// and returns the field otherwise untouched.
+/// Applies the wire-format normalisation described in the module docs:
+/// trims leading/trailing ASCII whitespace (space, tab, CR, LF, FF, VT),
+/// then removes one pair of surrounding double quotes if present, then
+/// trims again. Everything else is returned untouched.
 ///
 /// Only ASCII whitespace is trimmed: a non-breaking space or other Unicode
 /// whitespace inside filer-entered text is data, not padding.
 #[must_use]
 pub fn normalize_field(entry: &str) -> &str {
-    entry.trim_matches(|c: char| c.is_ascii_whitespace())
+    let trimmed = entry.trim_matches(|c: char| c.is_ascii_whitespace());
+    match trimmed
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+    {
+        // `"` alone would strip to itself via prefix then fail the suffix,
+        // so only genuinely paired quotes reach here.
+        Some(inner) => inner.trim_matches(|c: char| c.is_ascii_whitespace()),
+        None => trimmed,
+    }
 }
 
 /// A raw form-type token, upper-cased for stable comparison, e.g. `"sb21b"`
@@ -62,6 +82,21 @@ mod tests {
     fn normalize_field_preserves_case() {
         assert_eq!(normalize_field("FECfile"), "FECfile");
         assert_eq!(normalize_field("Smith, Jane"), "Smith, Jane");
+    }
+
+    #[test]
+    fn normalize_field_strips_exactly_one_pair_of_surrounding_quotes() {
+        assert_eq!(normalize_field("\"BRABANT\""), "BRABANT");
+        assert_eq!(normalize_field("\"\""), "");
+        assert_eq!(normalize_field(" \"SD12\" "), "SD12");
+        assert_eq!(normalize_field("\" padded \""), "padded");
+        // Only one pair; nested quoting is data.
+        assert_eq!(normalize_field("\"\"x\"\""), "\"x\"");
+        // Lone or unbalanced quotes are data.
+        assert_eq!(normalize_field("\""), "\"");
+        assert_eq!(normalize_field("\"abc"), "\"abc");
+        assert_eq!(normalize_field("abc\""), "abc\"");
+        assert_eq!(normalize_field("say \"hi\" now"), "say \"hi\" now");
     }
 
     #[test]

@@ -51,10 +51,12 @@
 //!
 //! The FEC's validator accepts a field wrapped in double quotes
 //! (`"SMITH"`) and reads the content between the quotes; some vendors emit
-//! every field that way. Every per-field check here does the same
-//! ([`effective_value`]), and [`Rule::EmbeddedDoubleQuote`] fires only for
-//! a quote *inside* a quote-wrapped value, exactly as the FEC's message #30
-//! describes.
+//! every field that way. The parser already removes one such pair (see
+//! [`crate::parser::utils::normalize_field`]), so by the time a value
+//! reaches the validator the wrapping is gone. Any double quote that
+//! *remains* is therefore an embedded one, and [`Rule::EmbeddedDoubleQuote`]
+//! reports it -- at warning level, because the FEC has accepted real
+//! filings carrying a stray `"` in free-text fields.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -220,7 +222,8 @@ impl Rule {
             | Rule::PatternMismatch
             | Rule::InvalidStateCode
             | Rule::InvalidEntityType
-            | Rule::InvalidSupportOpposeCode => Severity::Warning,
+            | Rule::InvalidSupportOpposeCode
+            | Rule::EmbeddedDoubleQuote => Severity::Warning,
             Rule::HeaderFirst
             | Rule::CoverSecond
             | Rule::FilingTypeFec
@@ -233,7 +236,6 @@ impl Rule {
             | Rule::RequiredFieldEmpty
             | Rule::FieldTooLong
             | Rule::IllegalCharacter
-            | Rule::EmbeddedDoubleQuote
             | Rule::BadDateFormat
             | Rule::NotARealDate
             | Rule::InvalidAmount
@@ -526,21 +528,7 @@ impl Lenient<Filing> {
 /// again). `"SMITH"` -> `SMITH`; `""` -> empty; `"` alone is unchanged.
 #[must_use]
 pub fn effective_value(raw: &str) -> &str {
-    let trimmed = raw.trim_matches(|c: char| c.is_ascii_whitespace());
-    match quoted_inner(trimmed) {
-        Some(inner) => inner.trim_matches(|c: char| c.is_ascii_whitespace()),
-        None => trimmed,
-    }
-}
-
-/// The content between wrapping double quotes, if `value` is at least two
-/// characters and starts and ends with `"`.
-fn quoted_inner(value: &str) -> Option<&str> {
-    if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
-        value.get(1..value.len() - 1)
-    } else {
-        None
-    }
+    crate::parser::utils::normalize_field(raw)
 }
 
 /// Whether `id` is a well-formed FEC committee or candidate ID:
@@ -1033,15 +1021,13 @@ impl Checker<'_> {
                 continue;
             }
 
-            if let Some(inner) = quoted_inner(raw.trim())
-                && inner.contains('"')
-            {
+            if value.contains('"') {
                 self.push_line(
                     Rule::EmbeddedDoubleQuote,
                     line,
                     Some(name),
                     format!(
-                        "Embedded double-quotes (\") not allowed inside a quoted {}",
+                        "Embedded double-quotes (\") not allowed in {}",
                         spec.description
                     ),
                 );
@@ -1550,7 +1536,6 @@ mod tests {
         assert_eq!(effective_value(" \" x \" "), "x");
         assert_eq!(effective_value("\""), "\"");
         assert_eq!(effective_value("say \"hi\""), "say \"hi\"");
-        assert_eq!(effective_value("\"\"\""), "\"");
         assert_eq!(effective_value("plain"), "plain");
     }
 
@@ -2020,15 +2005,20 @@ mod tests {
         let v = with_lines(vec![sched_a(&[("contributor_last_name", "O\u{2019}NEIL")])]).validate();
         assert!(!has(&v, Rule::IllegalCharacter), "{v}");
 
+        // The parser strips one wrapping pair; what remains is embedded.
         let v = with_lines(vec![sched_a(&[("contributor_last_name", "\"O\"NEIL\"")])]).validate();
-        assert!(has(&v, Rule::EmbeddedDoubleQuote), "{v}");
-        // A bare quote in an unquoted field is fine (FEC #30).
+        let f = v
+            .findings
+            .iter()
+            .find(|f| f.rule == Rule::EmbeddedDoubleQuote)
+            .unwrap();
+        assert_eq!(f.severity, Severity::Warning, "{f}");
         let v = with_lines(vec![sched_a(&[(
             "contributor_first_name",
             "JOHN \"JACK\"",
         )])])
         .validate();
-        assert!(!has(&v, Rule::EmbeddedDoubleQuote), "{v}");
+        assert!(has(&v, Rule::EmbeddedDoubleQuote), "{v}");
         // Fully quoted fields, as some vendors emit, are fine.
         let v = with_lines(vec![sched_a(&[
             ("contributor_last_name", "\"DOE\""),
