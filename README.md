@@ -67,8 +67,9 @@ hardmoney bulk-load committees --cycle 2026 --schema cycle_2026
 hardmoney bulk-load schedule_a --cycle 2026 --schema cycle_2026 --limit 200000  # sample; drop --limit for all 2.2 GB
 hardmoney serve --schema cycle_2026 --api-key my-secret &
 
-curl -H 'X-Api-Key: my-secret' 'localhost:8080/candidates?q=cooper&cycle=2026'
-curl -H 'X-Api-Key: my-secret' 'localhost:8080/schedule-a?cmte_id=C00913566&min_amount=1000'
+# No curl needed: `query` runs the API's own code against the database.
+hardmoney query candidates -q cooper --cycle 2026 --schema cycle_2026
+hardmoney query contributions --committee C00913566 --min-amount 1000 --schema cycle_2026
 ```
 
 Re-run any `bulk-load` next week: it replaces that cycle's rows in one

@@ -4,6 +4,7 @@
 pub mod bulk;
 pub mod db_args;
 pub mod parse;
+pub mod query;
 pub mod schema;
 pub mod serve;
 
@@ -47,6 +48,8 @@ enum Command {
     BulkLoadFiling(bulk::BulkLoadFilingArgs),
     /// Run the REST API server.
     Serve(serve::ServeArgs),
+    /// Search loaded data from the terminal (same results as the REST API).
+    Query(query::QueryArgs),
 }
 
 pub async fn run() -> CliResult {
@@ -62,5 +65,6 @@ pub async fn run() -> CliResult {
         Command::BulkRestoreDump(a) => bulk::restore_dump(a).await,
         Command::BulkLoadFiling(a) => bulk::load_filing(a).await,
         Command::Serve(a) => serve::run(a).await,
+        Command::Query(a) => query::run(a).await,
     }
 }

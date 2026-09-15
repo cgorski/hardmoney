@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.1.0 — 2026-09-15
+
+### Added
+- `hardmoney query <candidates|candidate|committees|committee|contributions|disbursements|ies|filing|filing-ies|schema>`:
+  search loaded data from the terminal without curl. Runs the REST API's
+  own router in-process against the database (identical results), or hits
+  a running server with `--api-url` / `--api-key`. Table output by default,
+  `--json` for raw.
+
+### Fixed
+- `build.rs` now also watches `src/` and `data/` (a `rerun-if-changed`
+  for migrations alone stopped Cargo from rebuilding on source edits).
+
 ## 1.0.1 — 2026-09-15
 
 ### Fixed
