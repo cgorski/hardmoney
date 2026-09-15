@@ -24,6 +24,7 @@
   - [Namespaces: Many Sessions, One Database](./namespaces.md)
   - [Reloading: Replace, Append, and `--if-changed`](./reloading.md)
   - [Dates: Two FEC Formats, Twin Columns](./dates.md)
+  - [Amendments: Which Version of a Report Is Current?](./amendments.md)
 - [The REST API](./rest-api.md)
   - [Hardening the API](./api-hardening.md)
 - [CLI Reference](./cli-reference.md)

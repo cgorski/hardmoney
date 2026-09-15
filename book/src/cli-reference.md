@@ -513,6 +513,7 @@ Options:
       --schema <SCHEMA>              Namespace (Postgres schema) to operate in. Each namespace is a fully isolated set of hardmoney tables: use one per cycle, per snapshot, per investigation, or per CI run. Default: public [env: HARDMONEY_SCHEMA=] [default: public]
       --strict                       Fail on any unparseable body line instead of skipping and recording the count (the default is lenient, because one unknown line type should not fail an ingestion job)
       --filing-id <FILING_ID>        Override the filing id derived from the filename
+      --no-resolve                   Skip recomputing the filing's amendment chain (`most_recent`, `amendment_chain`, ...) after the insert. For scripted batch loads: ingest every file with this flag, then resolve the whole table once
   -h, --help                         Print help
 ```
 

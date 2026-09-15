@@ -141,6 +141,12 @@ $ curl -s -H 'X-Api-Key: demo-key' "http://127.0.0.1:18090/filings/2011832"
 }
 ```
 
+(Since 2.1 the response also carries the amendment-chain fields --
+`amendment_indicator`, `amendment_version`, `amendment_chain`,
+`most_recent`, `most_recent_file_number`, `previous_file_number` -- plus
+`report_type`, `coverage_start_date`, `coverage_end_date`, and `fec_url`;
+see [Amendments](./amendments.md).)
+
 Two fields to notice: `skipped_lines` is how many body lines the
 (lenient, by default) ingest had to skip -- 0 here, so this record is
 complete -- and `ingested_at` is when the row was last written, which
@@ -428,7 +434,8 @@ Substring filters are case-insensitive `ILIKE '%term%'` matches;
 | `GET /schedule-a` | search Schedule A (individual contributions, from `indiv`) | `cmte_id`, `cycle`, `name`, `employer`, `occupation`, `state`, `zip_code` (prefix), `min_amount`, `max_amount`, `min_date`, `max_date` |
 | `GET /disbursements` | search Schedule B operating expenditures (from `oppexp`) | `cmte_id`, `cycle`, `name`, `city`, `state`, `purpose`, `min_amount`, `max_amount`, `min_date`, `max_date` |
 | `GET /independent-expenditures` | search the FEC's own Schedule E dump | `candidate_id`, `cmte_id`, `support_oppose_code` |
-| `GET /filings/{filing_id}` | one ingested filing's header/summary, plus `skipped_lines` and `ingested_at` | -- |
+| `GET /filings` | list ingested filings | `committee_id`, `most_recent` (`true`/`false`), `form_type` (base such as `F3X`, or exact such as `F3XA`) |
+| `GET /filings/{filing_id}` | one ingested filing's header/summary, its amendment chain (openFEC field names: `amendment_indicator`, `amendment_version`, `amendment_chain`, `most_recent`, `most_recent_file_number`, `previous_file_number`), `report_type`, coverage dates, `fec_url`, plus `skipped_lines` and `ingested_at` | -- |
 | `GET /filings/{filing_id}/schedule-e` | that filing's own Schedule E line items | -- |
 
 Exact field lists for each route's JSON response live in

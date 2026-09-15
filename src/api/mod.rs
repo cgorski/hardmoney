@@ -23,7 +23,8 @@
 //! | `GET /schedule-a` | itemized contributions; `cmte_id`, `cycle`, `name`, `employer`, `occupation`, `state`, `zip_code`, `min_amount`, `max_amount`, `min_date`, `max_date` |
 //! | `GET /disbursements` | Schedule B; `cmte_id`, `cycle`, `name`, `city`, `state`, `purpose`, `min_amount`, `max_amount`, `min_date`, `max_date` |
 //! | `GET /independent-expenditures` | from the FEC's own Schedule E pg_dump; `candidate_id`/`cmte_id`/`support_oppose_code` |
-//! | `GET /filings/{filing_id}` | a directly-ingested `.fec` filing's header/summary |
+//! | `GET /filings` | list directly-ingested filings; `committee_id`, `most_recent`, `form_type` filters |
+//! | `GET /filings/{filing_id}` | a directly-ingested `.fec` filing's header/summary and amendment chain |
 //! | `GET /filings/{filing_id}/schedule-e` | that filing's own Schedule E line items |
 //!
 //! All list routes accept `limit` (default 50, max 500) and `offset`.
@@ -128,6 +129,7 @@ pub fn router(pool: PgPool, config: &ApiConfig) -> Router {
             "/independent-expenditures",
             get(routes::independent_expenditures::search),
         )
+        .route("/filings", get(routes::filings::list))
         .route("/filings/{filing_id}", get(routes::filings::get))
         .route(
             "/filings/{filing_id}/schedule-e",

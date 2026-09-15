@@ -223,6 +223,11 @@ pub struct BulkLoadFilingArgs {
     /// Override the filing id derived from the filename.
     #[arg(long)]
     pub filing_id: Option<i64>,
+    /// Skip recomputing the filing's amendment chain (`most_recent`,
+    /// `amendment_chain`, ...) after the insert. For scripted batch loads:
+    /// ingest every file with this flag, then resolve the whole table once.
+    #[arg(long)]
+    pub no_resolve: bool,
 }
 
 pub async fn load_filing(args: BulkLoadFilingArgs) -> super::CliResult {
@@ -255,9 +260,20 @@ pub async fn load_filing(args: BulkLoadFilingArgs) -> super::CliResult {
         (id, std::fs::read(path)?)
     };
 
-    let report = bulk::ingest_filing_bytes(&pool, filing_id, &bytes, &options).await?;
+    let resolution = if args.no_resolve {
+        bulk::ingest::ChainResolution::Defer
+    } else {
+        bulk::ingest::ChainResolution::Resolve
+    };
+    let report =
+        bulk::ingest::ingest_filing_bytes_with(&pool, filing_id, &bytes, &options, resolution)
+            .await?;
+    let chain = match report.chain_rows_resolved {
+        Some(n) => format!(", amendment chain resolved ({n} filing(s))"),
+        None => ", amendment chain not resolved (--no-resolve)".to_string(),
+    };
     println!(
-        "ingested filing {} ({}): {} Schedule E line(s), {} skipped",
+        "ingested filing {} ({}): {} Schedule E line(s), {} skipped{chain}",
         report.filing_id,
         report.form_type,
         report.schedule_e_lines,

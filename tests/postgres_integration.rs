@@ -412,3 +412,433 @@ async fn api_serves_loaded_data_with_hardening() {
     let _ = std::fs::remove_file(zip);
     t.drop().await;
 }
+
+// ---------------------------------------------------------------------------
+// Amendment chains
+// ---------------------------------------------------------------------------
+
+/// A minimal spec-8.5 Form 3 as `.fec` text. `report_id`/`report_number`
+/// go in the header (`FEC-<original>` / amendment number); the cover line
+/// carries the committee, `12G`, and the coverage dates at their F3 v8.5
+/// column positions.
+fn f3_text(cover: &str, report_id: &str, report_number: &str) -> String {
+    let header = ["HDR", "FEC", "8.5", "X", "1", report_id, report_number].join("\u{1c}");
+    // F3 v8.5, 1-based: 1 form_type, 2 filer_committee_id_number,
+    // 3 committee_name, 12 report_code, 16 coverage_from_date,
+    // 17 coverage_through_date (data/fec-csv-sources/F3.csv).
+    let mut cols = vec![""; 17];
+    cols[0] = cover;
+    cols[1] = "C00554709";
+    cols[2] = "COMMITTEE";
+    cols[11] = "12G";
+    cols[15] = "20161001";
+    cols[16] = "20161019";
+    format!("{header}\n{}\n", cols.join("\u{1c}"))
+}
+
+async fn ingest_text(pool: &PgPool, id: i64, text: &str) -> bulk::IngestReport {
+    bulk::ingest_filing_bytes(pool, id, text.as_bytes(), &hardmoney::ParseOptions::STRICT)
+        .await
+        .unwrap()
+}
+
+/// The resolved chain columns of one row, in a shape that is easy to
+/// compare against openFEC's `/filings/` fields.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+struct Chain {
+    filing_id: i64,
+    amendment_version: Option<i32>,
+    amendment_chain: Option<Vec<i64>>,
+    most_recent: Option<bool>,
+    most_recent_filing_id: Option<i64>,
+    previous_filing_id: Option<i64>,
+    chain_unresolved: bool,
+}
+
+impl Chain {
+    fn resolved(
+        filing_id: i64,
+        version: i32,
+        chain: &[i64],
+        most_recent_id: i64,
+        previous_id: i64,
+    ) -> Self {
+        Self {
+            filing_id,
+            amendment_version: Some(version),
+            amendment_chain: Some(chain.to_vec()),
+            most_recent: Some(filing_id == most_recent_id),
+            most_recent_filing_id: Some(most_recent_id),
+            previous_filing_id: Some(previous_id),
+            chain_unresolved: false,
+        }
+    }
+
+    /// A one-filing chain: an original with no amendments, an F99, or an
+    /// amendment whose original is missing (`unresolved`).
+    fn alone(filing_id: i64, unresolved: bool) -> Self {
+        Self {
+            chain_unresolved: unresolved,
+            ..Self::resolved(filing_id, 0, &[filing_id], filing_id, filing_id)
+        }
+    }
+}
+
+async fn chains(pool: &PgPool) -> Vec<Chain> {
+    sqlx::query_as::<_, Chain>(
+        "SELECT filing_id, amendment_version, amendment_chain, most_recent, \
+                most_recent_filing_id, previous_filing_id, chain_unresolved \
+         FROM filings ORDER BY filing_id",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// openFEC's `/filings/?committee_id=C00554709&report_type=12G&cycle=2016`
+/// (tmp/agent-fec-deep/pages/openfec_filings_c00554709.json): original
+/// 1118027, amendments 1131084 (v1) and 1151343 (v2).
+const OPENFEC_ORIGINAL: i64 = 1118027;
+const OPENFEC_V1: i64 = 1131084;
+const OPENFEC_V2: i64 = 1151343;
+
+fn openfec_chain() -> Vec<Chain> {
+    let all = [OPENFEC_ORIGINAL, OPENFEC_V1, OPENFEC_V2];
+    vec![
+        Chain::resolved(OPENFEC_ORIGINAL, 0, &all[..1], OPENFEC_V2, OPENFEC_ORIGINAL),
+        Chain::resolved(OPENFEC_V1, 1, &all[..2], OPENFEC_V2, OPENFEC_ORIGINAL),
+        Chain::resolved(OPENFEC_V2, 2, &all, OPENFEC_V2, OPENFEC_V1),
+    ]
+}
+
+#[tokio::test]
+async fn amendment_chain_matches_openfec_and_is_served_by_the_api() {
+    let url = require_db!();
+    let t = TestNs::new(&url, "amend").await;
+
+    let r0 = ingest_text(&t.pool, OPENFEC_ORIGINAL, &f3_text("F3N", "", "")).await;
+    let r1 = ingest_text(&t.pool, OPENFEC_V1, &f3_text("F3A", "FEC-1118027", "1")).await;
+    let r2 = ingest_text(&t.pool, OPENFEC_V2, &f3_text("F3A", "FEC-1118027", "2")).await;
+    // Each ingest recomputes the whole chain it belongs to.
+    assert_eq!(r0.chain_rows_resolved, Some(1));
+    assert_eq!(r1.chain_rows_resolved, Some(2));
+    assert_eq!(r2.chain_rows_resolved, Some(3));
+
+    assert_eq!(chains(&t.pool).await, openfec_chain());
+
+    // The ingest-time columns.
+    #[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+    struct Filed {
+        filing_id: i64,
+        report_id: Option<String>,
+        report_code: Option<String>,
+        amendment_number: Option<i32>,
+        coverage_from: Option<chrono::NaiveDate>,
+        coverage_through: Option<chrono::NaiveDate>,
+    }
+    let rows: Vec<Filed> = sqlx::query_as(
+        "SELECT filing_id, report_id, report_code, amendment_number, coverage_from, coverage_through \
+         FROM filings ORDER BY filing_id",
+    )
+    .fetch_all(&t.pool)
+    .await
+    .unwrap();
+    let filed = |filing_id, report_id: Option<&str>, amendment_number| Filed {
+        filing_id,
+        report_id: report_id.map(str::to_string),
+        report_code: Some("12G".to_string()),
+        amendment_number,
+        coverage_from: chrono::NaiveDate::from_ymd_opt(2016, 10, 1),
+        coverage_through: chrono::NaiveDate::from_ymd_opt(2016, 10, 19),
+    };
+    assert_eq!(
+        rows,
+        vec![
+            filed(OPENFEC_ORIGINAL, None, None),
+            filed(OPENFEC_V1, Some("FEC-1118027"), Some(1)),
+            filed(OPENFEC_V2, Some("FEC-1118027"), Some(2)),
+        ]
+    );
+
+    // `filings_current` is one row per chain: the latest version.
+    assert_eq!(
+        count(&t.pool, "SELECT count(*) FROM filings_current").await,
+        1
+    );
+    assert_eq!(
+        count(&t.pool, "SELECT filing_id FROM filings_current").await,
+        OPENFEC_V2
+    );
+
+    // Over HTTP, with openFEC's field names.
+    let config = ApiConfig::new("127.0.0.1:0".parse().unwrap()).api_key(Some("k".into()));
+    let app = hardmoney::api::router(t.pool.clone(), &config);
+
+    let (s, body) = get_json(&app, "/filings/1151343?api_key=k").await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["form_type"], "F3A");
+    assert_eq!(body["amendment_indicator"], "A");
+    assert_eq!(body["amendment_version"], 2);
+    assert_eq!(
+        body["amendment_chain"],
+        serde_json::json!([1118027, 1131084, 1151343])
+    );
+    assert_eq!(body["most_recent"], true);
+    assert_eq!(body["most_recent_file_number"], 1151343);
+    assert_eq!(body["previous_file_number"], 1131084);
+    assert_eq!(body["chain_unresolved"], false);
+    assert_eq!(body["report_type"], "12G");
+    assert_eq!(body["coverage_start_date"], "2016-10-01");
+    assert_eq!(body["coverage_end_date"], "2016-10-19");
+    assert_eq!(
+        body["fec_url"],
+        "https://docquery.fec.gov/dcdev/posted/1151343.fec"
+    );
+
+    let (s, body) = get_json(&app, "/filings/1118027?api_key=k").await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["amendment_indicator"], "N");
+    assert_eq!(body["amendment_version"], 0);
+    assert_eq!(body["amendment_chain"], serde_json::json!([1118027]));
+    assert_eq!(body["most_recent"], false);
+    assert_eq!(body["most_recent_file_number"], 1151343);
+    // openFEC: the original's previous_file_number is itself.
+    assert_eq!(body["previous_file_number"], 1118027);
+
+    let (s, body) = get_json(
+        &app,
+        "/filings?committee_id=C00554709&most_recent=true&api_key=k",
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body.as_array().unwrap().len(), 1);
+    assert_eq!(body[0]["filing_id"], 1151343);
+    assert_eq!(body[0]["most_recent"], true);
+
+    // Newest first; no filter returns the whole chain.
+    let (s, body) = get_json(&app, "/filings?committee_id=C00554709&api_key=k").await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let ids: Vec<i64> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["filing_id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, vec![1151343, 1131084, 1118027]);
+
+    let (s, body) = get_json(&app, "/filings?most_recent=false&api_key=k").await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body.as_array().unwrap().len(), 2);
+
+    // `form_type` matches a base form (any designator) or an exact token.
+    for (q, want) in [("F3", 3), ("f3", 3), ("F3A", 2), ("F3N", 1), ("F3X", 0)] {
+        let (s, body) = get_json(&app, &format!("/filings?form_type={q}&api_key=k")).await;
+        assert_eq!(s, StatusCode::OK, "{body}");
+        assert_eq!(body.as_array().unwrap().len(), want, "form_type={q}");
+    }
+
+    let (s, body) = get_json(&app, "/filings?limit=2&offset=1&api_key=k").await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body.as_array().unwrap().len(), 2);
+    assert_eq!(body[0]["filing_id"], 1131084);
+    let (s, body) = get_json(&app, "/filings?limit=0&api_key=k").await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    let (s, body) = get_json(&app, "/filings?committee_id=C00000000&api_key=k").await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body.as_array().unwrap().len(), 0);
+
+    t.drop().await;
+}
+
+#[tokio::test]
+async fn amendment_chain_is_order_independent_and_flags_unresolved() {
+    let url = require_db!();
+    let t = TestNs::new(&url, "amend_rev").await;
+
+    // Amendments first: each stands alone, flagged, until the original
+    // arrives.
+    ingest_text(&t.pool, OPENFEC_V2, &f3_text("F3A", "FEC-1118027", "2")).await;
+    assert_eq!(chains(&t.pool).await, vec![Chain::alone(OPENFEC_V2, true)]);
+    ingest_text(&t.pool, OPENFEC_V1, &f3_text("F3A", "FEC-1118027", "1")).await;
+    assert_eq!(
+        chains(&t.pool).await,
+        vec![
+            Chain::alone(OPENFEC_V1, true),
+            Chain::alone(OPENFEC_V2, true)
+        ]
+    );
+    assert_eq!(
+        count(&t.pool, "SELECT count(*) FROM filings_current").await,
+        2,
+        "an unresolved amendment is the most recent thing we know of"
+    );
+
+    // The original lands: the whole chain resolves to the openFEC values.
+    let r = ingest_text(&t.pool, OPENFEC_ORIGINAL, &f3_text("F3N", "", "")).await;
+    assert_eq!(r.chain_rows_resolved, Some(3));
+    assert_eq!(chains(&t.pool).await, openfec_chain());
+    assert_eq!(
+        count(&t.pool, "SELECT count(*) FROM filings_current").await,
+        1
+    );
+
+    // Two amendments with the same number: the later filing id wins.
+    ingest_text(&t.pool, 1151344, &f3_text("F3A", "FEC-1118027", "2")).await;
+    let after = chains(&t.pool).await;
+    assert_eq!(after.len(), 4);
+    assert_eq!(
+        after[3],
+        Chain::resolved(
+            1151344,
+            3,
+            &[OPENFEC_ORIGINAL, OPENFEC_V1, OPENFEC_V2, 1151344],
+            1151344,
+            OPENFEC_V2
+        )
+    );
+    assert_eq!(after[2].most_recent, Some(false));
+    assert_eq!(after[0].most_recent_filing_id, Some(1151344));
+
+    // Permanently unresolved: header names a filing we never see, and a
+    // header with no `FEC-<n>` at all (the FEC's validator rejects the
+    // latter; the parser does not). A real one: F3A_2011812 amends
+    // FEC-1997089, which is not among the fixtures.
+    let r = ingest_text(&t.pool, 2000001, &f3_text("F3A", "FEC-1999999", "1")).await;
+    assert_eq!(r.chain_rows_resolved, Some(1));
+    ingest_text(&t.pool, 2000002, &f3_text("F3A", "", "")).await;
+    let bytes = std::fs::read(fixture("F3A_2011812.fec")).unwrap();
+    bulk::ingest_filing_bytes(&t.pool, 2011812, &bytes, &hardmoney::ParseOptions::LENIENT)
+        .await
+        .unwrap();
+    let all = chains(&t.pool).await;
+    assert_eq!(all[4], Chain::alone(2000001, true));
+    assert_eq!(all[5], Chain::alone(2000002, true));
+    assert_eq!(all[6], Chain::alone(2011812, true));
+
+    // A re-ingest that corrects the header moves the filing between chains
+    // and repairs the chain it left.
+    ingest_text(&t.pool, 2000001, &f3_text("F3A", "FEC-1118027", "3")).await;
+    let moved = chains(&t.pool).await;
+    assert_eq!(moved[4].amendment_version, Some(4));
+    assert_eq!(moved[4].most_recent, Some(true));
+    assert!(!moved[4].chain_unresolved);
+    assert_eq!(moved[3].most_recent, Some(false), "1151344 was superseded");
+    ingest_text(&t.pool, 2000001, &f3_text("F3A", "FEC-1999999", "1")).await;
+    let back = chains(&t.pool).await;
+    assert_eq!(back[4], Chain::alone(2000001, true));
+    assert_eq!(back[3].most_recent, Some(true), "1151344 is current again");
+
+    // `resolve_all_amendment_chains` reproduces the incremental result
+    // from scratch (as after applying migration 0003 to an old namespace).
+    let before = chains(&t.pool).await;
+    assert_eq!(before.len(), 7);
+    sqlx::query(
+        "UPDATE filings SET amendment_version = NULL, amendment_chain = NULL, most_recent = NULL, \
+         most_recent_filing_id = NULL, previous_filing_id = NULL, chain_unresolved = FALSE",
+    )
+    .execute(&t.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        count(&t.pool, "SELECT count(*) FROM filings_current").await,
+        0
+    );
+    let n = db::resolve_all_amendment_chains(&t.pool).await.unwrap();
+    assert_eq!(n, 7);
+    assert_eq!(chains(&t.pool).await, before);
+
+    // ...and it is how a `Defer` batch gets its columns.
+    let deferred = bulk::ingest::ingest_filing_bytes_with(
+        &t.pool,
+        3000001,
+        f3_text("F3A", "FEC-1118027", "4").as_bytes(),
+        &hardmoney::ParseOptions::STRICT,
+        bulk::ingest::ChainResolution::Defer,
+    )
+    .await
+    .unwrap();
+    assert_eq!(deferred.chain_rows_resolved, None);
+    let stale = chains(&t.pool).await;
+    assert_eq!(stale[7].most_recent, None, "deferred: nothing derived yet");
+    assert_eq!(
+        stale[3].most_recent,
+        Some(true),
+        "deferred: chain-mates untouched"
+    );
+    let n = db::resolve_all_amendment_chains(&t.pool).await.unwrap();
+    assert_eq!(n, 8);
+    let after = chains(&t.pool).await;
+    assert_eq!(
+        after[7],
+        Chain::resolved(
+            3000001,
+            4,
+            &[OPENFEC_ORIGINAL, OPENFEC_V1, OPENFEC_V2, 1151344, 3000001],
+            3000001,
+            1151344
+        )
+    );
+    assert_eq!(after[3].most_recent, Some(false));
+    assert_eq!(after[0].most_recent_filing_id, Some(3000001));
+    assert_eq!(&after[4..7], &before[4..7], "unrelated rows are unchanged");
+
+    t.drop().await;
+}
+
+#[tokio::test]
+async fn f99_and_report_number_zero_originals_stand_alone() {
+    let url = require_db!();
+    let t = TestNs::new(&url, "amend_f99").await;
+
+    // A Form 99 is never an amendment: chain = [self], most recent.
+    let bytes = std::fs::read(fixture("F99_2011828.fec")).unwrap();
+    let r = bulk::ingest_filing_bytes(&t.pool, 2011828, &bytes, &hardmoney::ParseOptions::LENIENT)
+        .await
+        .unwrap();
+    assert_eq!(r.chain_rows_resolved, Some(1));
+    assert_eq!(chains(&t.pool).await, vec![Chain::alone(2011828, false)]);
+
+    // Real-world quirk: F3XN_2011831's header carries report_number "0" on
+    // an ORIGINAL. The original must still be version 0 ahead of an
+    // amendment numbered 1 (and would be even if the amendment's number
+    // were blank: the head of the chain sorts first by construction).
+    let bytes = std::fs::read(fixture("F3XN_2011831.fec")).unwrap();
+    bulk::ingest_filing_bytes(&t.pool, 2011831, &bytes, &hardmoney::ParseOptions::LENIENT)
+        .await
+        .unwrap();
+    assert_eq!(
+        count(
+            &t.pool,
+            "SELECT amendment_number::bigint FROM filings WHERE filing_id = 2011831"
+        )
+        .await,
+        0
+    );
+    let amendment = "HDR\u{1c}FEC\u{1c}8.5\u{1c}X\u{1c}1\u{1c}FEC-2011831\u{1c}\n\
+                     F3XA\u{1c}C00140855\u{1c}FirstEnergy Corp Political Action Committee\n";
+    ingest_text(&t.pool, 2011999, amendment).await;
+    let rows = chains(&t.pool).await;
+    assert_eq!(
+        rows[1],
+        Chain::resolved(2011831, 0, &[2011831], 2011999, 2011831)
+    );
+    assert_eq!(
+        rows[2],
+        Chain::resolved(2011999, 1, &[2011831, 2011999], 2011999, 2011831)
+    );
+
+    // The F3X's cover-line columns land too (openFEC's report_type and
+    // coverage dates).
+    let (code, from, through): (Option<String>, Option<chrono::NaiveDate>, Option<chrono::NaiveDate>) =
+        sqlx::query_as(
+            "SELECT report_code, coverage_from, coverage_through FROM filings WHERE filing_id = 2011831",
+        )
+        .fetch_one(&t.pool)
+        .await
+        .unwrap();
+    assert_eq!(code.as_deref(), Some("M9"));
+    assert_eq!(from, chrono::NaiveDate::from_ymd_opt(2026, 8, 1));
+    assert_eq!(through, chrono::NaiveDate::from_ymd_opt(2026, 8, 31));
+
+    t.drop().await;
+}

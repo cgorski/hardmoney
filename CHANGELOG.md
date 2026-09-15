@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+- **Amendment-chain resolution for ingested filings** (migration
+  `0003_amendment_chains.sql`). `filings` gains `report_id`,
+  `report_code`, `coverage_from`, `coverage_through`, `amendment_number`
+  (written at ingest) and the openFEC-semantics chain columns
+  `amendment_version`, `amendment_chain`, `most_recent`,
+  `most_recent_filing_id`, `previous_filing_id`, `chain_unresolved`,
+  recomputed by a set-based resolver in the ingest's own transaction --
+  so the result is the same whichever order an original and its
+  amendments arrive in. An amendment whose header names no ingested
+  original stands alone with `chain_unresolved = true`. New view
+  `filings_current` (one row per report: its latest version); new
+  `db::resolve_amendment_chain` / `db::resolve_all_amendment_chains`;
+  `bulk::ingest::{ChainResolution, ingest_filing_bytes_with,
+  ingest_filing_with}` and `IngestReport::chain_rows_resolved`;
+  `bulk-load-filing --no-resolve` for batch loads. `GET /filings/{id}`
+  gains `amendment_indicator`, `amendment_version`, `amendment_chain`,
+  `most_recent`, `most_recent_file_number`, `previous_file_number`,
+  `chain_unresolved`, `report_type`, `coverage_start_date`,
+  `coverage_end_date`, `fec_url` (openFEC's names); new `GET
+  /filings?committee_id=&most_recent=&form_type=&limit=&offset=`. Rows
+  ingested before the migration have NULL chain columns until
+  `resolve_all_amendment_chains` runs. Book: *Amendments*.
+- **`hardmoney export`** (and the `export` module, feature `export`, on
+  by default): one table per record type from a filing to CSV, JSON
+  Lines, Parquet (`Decimal128` money and `Date32` dates typed from the
+  bundled `FieldSpec`, zstd), or SQLite (bundled; one database, one table
+  per `Table`, plus a `filings` table). Streams through `FilingReader`,
+  so a 135 MB filing exports in constant memory. Book: *Exporting a
+  Filing*.
+
 ## 2.0.0 — 2026-09-15
 
 Major release. The parser is rebuilt on a build-time-generated static

@@ -26,8 +26,8 @@
 //! shared across namespaces, and [`ensure_views`] wires the friendly
 //! `independent_expenditures` view over it inside each namespace.
 
-use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::{PgConnection, PgPool};
 
 /// The embedded migration set from `migrations/`.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
@@ -273,6 +273,159 @@ END
 $$;
 "#;
 
+/// The chain-resolution statement, parameterised on how the rows to
+/// recompute are chosen (see [`resolve_amendment_chain`] for the rules it
+/// encodes). `concat!` needs literals, so this is a macro rather than a
+/// `format!` at call time: the SQL is fixed at compile time and never
+/// interpolates data.
+///
+/// Shape: `scope` picks candidate rows and derives each one's chain key
+/// (`original_id`); `members` keeps the rows whose partition is complete
+/// within `scope`; `ranked` numbers each partition with window functions;
+/// the `UPDATE` writes the six derived columns in one set-based statement.
+macro_rules! resolve_chain_sql {
+    ($scope:literal, $members:literal) => {
+        concat!(
+            "WITH scope AS (",
+            "  SELECT f.filing_id, f.is_amendment, f.amendment_number,",
+            "         CASE WHEN f.is_amendment",
+            "               AND f.amends_filing_id IS NOT NULL",
+            "               AND f.amends_filing_id <> f.filing_id",
+            "               AND EXISTS (SELECT 1 FROM filings o",
+            "                           WHERE o.filing_id = f.amends_filing_id",
+            "                             AND NOT o.is_amendment)",
+            "              THEN f.amends_filing_id",
+            "              ELSE f.filing_id END AS original_id",
+            "  FROM filings f ",
+            $scope,
+            "), ",
+            "members AS (SELECT * FROM scope s ",
+            $members,
+            "), ",
+            "ranked AS (",
+            "  SELECT filing_id, original_id, is_amendment,",
+            "         (row_number() OVER w - 1)::int AS version,",
+            "         array_agg(filing_id) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS chain,",
+            "         lag(filing_id) OVER w AS previous_id,",
+            "         last_value(filing_id) OVER (w ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS latest_id",
+            "  FROM members",
+            "  WINDOW w AS (PARTITION BY original_id",
+            "               ORDER BY (filing_id <> original_id), amendment_number NULLS FIRST, filing_id)",
+            ") ",
+            "UPDATE filings f",
+            "   SET amendment_version     = r.version,",
+            "       amendment_chain       = r.chain,",
+            "       most_recent           = (f.filing_id = r.latest_id),",
+            "       most_recent_filing_id = r.latest_id,",
+            "       previous_filing_id    = COALESCE(r.previous_id, f.filing_id),",
+            "       chain_unresolved      = (r.is_amendment AND r.original_id = r.filing_id)",
+            "  FROM ranked r",
+            " WHERE f.filing_id = r.filing_id",
+        )
+    };
+}
+
+/// One chain: candidate rows are the key itself plus everything whose
+/// header names it (both indexed). A row is kept when its derived key is
+/// `$1` -- the partition is then complete, because every member of a chain
+/// keyed by a non-amendment either *is* that filing or has
+/// `amends_filing_id` equal to it -- or when it is an amendment that stands
+/// alone (its partition is just itself). A non-amendment that merely
+/// *mentions* `$1` in its header is left for its own key: its amendments
+/// are outside this scope, so recomputing it here would be wrong.
+const RESOLVE_ONE_CHAIN_SQL: &str = resolve_chain_sql!(
+    "WHERE f.filing_id = $1 OR f.amends_filing_id = $1",
+    "WHERE s.original_id = $1 OR (s.original_id = s.filing_id AND s.is_amendment)"
+);
+
+/// The whole table: every partition is complete, so no member filter.
+const RESOLVE_ALL_CHAINS_SQL: &str = resolve_chain_sql!("", "");
+
+/// Recomputes the amendment-chain columns of `filings` for the chain keyed
+/// by `original_id`, in one set-based `UPDATE`, and returns how many rows
+/// were written. Idempotent; safe to call for an id that is not in the
+/// table (returns `Ok(0)` unless amendments already point at it).
+///
+/// # Semantics (openFEC's)
+///
+/// A chain is keyed by its **original** filing. An amendment (`form_type`
+/// ending in `A`) joins the chain named by its header's `FEC-<n>`
+/// (`amends_filing_id`) when that filing is in the table and is itself not
+/// an amendment. Within a chain, members are ordered original first, then
+/// by the filed amendment number (`amendment_number NULLS FIRST`, so an
+/// amendment that omitted its number never outranks a numbered one), then
+/// by `filing_id` (the FEC assigns ids chronologically, so of two
+/// amendments with the same number the later filing wins). Each member
+/// gets:
+///
+/// * `amendment_version` -- 0 for the original, 1, 2, ... after;
+/// * `amendment_chain` -- the ids up to and including this one;
+/// * `most_recent_filing_id` -- the last member; `most_recent` is true on
+///   that member only;
+/// * `previous_filing_id` -- the preceding member, or itself for the
+///   original (as openFEC's `previous_file_number` does);
+/// * `chain_unresolved` -- false.
+///
+/// A non-amendment is always the head of its own chain, whatever its
+/// header says: Form 99s and RFAI responses (`FRQ`) never carry the `A`
+/// designator and so always stand alone, `chain = [self]`,
+/// `most_recent = true`. Registrations (F1, F1M, F2) and 24/48-hour
+/// notices (F24, F6) amend by the same header rule and are treated
+/// uniformly.
+///
+/// An amendment that cannot be attached -- its header had no usable
+/// `FEC-<n>`, or names itself, or names a filing that is not in the table,
+/// or names a filing that is itself an amendment (the FEC's validator
+/// rejects that; the header must name the original) -- also stands alone
+/// with `chain = [self]`, `amendment_version = 0`, `most_recent = true`,
+/// and **`chain_unresolved = true`** so the gap is visible. Ingesting the
+/// missing original later re-resolves it into the chain
+/// ([`crate::bulk::ingest_filing`] calls this after every insert), so the
+/// result does not depend on the order filings arrive in.
+///
+/// # Errors
+///
+/// Any database error, including a namespace whose schema predates
+/// migration `0003` (the columns do not exist).
+pub async fn resolve_amendment_chain(
+    pool: &PgPool,
+    original_id: i64,
+) -> Result<usize, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let n = resolve_amendment_chain_in(&mut tx, original_id).await?;
+    tx.commit().await?;
+    Ok(n)
+}
+
+/// [`resolve_amendment_chain`] on an existing connection or transaction,
+/// so an ingester can make the insert and the resolution atomic.
+pub(crate) async fn resolve_amendment_chain_in(
+    conn: &mut PgConnection,
+    original_id: i64,
+) -> Result<usize, sqlx::Error> {
+    let done = sqlx::query(RESOLVE_ONE_CHAIN_SQL)
+        .bind(original_id)
+        .execute(conn)
+        .await?;
+    Ok(usize::try_from(done.rows_affected()).unwrap_or(usize::MAX))
+}
+
+/// Recomputes the amendment-chain columns for **every** row of `filings`
+/// in one set-based statement (no per-row round trips) and returns the
+/// number of rows written -- the whole table, since every row gets a
+/// value. Same rules as [`resolve_amendment_chain`]. Use it after a batch
+/// ingested with [`crate::bulk::ingest::ChainResolution::Defer`], after
+/// applying migration `0003` to a namespace that already held filings, or
+/// whenever the derived columns are in doubt.
+///
+/// # Errors
+///
+/// Any database error.
+pub async fn resolve_all_amendment_chains(pool: &PgPool) -> Result<usize, sqlx::Error> {
+    let done = sqlx::query(RESOLVE_ALL_CHAINS_SQL).execute(pool).await?;
+    Ok(usize::try_from(done.rows_affected()).unwrap_or(usize::MAX))
+}
+
 /// Lists hardmoney namespaces: every schema containing a `_sqlx_migrations`
 /// table.
 pub async fn list_namespaces(pool: &PgPool) -> Result<Vec<String>, sqlx::Error> {
@@ -329,6 +482,6 @@ mod tests {
     #[test]
     fn migrator_has_the_expected_files() {
         let versions: Vec<i64> = MIGRATOR.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2]);
+        assert_eq!(versions, vec![1, 2, 3]);
     }
 }
