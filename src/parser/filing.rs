@@ -449,6 +449,21 @@ pub struct Lenient<T> {
 }
 
 impl<T> Lenient<T> {
+    /// Wraps a value with the lines skipped while producing it. `first_error`
+    /// is what [`into_strict`](Self::into_strict) reports; when `None` and
+    /// `skipped` is non-empty, a generic error is synthesised.
+    pub(crate) fn from_parts(
+        value: T,
+        skipped: Vec<SkippedLine>,
+        first_error: Option<Box<FecError>>,
+    ) -> Self {
+        Self {
+            value,
+            skipped,
+            first_error,
+        }
+    }
+
     /// The value together with every skipped line (possibly none).
     pub fn into_parts(self) -> (T, Vec<SkippedLine>) {
         (self.value, self.skipped)
@@ -460,6 +475,8 @@ impl<T> Lenient<T> {
         if self.skipped.is_empty() {
             return Ok(self.value);
         }
+        // Both producers record the first skip's error alongside the skip;
+        // the fallback only guards against a future producer forgetting.
         let first = self
             .first_error
             .unwrap_or_else(|| Box::new(FecError::MissingFormLine));
@@ -806,11 +823,7 @@ impl<'o> BodyAccumulator<'o> {
     fn finish(self, mut filing: Filing) -> Lenient<Filing> {
         debug_assert!(!self.options.is_strict() || self.skipped.is_empty());
         filing.lines = self.lines;
-        Lenient {
-            value: filing,
-            skipped: self.skipped,
-            first_error: self.first_error,
-        }
+        Lenient::from_parts(filing, self.skipped, self.first_error)
     }
 }
 

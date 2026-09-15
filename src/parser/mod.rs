@@ -69,6 +69,10 @@ pub use filing::{
     Filing, Lenient, OnUnparseableLine, ParseOptions, ParsedLine, SkipReason, SkippedLine,
 };
 pub use header::Header;
+pub use reconcile::{
+    Column, LineCheck, LineRule, ReconcileError, Reconciliation, Relation, ScheduleSum, Source,
+    Term,
+};
 pub use schema::{
     Field, FieldDef, FieldKind, FieldSpec, InvalidSpecVersion, Layout, Requirement, SpecVersion,
     TableMarker, Typed,

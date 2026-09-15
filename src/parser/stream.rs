@@ -101,8 +101,8 @@ use std::path::Path;
 
 use crate::parser::error::{FecError, Result};
 use crate::parser::filing::{
-    Filing, NEW_DELIMITER, OnUnparseableLine, ParseOptions, ParsedLine, SkipReason, SkippedLine,
-    split_new_delimited, strip_ant_suffix,
+    Filing, Lenient, NEW_DELIMITER, OnUnparseableLine, ParseOptions, ParsedLine, SkipReason,
+    SkippedLine, split_new_delimited, strip_ant_suffix,
 };
 use crate::parser::form;
 use crate::parser::header::Header;
@@ -357,17 +357,22 @@ impl<R: BufRead> FilingReader<R> {
         }
     }
 
-    /// Drains the reader into an eager [`Filing`], returning it together
-    /// with every line skipped under lenient options (always empty under
-    /// [`ParseOptions::STRICT`]).
+    /// Drains the reader into an eager [`Filing`], wrapped in a
+    /// [`Lenient`] carrying every line skipped under lenient options
+    /// (none under [`ParseOptions::STRICT`]) -- the same type
+    /// [`Filing::parse_bytes_with`] returns.
     ///
     /// Fails with the first `Err` the iterator yields. With a
     /// [`filter_tables`](Self::filter_tables) in place, [`Filing::lines`]
     /// holds only the selected tables.
-    pub fn into_filing(mut self) -> Result<(Filing, Vec<SkippedLine>)> {
+    pub fn into_filing(mut self) -> Result<Lenient<Filing>> {
         let lines = self.by_ref().collect::<Result<Vec<_>>>()?;
         let Self { preamble, body, .. } = self;
-        Ok((preamble.into_filing(lines), body.skipped))
+        Ok(Lenient::from_parts(
+            preamble.into_filing(lines),
+            body.skipped,
+            body.first_error,
+        ))
     }
 }
 
@@ -463,6 +468,8 @@ struct Body {
     options: ParseOptions,
     filter: Option<Vec<Table>>,
     skipped: Vec<SkippedLine>,
+    /// The error behind the first skip, for `Lenient::into_strict`.
+    first_error: Option<Box<FecError>>,
     lookahead: Lookahead,
     /// An error to yield on the next call, once the held-back record that
     /// preceded it has been released.
@@ -477,6 +484,7 @@ impl Body {
             options,
             filter: None,
             skipped: Vec::new(),
+            first_error: None,
             lookahead: Lookahead::Cover,
             deferred: None,
             done: false,
@@ -550,6 +558,9 @@ impl Body {
         match policy {
             OnUnparseableLine::Fail => self.fail(err),
             OnUnparseableLine::Skip => {
+                if self.first_error.is_none() {
+                    self.first_error = Some(Box::new(err));
+                }
                 self.skipped.push(SkippedLine {
                     line_no,
                     raw_form_type,
@@ -850,23 +861,13 @@ impl Filing {
     /// opened or read, and otherwise with whatever [`FilingReader::new`] or
     /// its iterator fails with.
     pub fn open(path: impl AsRef<Path>) -> Result<Filing> {
-        let (filing, skipped) = Self::open_with(path, ParseOptions::STRICT)?;
-        debug_assert!(skipped.is_empty(), "strict options never skip");
-        Ok(filing)
+        Self::open_with(path, ParseOptions::STRICT)?.into_strict()
     }
 
-    /// Like [`Filing::open`] with explicit [`ParseOptions`], returning the
-    /// filing together with every skipped line (always empty under
-    /// [`ParseOptions::STRICT`]).
-    ///
-    /// This is the streaming counterpart of [`Filing::parse_bytes_with`];
-    /// the skipped lines come back as a plain `Vec` rather than a
-    /// [`Lenient`](crate::parser::Lenient) because `Lenient` can only be
-    /// built by the eager parser.
-    pub fn open_with(
-        path: impl AsRef<Path>,
-        options: ParseOptions,
-    ) -> Result<(Filing, Vec<SkippedLine>)> {
+    /// Like [`Filing::open`] with explicit [`ParseOptions`]: the streaming
+    /// counterpart of [`Filing::parse_bytes_with`], returning the same
+    /// [`Lenient<Filing>`] so callers can switch between the two freely.
+    pub fn open_with(path: impl AsRef<Path>, options: ParseOptions) -> Result<Lenient<Filing>> {
         let path = path.as_ref();
         let file = File::open(path)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
@@ -897,7 +898,7 @@ mod tests {
 
     fn assert_same_as_eager(content: &str) {
         let eager = Filing::parse(content).unwrap_or_else(|e| panic!("{e}"));
-        let (streamed, skipped) = reader(content).into_filing().unwrap();
+        let (streamed, skipped) = reader(content).into_filing().unwrap().into_parts();
         assert!(skipped.is_empty());
         assert_eq!(streamed.header, eager.header);
         assert_eq!(streamed.version, eager.version);

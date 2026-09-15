@@ -56,10 +56,12 @@ fn bench_parse(c: &mut Criterion) {
             &bytes,
             |b, bytes| {
                 b.iter(|| {
-                    let (filing, _skipped) = FilingReader::new(black_box(bytes.as_slice()))
+                    let filing = FilingReader::new(black_box(bytes.as_slice()))
                         .expect("fixture opens")
                         .into_filing()
-                        .expect("fixture parses");
+                        .expect("fixture parses")
+                        .into_strict()
+                        .expect("nothing skipped");
                     black_box(filing.lines.len())
                 });
             },

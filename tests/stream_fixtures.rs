@@ -139,7 +139,8 @@ fn lenient_open_matches_lenient_parse_on_every_fixture() {
             .unwrap_or_else(|e| panic!("{name}: {e}"))
             .into_parts();
         let (streamed, skipped) = Filing::open_with(&path, ParseOptions::LENIENT)
-            .unwrap_or_else(|e| panic!("{name}: {e}"));
+            .unwrap_or_else(|e| panic!("{name}: {e}"))
+            .into_parts();
         assert_filings_equal(&streamed, &eager, &name);
         assert_eq!(skipped, eager_skipped, "{name}: skipped lines");
     }
