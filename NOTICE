@@ -98,6 +98,23 @@ Section 4(b) requires stating changes):
   only the canonical field *names* used to key into each parsed line's
   field map.
 
+  SchI.csv (Schedule I, Levin-fund account summary):
+    - The modern version bucket's header regex was widened from `^(6|7)`
+      to `^8.4|8.3|8.2|8.1|8.0|7|6`. The FEC's own per-version column
+      listings (data/fec-csv-sources/headers/7.0.csv through 8.4.csv)
+      define Schedule I with a byte-identical layout across 6.x-8.4; the
+      upstream table simply never claimed 8.x. Schedule I was dropped by
+      the FEC in spec 8.5.
+
+Tables authored by hardmoney (not derived from fech-sources):
+
+  F2S.csv (Form 2 Schedule -- additional authorized committees). Upstream
+  has no table for this record type, so F2 filings that carried F2S
+  lines could not be parsed. The nine-column layout was taken from the
+  FEC's own per-version listings (headers/6.1.csv through 8.5.csv, which
+  are identical for this record) and verified against real F2S lines in
+  tests/fixtures/F2A_2011896.fec. Licensed with the rest of hardmoney.
+
 ================================================================================
 Inspiration, not copied code
 ================================================================================

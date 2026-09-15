@@ -6,10 +6,10 @@ use sqlx::PgPool;
 
 use crate::api::error::ApiError;
 
-/// A raw `.fec` filing previously ingested via `hardmoney bulk load-filing`
+/// A raw `.fec` filing previously ingested via `hardmoney bulk-load-filing`
 /// (which uses the `parser` module directly against the filing's own
 /// bytes, not a bulk CSV derivation).
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct Filing {
     pub filing_id: i64,
     pub form_type: String,
@@ -19,6 +19,9 @@ pub struct Filing {
     pub amends_filing_id: Option<i64>,
     pub header: Option<serde_json::Value>,
     pub summary: Option<serde_json::Value>,
+    /// Body lines the lenient parser skipped when this filing was ingested.
+    pub skipped_lines: i32,
+    pub ingested_at: chrono::DateTime<chrono::Utc>,
 }
 
 pub async fn get(
@@ -26,7 +29,8 @@ pub async fn get(
     Path(filing_id): Path<i64>,
 ) -> Result<Json<Filing>, ApiError> {
     let row = sqlx::query_as::<_, Filing>(
-        "SELECT filing_id, form_type, fec_version, committee_id, is_amendment, amends_filing_id, header, summary \
+        "SELECT filing_id, form_type, fec_version, committee_id, is_amendment, amends_filing_id, \
+                header, summary, skipped_lines, ingested_at \
          FROM filings WHERE filing_id = $1",
     )
     .bind(filing_id)
@@ -39,7 +43,7 @@ pub async fn get(
 /// A Schedule E line item extracted directly from a filing's own bytes by
 /// the `parser` module -- the precise (not bulk-aggregated) counterpart
 /// to `independent_expenditures`.
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct ScheduleELine {
     pub line_index: i32,
     pub payee_name: Option<String>,

@@ -1,21 +1,58 @@
 name: Publish to crates.io
 
+# Manual only. Publishing requires:
+#   1. a human to dispatch this workflow with the version to publish,
+#   2. that version to match Cargo.toml on main,
+#   3. an annotated/lightweight tag `v<version>` pointing at HEAD,
+#   4. approval in the `crates-io` environment (configure a required
+#      reviewer on that environment in the repo settings; the CRATES_IO
+#      secret should live there, not at repo level),
+#   5. the full test suite passing.
+# Nothing here runs on push or tag events.
+
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (must equal Cargo.toml `version` and tag v<version> at HEAD)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
   publish:
-    name: cargo publish
+    name: cargo publish ${{ inputs.version }}
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    environment: crates-io
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: Verify Cargo.toml version matches the requested version
+        run: |
+          set -euo pipefail
+          declared="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')"
+          echo "Cargo.toml: $declared  requested: ${{ inputs.version }}"
+          test "$declared" = "${{ inputs.version }}"
 
-      - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@v2
+      - name: Verify tag v${{ inputs.version }} points at HEAD
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          tagged="$(git rev-parse -q --verify "refs/tags/v${{ inputs.version }}^{commit}" || true)"
+          head="$(git rev-parse HEAD)"
+          echo "tag: ${tagged:-<missing>}  head: $head"
+          test -n "$tagged" && test "$tagged" = "$head"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --all-features
 
       - name: Verify package (dry run)
         run: cargo publish --dry-run --all-features

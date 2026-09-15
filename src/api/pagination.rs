@@ -1,34 +1,53 @@
+//! Shared query parameters: pagination and the `cycle` filter.
+
 use serde::Deserialize;
 
-/// Shared `?limit=&offset=` query params, applied consistently across list
-/// endpoints. `limit` is clamped to `[1, 500]` so a client can't
-/// accidentally (or deliberately) force an unbounded scan of a
-/// multi-million-row table like `schedule_a`.
+use crate::Cycle;
+use crate::api::error::ApiError;
+
+/// `?limit=&offset=`, applied consistently across list endpoints. `limit`
+/// is clamped to `[1, MAX_LIMIT]` so a client can't force an unbounded scan
+/// of a multi-million-row table like `schedule_a`.
 ///
-/// Deliberately *not* meant to be used behind `#[serde(flatten)]`: axum's
-/// `Query` extractor (via `serde_html_form`) loses per-field type
-/// information once a struct is flattened into another, so a query string
-/// like `?limit=2` fails to deserialize into `i64` at all ("invalid type:
-/// string \"2\", expected i64"). Every route's params struct instead
-/// declares `limit`/`offset` directly and builds a `Pagination` from them
-/// with [`Pagination::new`].
-#[derive(Deserialize)]
+/// Deliberately *not* used behind `#[serde(flatten)]`: axum's `Query`
+/// extractor loses per-field type information once a struct is flattened,
+/// so `?limit=2` fails to deserialize into `i64`. Every route's params
+/// struct declares `limit`/`offset` directly and builds a `Pagination` via
+/// [`Pagination::new`].
+#[derive(Debug, Clone, Copy, Deserialize)]
 pub struct Pagination {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
 
 impl Pagination {
+    pub const DEFAULT_LIMIT: i64 = 50;
+    pub const MAX_LIMIT: i64 = 500;
+
     pub fn new(limit: Option<i64>, offset: Option<i64>) -> Self {
         Self { limit, offset }
     }
 
     pub fn limit(&self) -> i64 {
-        self.limit.unwrap_or(50).clamp(1, 500)
+        self.limit
+            .unwrap_or(Self::DEFAULT_LIMIT)
+            .clamp(1, Self::MAX_LIMIT)
     }
 
     pub fn offset(&self) -> i64 {
         self.offset.unwrap_or(0).max(0)
+    }
+}
+
+/// Validates an optional `?cycle=` query value into `Option<i32>` for
+/// binding, rejecting odd/out-of-range years with a 400 instead of
+/// silently returning an empty result set.
+pub fn cycle_param(raw: Option<i32>) -> Result<Option<i32>, ApiError> {
+    match raw {
+        None => Ok(None),
+        Some(y) => Cycle::new(y)
+            .map(|c| Some(i32::from(c)))
+            .map_err(|e| ApiError::BadRequest(e.to_string())),
     }
 }
 
@@ -42,10 +61,7 @@ mod tests {
     }
 
     #[test]
-    fn clamps_limit_above_the_five_hundred_ceiling() {
-        // The whole point of this clamp: a client can't force an
-        // unbounded scan of a multi-million-row table by passing an
-        // absurd `?limit=`.
+    fn clamps_limit_above_the_ceiling() {
         assert_eq!(Pagination::new(Some(1_000_000), None).limit(), 500);
     }
 
@@ -65,5 +81,16 @@ mod tests {
         assert_eq!(Pagination::new(None, None).offset(), 0);
         assert_eq!(Pagination::new(None, Some(-5)).offset(), 0);
         assert_eq!(Pagination::new(None, Some(200)).offset(), 200);
+    }
+
+    #[test]
+    fn cycle_param_validates() {
+        assert_eq!(cycle_param(None).unwrap(), None);
+        assert_eq!(cycle_param(Some(2026)).unwrap(), Some(2026));
+        assert!(matches!(
+            cycle_param(Some(2027)),
+            Err(ApiError::BadRequest(_))
+        ));
+        assert!(matches!(cycle_param(Some(3)), Err(ApiError::BadRequest(_))));
     }
 }

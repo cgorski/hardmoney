@@ -1,16 +1,18 @@
--- hardmoney bulk-data schema.
+-- hardmoney migration 0001: initial bulk-data schema.
+--
+-- Applied by `sqlx::migrate!` (see src/db/mod.rs). Never edit an applied
+-- migration; add a new numbered file instead.
 --
 -- Column names mirror the FEC's own bulk-data header files (fetched live
 -- from https://www.fec.gov/files/bulk-downloads/data_dictionaries/, see
--- README "Sources" section) rather than the openFEC/openfec API's naming,
+-- README "Sources and provenance") rather than the openFEC API's naming,
 -- so a column here maps 1:1 onto the FEC's own file-description pages.
 --
 -- Amount/id columns that are NUMERIC/BIGINT in the FEC's own spec are kept
--- as such; loosely-formatted fields (raw MMDDYYYY dates, codes) are kept as
--- TEXT so a single malformed real-world row never fails an entire batch --
--- see README "Design notes" for why (this crate found more than one
--- upstream data-quality quirk this way; loud failure on one bad row would
--- make the whole ETL brittle against production government data).
+-- as such. Raw date strings are kept as TEXT (`*_dt`) exactly as the FEC
+-- ships them, and a parsed DATE twin (`*_date`) is added alongside by the
+-- loader, so a malformed date on one real-world row never fails a batch
+-- and never gets silently invented -- see README "Dates".
 --
 -- All bulk tables are keyed by (natural key, cycle) so multiple two-year
 -- election cycles can coexist in one database.
@@ -88,6 +90,7 @@ CREATE TABLE IF NOT EXISTS schedule_a (
     employer          TEXT,
     occupation        TEXT,
     transaction_dt    TEXT,
+    transaction_date  DATE,
     transaction_amt   NUMERIC,
     other_id          TEXT,
     tran_id           TEXT,
@@ -97,7 +100,7 @@ CREATE TABLE IF NOT EXISTS schedule_a (
     PRIMARY KEY (sub_id)
 );
 CREATE INDEX IF NOT EXISTS schedule_a_cmte_id_idx ON schedule_a (cmte_id);
-CREATE INDEX IF NOT EXISTS schedule_a_name_idx ON schedule_a (name);
+CREATE INDEX IF NOT EXISTS schedule_a_transaction_date_idx ON schedule_a (transaction_date DESC NULLS LAST);
 
 -- "Any transaction from one committee to another" (bulk source: itoth.txt / oth{YY}.zip).
 CREATE TABLE IF NOT EXISTS committee_to_committee_transactions (
@@ -117,6 +120,7 @@ CREATE TABLE IF NOT EXISTS committee_to_committee_transactions (
     employer          TEXT,
     occupation        TEXT,
     transaction_dt    TEXT,
+    transaction_date  DATE,
     transaction_amt   NUMERIC,
     other_id          TEXT,
     tran_id           TEXT,
@@ -126,6 +130,7 @@ CREATE TABLE IF NOT EXISTS committee_to_committee_transactions (
     PRIMARY KEY (sub_id)
 );
 CREATE INDEX IF NOT EXISTS c2c_txn_cmte_id_idx ON committee_to_committee_transactions (cmte_id);
+CREATE INDEX IF NOT EXISTS c2c_txn_transaction_date_idx ON committee_to_committee_transactions (transaction_date DESC NULLS LAST);
 
 -- Contributions from committees to candidates, incl. independent
 -- expenditures/coordinated & communication-cost transaction types
@@ -147,6 +152,7 @@ CREATE TABLE IF NOT EXISTS committee_to_candidate_transactions (
     employer                     TEXT,
     occupation                   TEXT,
     transaction_dt               TEXT,
+    transaction_date             DATE,
     transaction_amt              NUMERIC,
     other_id                     TEXT,
     cand_id                      TEXT,
@@ -160,13 +166,13 @@ CREATE TABLE IF NOT EXISTS committee_to_candidate_transactions (
 CREATE INDEX IF NOT EXISTS c2cand_txn_cand_id_idx ON committee_to_candidate_transactions (cand_id);
 CREATE INDEX IF NOT EXISTS c2cand_txn_cmte_id_idx ON committee_to_candidate_transactions (cmte_id);
 CREATE INDEX IF NOT EXISTS c2cand_txn_ie_idx ON committee_to_candidate_transactions (is_independent_expenditure) WHERE is_independent_expenditure;
+CREATE INDEX IF NOT EXISTS c2cand_txn_transaction_date_idx ON committee_to_candidate_transactions (transaction_date DESC NULLS LAST);
 
 -- Schedule B: itemized operating expenditures (bulk source: oppexp.txt).
 -- NB: real oppexp.txt rows have one MORE pipe-delimited field than the
 -- FEC's own 25-column header file documents (a trailing empty field) --
--- a known, publicly tracked FEC data-quality quirk, not a parsing bug in
--- this crate. See README "Known upstream data-quality issues" for the
--- citation and how the loader handles it.
+-- a known, publicly tracked FEC data-quality quirk (fecgov/FEC#11052), not
+-- a parsing bug in this crate; the loader tolerates the extra field.
 CREATE TABLE IF NOT EXISTS disbursements (
     sub_id             BIGINT NOT NULL,
     cycle              INT NOT NULL,
@@ -183,6 +189,7 @@ CREATE TABLE IF NOT EXISTS disbursements (
     state              TEXT,
     zip_code           TEXT,
     transaction_dt     TEXT,
+    transaction_date   DATE,
     transaction_amt    NUMERIC,
     transaction_pgi    TEXT,
     purpose            TEXT,
@@ -197,7 +204,7 @@ CREATE TABLE IF NOT EXISTS disbursements (
     PRIMARY KEY (sub_id)
 );
 CREATE INDEX IF NOT EXISTS disbursements_cmte_id_idx ON disbursements (cmte_id);
-CREATE INDEX IF NOT EXISTS disbursements_name_idx ON disbursements (name);
+CREATE INDEX IF NOT EXISTS disbursements_transaction_date_idx ON disbursements (transaction_date DESC NULLS LAST);
 
 -- Shared 30-column layout for both the all-candidates summary file
 -- (weball{YY}.zip) and the current House/Senate campaigns file
@@ -233,6 +240,7 @@ CREATE TABLE IF NOT EXISTS candidate_summary (
     other_pol_cmte_contrib  NUMERIC,
     pol_pty_contrib         NUMERIC,
     cvg_end_dt              TEXT,
+    cvg_end_date            DATE,
     indiv_refunds           NUMERIC,
     cmte_refunds            NUMERIC,
     PRIMARY KEY (cand_id, cycle)
@@ -271,13 +279,13 @@ CREATE TABLE IF NOT EXISTS pac_party_summary (
     pty_coord_exp               NUMERIC,
     nonfed_share_exp           NUMERIC,
     cvg_end_dt                 TEXT,
+    cvg_end_date               DATE,
     PRIMARY KEY (cmte_id, cycle)
 );
 
 -- Raw filings ingested directly via the `parser` module (not from bulk
--- CSVs). This is the flagship "why we built our own parser" path: exact
--- Schedule E rows extracted from the filing itself, not derived/filtered
--- from an aggregate bulk file.
+-- CSVs): exact Schedule E rows extracted from the filing itself, not
+-- derived/filtered from an aggregate bulk file.
 CREATE TABLE IF NOT EXISTS filings (
     filing_id          BIGINT PRIMARY KEY,
     form_type          TEXT NOT NULL,
@@ -287,8 +295,12 @@ CREATE TABLE IF NOT EXISTS filings (
     amends_filing_id   BIGINT,
     header             JSONB,
     summary            JSONB,
+    -- Body lines the (lenient) parser could not parse and skipped. 0 for a
+    -- fully-parsed filing; never silently hidden.
+    skipped_lines      INT NOT NULL DEFAULT 0,
     ingested_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS filings_committee_id_idx ON filings (committee_id);
 
 CREATE TABLE IF NOT EXISTS schedule_e_lines (
     id                       BIGSERIAL PRIMARY KEY,
@@ -306,49 +318,21 @@ CREATE TABLE IF NOT EXISTS schedule_e_lines (
 );
 CREATE INDEX IF NOT EXISTS schedule_e_lines_candidate_id_idx ON schedule_e_lines (candidate_id);
 
--- If the FEC's own `fec_fitem_sched_e.dump` (a real, weekly-updated
--- pg_dump covering independent expenditures back to 1975) has been
--- restored into the `disclosure` schema -- see `hardmoney bulk load-sched-e-dump`
--- and README "The pgdump question" -- expose it under a friendly,
--- hardmoney-schema-consistent view name. This is the authoritative,
--- full-history independent-expenditures source; `committee_to_candidate_transactions`
--- (filtered to transaction types 24A/24E) and `schedule_e_lines` (from
--- directly-ingested filings) are the two complementary/approximate paths
--- when the dump hasn't been loaded.
-DO $$
-BEGIN
-    IF to_regclass('disclosure.fec_fitem_sched_e') IS NOT NULL THEN
-        -- DROP + CREATE (not CREATE OR REPLACE) because Postgres refuses to
-        -- REPLACE a view when a column's output type changes (e.g. the
-        -- numeric(19,0) -> bigint cast added for sub_id/file_num below), and
-        -- this view has no dependents of its own to worry about losing.
-        EXECUTE 'DROP VIEW IF EXISTS independent_expenditures';
-        EXECUTE '
-            CREATE VIEW independent_expenditures AS
-            SELECT
-                sub_id::bigint     AS sub_id,
-                file_num::bigint   AS file_num,
-                cmte_id,
-                cmte_nm            AS committee_name,
-                pye_nm             AS payee_name,
-                s_o_cand_id        AS candidate_id,
-                s_o_cand_nm        AS candidate_name,
-                s_o_cand_office    AS candidate_office,
-                s_o_cand_office_st AS candidate_office_state,
-                s_o_ind            AS support_oppose_code,
-                s_o_ind_desc       AS support_oppose_desc,
-                exp_amt            AS expenditure_amt,
-                exp_dt             AS expenditure_date,
-                exp_desc           AS expenditure_description,
-                catg_cd_desc       AS category_desc,
-                election_tp,
-                rpt_yr,
-                election_cycle,
-                filing_form,
-                image_num,
-                dissem_dt          AS disseminated_at
-            FROM disclosure.fec_fitem_sched_e
-        ';
-    END IF;
-END
-$$;
+-- One row per bulk load, for provenance and for `--if-changed` (S3 serves
+-- ETag/Last-Modified for every bulk file). `row_limit IS NULL` marks a full
+-- load; sampled dev loads (`--limit N`) are recorded but never "current".
+CREATE TABLE IF NOT EXISTS loads (
+    load_id               BIGSERIAL PRIMARY KEY,
+    source                TEXT NOT NULL,
+    cycle                 INT,
+    loaded_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    mode                  TEXT NOT NULL,
+    row_count             BIGINT NOT NULL,
+    row_limit             BIGINT,
+    dates_nulled          BIGINT NOT NULL DEFAULT 0,
+    source_url            TEXT,
+    source_etag           TEXT,
+    source_last_modified  TIMESTAMPTZ,
+    hardmoney_version     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS loads_source_cycle_idx ON loads (source, cycle, loaded_at DESC);

@@ -32,8 +32,8 @@ fn main() {
     }
     println!("body lines:    {}", filing.lines.len());
 
-    // `summary` is the report's top-level cover/totals line -- an
-    // IndexMap<String, String> keyed by canonical field name.
+    // `summary` is the report's top-level cover/totals line -- a
+    // `ParsedLine` whose `fields` are keyed by canonical field name.
     for field in [
         "committee_name",
         "col_a_total_receipts",
@@ -43,7 +43,8 @@ fn main() {
     }
 
     // Tally how many lines dispatched to each schedule/sub-form table.
-    let mut by_table: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    let mut by_table: std::collections::BTreeMap<hardmoney::Table, usize> =
+        std::collections::BTreeMap::new();
     for line in &filing.lines {
         *by_table.entry(line.table).or_default() += 1;
     }

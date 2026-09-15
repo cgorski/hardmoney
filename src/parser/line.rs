@@ -8,12 +8,11 @@
 //! regex1>,<FEC_LABEL>,<1-indexed col for regex2>,<FEC_LABEL>,...` with a
 //! blank position meaning the field doesn't exist in that version.
 
-use std::collections::HashMap;
-
 use indexmap::IndexMap;
 use regex::Regex;
 
 use crate::parser::error::{FecError, Result};
+use crate::parser::format_data::Table;
 use crate::parser::utils::clean_entry;
 
 /// One version-bucket: the compiled (start-anchored) regex that matches a
@@ -27,9 +26,19 @@ struct Bucket {
 
 /// A single form/schedule's format table across all FEC spec versions it has
 /// ever used, e.g. "F3X" or "SchA".
+#[derive(Debug)]
 pub struct Line {
-    pub form: String,
+    table: Table,
     buckets: Vec<Bucket>,
+}
+
+impl std::fmt::Debug for Bucket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Bucket")
+            .field("regex", &self.regex.as_str())
+            .field("columns", &self.columns.len())
+            .finish()
+    }
 }
 
 /// Python's `re.match` implicitly anchors at the start of the string even
@@ -74,10 +83,26 @@ fn parse_column_position(cell: &str) -> Option<usize> {
     None
 }
 
+/// A version bucket under construction: its header-column index, compiled
+/// regex, and the field -> position map being filled in row by row.
+struct PendingBucket {
+    header_col: usize,
+    header_text: String,
+    regex: Regex,
+    columns: IndexMap<String, usize>,
+}
+
 impl Line {
+    /// Builds the `Line` for a bundled [`Table`] from its embedded CSV.
+    pub fn for_table(table: Table) -> Result<Self> {
+        Self::from_csv_str(table, table.csv())
+    }
+
     /// Builds a `Line` from the raw CSV content of a fec-csv-sources format
-    /// table (e.g. the contents of `F3X.csv`).
-    pub fn from_csv_str(form: &str, csv_content: &str) -> Result<Self> {
+    /// table (e.g. the contents of `F3X.csv`). `table` is only used to
+    /// label errors and the resulting `Line`; callers testing synthetic
+    /// CSVs can pass any variant.
+    pub fn from_csv_str(table: Table, csv_content: &str) -> Result<Self> {
         let mut reader = csv::ReaderBuilder::new()
             .has_headers(false)
             .flexible(true)
@@ -88,68 +113,73 @@ impl Line {
             .next()
             .transpose()?
             .ok_or_else(|| FecError::UnknownForm {
-                form: form.to_string(),
+                form: table.as_str().to_string(),
             })?;
 
-        // regex-bucket column index -> Bucket (built up as we scan rows).
-        let mut bucket_order: Vec<usize> = Vec::new();
-        let mut bucket_regex: HashMap<usize, Regex> = HashMap::new();
-
+        // One pending bucket per non-empty, non-"canonical" header cell, in
+        // CSV column order. Keeping them in a Vec (rather than two HashMaps
+        // keyed by column index) means the later assembly step can't fail.
+        let mut pending: Vec<PendingBucket> = Vec::new();
         for (i, cell) in header.iter().enumerate() {
             if !cell.is_empty() && cell != "canonical" {
-                let compiled = compile_anchored(cell)?;
-                bucket_regex.insert(i, compiled);
-                bucket_order.push(i);
+                pending.push(PendingBucket {
+                    header_col: i,
+                    header_text: cell.to_string(),
+                    regex: compile_anchored(cell)?,
+                    columns: IndexMap::new(),
+                });
             }
         }
 
-        let mut bucket_columns: HashMap<usize, IndexMap<String, usize>> =
-            bucket_order.iter().map(|&i| (i, IndexMap::new())).collect();
-
         for row in records {
             let row = row?;
-            if row.is_empty() {
+            let Some(canonical) = row.get(0).filter(|c| !c.is_empty()) else {
                 continue;
-            }
-            let canonical = row.get(0).unwrap_or("").to_string();
-            if canonical.is_empty() {
-                continue;
-            }
-            for &i in &bucket_order {
-                if let Some(pos_str) = row.get(i)
-                    && let Some(pos_1indexed) = parse_column_position(pos_str)
-                {
-                    let zero_indexed = pos_1indexed - 1;
-                    let columns = bucket_columns.get_mut(&i).unwrap();
-                    if let Some(&existing) = columns.get(&canonical) {
-                        if existing != zero_indexed {
-                            return Err(FecError::DuplicateCanonicalField {
-                                form: form.to_string(),
-                                version_bucket: header.get(i).unwrap_or("").to_string(),
-                                canonical: canonical.clone(),
-                                first_position: existing + 1,
-                                second_position: pos_1indexed,
-                            });
-                        }
-                    } else {
-                        columns.insert(canonical.clone(), zero_indexed);
+            };
+            for bucket in &mut pending {
+                let Some(pos_1indexed) = row.get(bucket.header_col).and_then(parse_column_position)
+                else {
+                    continue;
+                };
+                // `parse_column_position` guarantees >= 1.
+                let zero_indexed = pos_1indexed.saturating_sub(1);
+                match bucket.columns.get(canonical) {
+                    Some(&existing) if existing != zero_indexed => {
+                        return Err(FecError::DuplicateCanonicalField {
+                            form: table.as_str().to_string(),
+                            version_bucket: bucket.header_text.clone(),
+                            canonical: canonical.to_string(),
+                            first_position: existing.saturating_add(1),
+                            second_position: pos_1indexed,
+                        });
+                    }
+                    Some(_) => {}
+                    None => {
+                        bucket.columns.insert(canonical.to_string(), zero_indexed);
                     }
                 }
             }
         }
 
-        let buckets = bucket_order
+        let buckets = pending
             .into_iter()
-            .map(|i| Bucket {
-                regex: bucket_regex.remove(&i).unwrap(),
-                columns: bucket_columns.remove(&i).unwrap(),
+            .map(|p| Bucket {
+                regex: p.regex,
+                columns: p.columns,
             })
             .collect();
 
-        Ok(Line {
-            form: form.to_string(),
-            buckets,
-        })
+        Ok(Line { table, buckets })
+    }
+
+    /// Which format table this `Line` parses.
+    pub fn table(&self) -> Table {
+        self.table
+    }
+
+    /// Whether any version bucket in this table matches `version`.
+    pub fn supports_version(&self, version: &str) -> bool {
+        self.find_bucket(version).is_some()
     }
 
     /// Finds the version bucket whose regex matches `version`. If more than
@@ -171,8 +201,9 @@ impl Line {
         let bucket =
             self.find_bucket(version)
                 .ok_or_else(|| FecError::NoMatchingVersionBucket {
-                    form: self.form.clone(),
+                    table: self.table.as_str(),
                     version: version.to_string(),
+                    line_no: None,
                 })?;
 
         let mut out = IndexMap::with_capacity(bucket.columns.len());
@@ -213,7 +244,7 @@ mod tests {
         // spreadsheet. A strict usize parse silently drops every column
         // in the affected bucket, producing lines with zero fields.
         let csv = "canonical,^8.5,,^1,\r\nform_type,1.0,FORM TYPE,1,FORM TYPE\r\namount,21.0,AMOUNT,15,AMOUNT\r\n";
-        let line = Line::from_csv_str("TEST", csv).unwrap();
+        let line = Line::from_csv_str(Table::SchA, csv).unwrap();
         let row = vec![
             "SA11AI".to_string(),
             "".to_string(),
@@ -244,7 +275,7 @@ mod tests {
 
     #[test]
     fn parses_buckets_and_positions() {
-        let line = Line::from_csv_str("TEST", sample_csv()).unwrap();
+        let line = Line::from_csv_str(Table::F3X, sample_csv()).unwrap();
         assert_eq!(line.buckets.len(), 2);
 
         let row = vec!["F3X".to_string(), "C00123".to_string(), "extra".to_string()];
@@ -259,8 +290,24 @@ mod tests {
 
     #[test]
     fn missing_version_errors() {
-        let line = Line::from_csv_str("TEST", sample_csv()).unwrap();
+        let line = Line::from_csv_str(Table::F3X, sample_csv()).unwrap();
         let row = vec!["F3X".to_string()];
-        assert!(line.parse_line(&row, "3.0").is_err());
+        assert!(!line.supports_version("3.0"));
+        match line.parse_line(&row, "3.0") {
+            Err(FecError::NoMatchingVersionBucket { table, version, .. }) => {
+                assert_eq!(table, "F3X");
+                assert_eq!(version, "3.0");
+            }
+            other => panic!("expected NoMatchingVersionBucket, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_bundled_table_builds() {
+        for &t in Table::ALL {
+            let line = Line::for_table(t).unwrap_or_else(|e| panic!("{t}: {e}"));
+            assert_eq!(line.table(), t);
+            assert!(!line.buckets.is_empty(), "{t} has no version buckets");
+        }
     }
 }

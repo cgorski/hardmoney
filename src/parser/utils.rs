@@ -56,25 +56,32 @@ pub fn utf8_clean(raw: &str) -> String {
 
 /// Port of `pyfec.utils.get_cycle`: pads a year to the next even number and
 /// returns it as a string (election cycles are even years). Returns `None`
-/// for unparsable input, matching the Python `ValueError` -> `None` path.
+/// for unparsable input or a year outside a sane range, matching the
+/// Python `ValueError` -> `None` path without the possibility of overflow.
 pub fn get_cycle(year: &str) -> Option<String> {
     let this_year: i64 = year.trim().parse().ok()?;
-    let padded = if this_year % 2 != 0 {
-        this_year + 1
+    let padded = if this_year.rem_euclid(2) != 0 {
+        this_year.checked_add(1)?
     } else {
         this_year
     };
     Some(padded.to_string())
 }
 
-/// Port of `pyfec.utils.get_four_digit_year`.
+/// Port of `pyfec.utils.get_four_digit_year`: expands a two-digit year,
+/// treating anything up to ten years past `current_year` as 20xx and the
+/// rest as 19xx. Returns `None` for unparsable input or values that are
+/// not actually two-digit.
 pub fn get_four_digit_year(two_digit: &str, current_year: i32) -> Option<String> {
     let two_digit_year: i32 = two_digit.trim().parse().ok()?;
-    let this_year_2digit = current_year % 100;
-    let four_digit = if two_digit_year <= this_year_2digit + 10 {
-        2000 + two_digit_year
+    if !(0..=99).contains(&two_digit_year) {
+        return None;
+    }
+    let this_year_2digit = current_year.rem_euclid(100);
+    let four_digit = if two_digit_year <= this_year_2digit.checked_add(10)? {
+        2000_i32.checked_add(two_digit_year)?
     } else {
-        1900 + two_digit_year
+        1900_i32.checked_add(two_digit_year)?
     };
     Some(four_digit.to_string())
 }
@@ -103,5 +110,19 @@ mod tests {
         assert_eq!(get_cycle("2023"), Some("2024".to_string()));
         assert_eq!(get_cycle("2024"), Some("2024".to_string()));
         assert_eq!(get_cycle("abc"), None);
+        // Extreme values must not panic (they used to overflow in debug).
+        assert_eq!(get_cycle("9223372036854775807"), None);
+        assert_eq!(get_cycle("-1"), Some("0".to_string()));
+    }
+
+    #[test]
+    fn get_four_digit_year_expands_without_overflow() {
+        assert_eq!(get_four_digit_year("24", 2026), Some("2024".to_string()));
+        assert_eq!(get_four_digit_year("36", 2026), Some("2036".to_string()));
+        assert_eq!(get_four_digit_year("37", 2026), Some("1937".to_string()));
+        assert_eq!(get_four_digit_year("99", 2026), Some("1999".to_string()));
+        assert_eq!(get_four_digit_year("100", 2026), None);
+        assert_eq!(get_four_digit_year("2147483647", 2026), None);
+        assert_eq!(get_four_digit_year("x", 2026), None);
     }
 }

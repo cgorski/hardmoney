@@ -7,13 +7,13 @@ use sqlx::PgPool;
 use crate::api::error::ApiError;
 use crate::api::pagination::Pagination;
 
-/// A row from the `independent_expenditures` view (see
-/// `src/db/schema.sql`), which -- when present -- is backed by the FEC's
+/// A row from the `independent_expenditures` view (created per namespace by
+/// `hardmoney::db::ensure_views`), which -- when present -- is backed by the FEC's
 /// own official, weekly-updated `fec_fitem_sched_e.dump` pg_dump archive
-/// (restored via `hardmoney bulk restore-dump schedule_e`), not an
+/// (restored via `hardmoney bulk-restore-dump schedule_e`), not an
 /// approximation derived from another bulk file. If that dump hasn't been
-/// restored yet, this endpoint returns a 500 explaining so.
-#[derive(Serialize, sqlx::FromRow)]
+/// restored yet, this endpoint returns a 503 explaining so.
+#[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct IndependentExpenditure {
     pub sub_id: i64,
     pub cmte_id: Option<String>,
@@ -38,7 +38,7 @@ pub struct IndependentExpenditure {
     pub election_cycle: Option<i32>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct SearchParams {
     pub candidate_id: Option<String>,
     pub cmte_id: Option<String>,
@@ -72,14 +72,13 @@ pub async fn search(
     .bind(page.offset())
     .fetch_all(&pool)
     .await
-    .map_err(|e| match &e {
-        sqlx::Error::Database(db_err) if db_err.message().contains("independent_expenditures") => ApiError::NotFound(
-            "the independent_expenditures view doesn't exist yet -- run \
-             `hardmoney bulk restore-dump schedule_e` to load the FEC's official \
-             Schedule E pg_dump archive first"
-                .to_string(),
-        ),
-        _ => ApiError::Database(e),
+    .map_err(|e| {
+        crate::api::error::missing_relation(
+            e,
+            "independent_expenditures",
+            "run `hardmoney bulk-restore-dump schedule_e` to load the FEC's official \
+             Schedule E pg_dump archive, then `hardmoney schema-init`",
+        )
     })?;
     Ok(Json(rows))
 }

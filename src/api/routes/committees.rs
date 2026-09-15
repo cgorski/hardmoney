@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 use crate::api::error::ApiError;
-use crate::api::pagination::Pagination;
+use crate::api::pagination::{Pagination, cycle_param};
 
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct Committee {
     pub cmte_id: String,
     pub cycle: i32,
@@ -22,7 +22,7 @@ pub struct Committee {
     pub cand_id: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct ListParams {
     pub cycle: Option<i32>,
     pub cmte_tp: Option<String>,
@@ -36,6 +36,7 @@ pub async fn list(
     Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<Committee>>, ApiError> {
     let page = Pagination::new(params.limit, params.offset);
+    let cycle = cycle_param(params.cycle)?;
     let rows = sqlx::query_as::<_, Committee>(
         "SELECT cmte_id, cycle, cmte_nm, tres_nm, cmte_city, cmte_st, cmte_dsgn, cmte_tp, \
                 cmte_pty_affiliation, org_tp, connected_org_nm, cand_id \
@@ -45,7 +46,7 @@ pub async fn list(
            AND ($3::text IS NULL OR cmte_nm ILIKE '%' || $3 || '%') \
          ORDER BY cmte_id, cycle LIMIT $4 OFFSET $5",
     )
-    .bind(params.cycle)
+    .bind(cycle)
     .bind(params.cmte_tp)
     .bind(params.q)
     .bind(page.limit())

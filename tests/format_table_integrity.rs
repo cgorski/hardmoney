@@ -21,14 +21,14 @@
 //! a future upstream fech-sources update or a local edit mistake -- fails
 //! loudly here instead of silently dropping data in production.
 
-use hardmoney::parser::format_data::FORM_CSV_DATA;
+use hardmoney::parser::format_data::{FORM_CSV_DATA, Table};
 use hardmoney::parser::line::Line;
 
 #[test]
 fn every_bundled_format_table_parses_without_canonical_field_collisions() {
     let mut failures = Vec::new();
     for (form, csv) in FORM_CSV_DATA {
-        if let Err(e) = Line::from_csv_str(form, csv) {
+        if let Err(e) = Line::from_csv_str(Table::from_name(form).expect(form), csv) {
             failures.push(format!("{form}: {e}"));
         }
     }
@@ -45,7 +45,7 @@ fn detects_a_synthetic_collision() {
     // and 3) within the single "^8" version bucket -- must be rejected,
     // not silently resolved to whichever row came last.
     let csv = "canonical,^8\ndup,2,FIRST\ndup,3,SECOND\n";
-    match Line::from_csv_str("SYNTH", csv) {
+    match Line::from_csv_str(Table::F3X, csv) {
         Ok(_) => panic!("expected a DuplicateCanonicalField error, but parsing succeeded"),
         Err(e) => assert!(
             matches!(e, hardmoney::FecError::DuplicateCanonicalField { .. }),
@@ -60,7 +60,8 @@ fn allows_the_same_canonical_name_repeated_with_an_identical_position() {
     // legitimately restate the same canonical name at the same position
     // across cosmetic label variants. That must keep working.
     let csv = "canonical,^8\nsame,2,LABEL A\nsame,2,LABEL A (cosmetic variant)\n";
-    let line = Line::from_csv_str("SYNTH", csv).expect("identical-position repeat must not error");
+    let line =
+        Line::from_csv_str(Table::F3X, csv).expect("identical-position repeat must not error");
     let cols = line.column_locations("8").unwrap();
     assert_eq!(cols.get("same"), Some(&1));
 }
@@ -127,8 +128,8 @@ fn renamed_fields_use_their_new_distinct_canonical_names() {
             .find(|(name, _)| name == form)
             .unwrap_or_else(|| panic!("no bundled format table named '{form}'"))
             .1;
-        let line =
-            Line::from_csv_str(form, csv).unwrap_or_else(|e| panic!("{form} failed to parse: {e}"));
+        let line = Line::from_csv_str(Table::from_name(form).expect(form), csv)
+            .unwrap_or_else(|e| panic!("{form} failed to parse: {e}"));
         let cols = line
             .column_locations(version)
             .unwrap_or_else(|| panic!("no {version} bucket for {form}"));

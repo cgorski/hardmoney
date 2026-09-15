@@ -1,5 +1,7 @@
 //! Common, very useful pattern: use the ergonomic typed views instead of
-//! hand-parsing raw `IndexMap<String, String>` fields. `ScheduleA` gives
+//! hand-parsing raw `IndexMap<String, String>` fields. `Filing::views::<ScheduleA>()`
+//! yields only genuine Schedule A lines (the table is checked, so a Schedule
+//! B line can never masquerade as a contribution) and each `ScheduleA` gives
 //! you a real `NaiveDate` and an exact `rust_decimal::Decimal` (never
 //! `f64`, which cannot represent every decimal currency amount exactly)
 //! for every itemized contribution in a filing -- and a usable
@@ -28,20 +30,13 @@ fn main() {
     let mut count = 0usize;
     let mut largest: Option<ScheduleA> = None;
 
-    for line in filing.lines.iter().filter(|l| l.table == "SchA") {
-        // TryFrom<&ParsedLine> surfaces a TypedViewError instead of
-        // panicking if a genuinely required field (the filer committee
-        // id) is missing -- everything else degrades to `None` rather
-        // than failing the whole line, since real-world FEC data is
-        // routinely incomplete on optional fields.
-        let sched_a: ScheduleA = match line.try_into() {
-            Ok(row) => row,
-            Err(e) => {
-                eprintln!("skipping malformed Schedule A line: {e}");
-                continue;
-            }
-        };
-
+    // `views::<ScheduleA>()` filters to `Table::SchA` lines and converts
+    // each one. A line is only dropped if a genuinely required field (the
+    // filer committee id) is blank -- everything else degrades to `None`,
+    // since real-world FEC data is routinely incomplete on optional
+    // fields. To see *why* a line was dropped, use `line.view::<ScheduleA>()`
+    // on `filing.lines_for(Table::SchA)` instead.
+    for sched_a in filing.views::<ScheduleA>() {
         if let Some(amount) = sched_a.contribution_amount {
             // Plain `Decimal` addition -- exact, with no accumulated
             // rounding drift no matter how many lines this loop sums.

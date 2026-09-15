@@ -1,20 +1,130 @@
-# Working with Money, Dates, and Names
+# Tables and Typed Views
 
 The raw parser layer (`filing.summary`, `filing.lines`) hands back every
-field as a plain `String`, faithful to the wire format. In practice you
-almost always want three things converted: money amounts, dates, and
-names. That's what the typed-view layer in `hardmoney::parser::typed`
-(also re-exported at the crate root) does. This chapter explains each
-conversion and why it's built the way it is.
+field as a plain string, faithful to the wire format. In practice you
+almost always want four things converted: money amounts, dates, names,
+and the FEC's one-to-three-letter codes. You also want a guarantee that
+the "Schedule A contribution" you're summing really came from a Schedule
+A line. That's what the typed-view layer in `hardmoney::parser::typed`
+(re-exported at the crate root) does. This chapter explains how to use
+it and why it's built the way it is.
 
-## Why not just parse the string yourself?
+## Three ways in
+
+There are four typed views -- `ScheduleA`, `ScheduleB`, `ScheduleE`, and
+`Form3XSummary` -- and three ways to reach them, all built on the `Table`
+enum introduced in [the previous chapter](./parsing-explained.md#from-bytes-to-structured-data):
+
+| You have... | Call | You get |
+|---|---|---|
+| a whole `Filing` and want every line of one schedule, typed | `filing.views::<ScheduleA>()` | an iterator of `ScheduleA` |
+| one `ParsedLine` | `line.view::<ScheduleA>()` | `Result<ScheduleA, TypedViewError>` |
+| a whole `Filing` and want the *raw* lines of one table | `filing.lines_for(Table::SchA)` | an iterator of `&ParsedLine` |
+
+The first one is the one you'll use most. Summing every itemized
+contribution in a filing is three lines:
+
+```rust
+use hardmoney::{Filing, ScheduleA};
+use rust_decimal::Decimal;
+
+let bytes = std::fs::read("tests/fixtures/F3A_2011812.fec")?;
+let filing = Filing::parse_bytes(&bytes)?;
+
+let total: Decimal = filing
+    .views::<ScheduleA>()
+    .filter_map(|a| a.contribution_amount)
+    .sum();
+println!("total: ${total}");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+```text
+total: $106909.58
+```
+
+`views::<V>()` is `lines_for(V::TABLE)` followed by a conversion of each
+line, dropping any line that fails to convert. For a line of the right
+table, the only way conversion fails is if a genuinely required field
+(the filer's committee ID) is blank -- every other field degrades to
+`None` rather than failing the row, because real-world FEC data is
+routinely incomplete on optional fields. If you want to see *why* a
+particular line was dropped, use the second form:
+
+```rust
+use hardmoney::{Filing, ScheduleA, Table, TypedViewError};
+
+let bytes = std::fs::read("tests/fixtures/F3A_2011812.fec")?;
+let filing = Filing::parse_bytes(&bytes)?;
+
+for line in filing.lines_for(Table::SchA) {
+    match line.view::<ScheduleA>() {
+        Ok(a) => println!("{:?} gave {:?}", a.contributor_name, a.contribution_amount),
+        Err(TypedViewError::MissingField { field, line_no, .. }) => {
+            eprintln!("line {line_no:?}: missing required field {field}");
+        }
+        Err(e) => eprintln!("{e}"),
+    }
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The bundled example
+[`examples/typed_schedule_a_totals.rs`](https://github.com/cgorski/hardmoney/blob/main/examples/typed_schedule_a_totals.rs)
+does the sum plus a "largest contribution" search:
+
+```bash
+$ cargo run --quiet --example typed_schedule_a_totals
+```
+
+```text
+249 itemized Schedule A contributions
+total: $106909.58
+largest: $20000.00 from BERT K MIZUSAWA on Some(2026-06-11)
+```
+
+## Views check the table
+
+Every typed view declares which `Table` it reads (`ScheduleA::TABLE` is
+`Table::SchA`, `ScheduleE::TABLE` is `Table::SchE`, and so on), and
+`view()` refuses a line from any other table:
+
+```rust
+use hardmoney::{Filing, ScheduleE, Table, TypedViewError};
+
+let bytes = std::fs::read("tests/fixtures/F3A_2011812.fec")?;
+let filing = Filing::parse_bytes(&bytes)?;
+
+let sched_a_line = filing.lines_for(Table::SchA).next().unwrap();
+let err = sched_a_line.view::<ScheduleE>().unwrap_err();
+assert!(matches!(err, TypedViewError::WrongTable { .. }));
+println!("{err}");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+```text
+line 3 is a SchA line, not SchE
+```
+
+The check matters because the only field a `ScheduleE` strictly
+*requires* is `filer_committee_id_number` -- and every schedule carries
+that. A conversion that looked only at the field map would not fail on a
+Schedule A line: it would "succeed" and produce a phantom independent
+expenditure with a filer ID and `None` for everything else. Run over
+`tests/fixtures/F3A_2011812.fec`, that would misfile all 587 of its
+non-Schedule-E lines as empty Schedule E rows. With the table check, that
+class of bug is impossible: a `ScheduleE` can only come from a
+`Table::SchE` line, and `views::<ScheduleE>()` on a filing with no
+independent expenditures yields nothing.
+
+## Why not just parse the strings yourself?
 
 You could -- `filing.summary.get("col_a_total_receipts")` gives you
-`Some("30408.30")`, and `"30408.30".parse::<f64>()` "works." But three
+`Some("30408.30")`, and `"30408.30".parse::<f64>()` "works." But four
 real problems show up quickly:
 
-1. **`f64` can't represent all decimal currency exactly.** This is
-   explained in full in the next section.
+1. **`f64` can't represent all decimal currency exactly.** Explained in
+   full in the next section.
 2. **Dates aren't always present, and "blank" isn't always blank.** Real
    filings routinely have empty date fields or an all-zeros date
    (`"00000000"`) instead of a genuinely missing value -- both should mean
@@ -27,8 +137,13 @@ real problems show up quickly:
    split `*_first_name`/`*_middle_name`/`*_last_name` fields. Code that
    only checks the old field name silently gets `None` for every
    present-day filing.
+4. **Codes have documented values and undocumented ones.** The entity
+   type is supposed to be one of seven three-letter codes; real filings
+   contain typos, vendor extensions, and stray whitespace. Rejecting the
+   line loses data; keeping the raw string means every caller re-derives
+   "is this an individual?" by hand.
 
-The typed views handle all three so you don't have to re-solve them.
+The typed views handle all four so you don't have to re-solve them.
 
 ## Exact money with `rust_decimal::Decimal`
 
@@ -52,10 +167,24 @@ summation cannot make in general.
 
 `rust_decimal::Decimal` avoids the problem by storing a value as an
 integer plus a power-of-ten scale (fixed-point decimal), so `11282.23` is
-represented exactly, not approximately. The parser builds it directly
-from the two integer pieces of an amount string (`whole` and `frac`) via
+represented exactly, not approximately. `hardmoney::parse_money` builds
+it directly from the digits of the amount string via
 `Decimal::new(total_cents, 2)` -- there's no `f64` intermediate step
-anywhere in the conversion.
+anywhere in the conversion -- and it fails closed on anything suspicious:
+
+```rust
+use hardmoney::parse_money;
+use rust_decimal::Decimal;
+
+assert_eq!(parse_money("11282.23"), Some(Decimal::new(1128223, 2)));
+assert_eq!(parse_money("1000"),     Some(Decimal::new(100000, 2)));  // bare integer is fine
+assert_eq!(parse_money("-75"),      Some(Decimal::new(-7500, 2)));   // so are negatives
+assert_eq!(parse_money("1.234"),    None); // three decimals: almost certainly a column-alignment bug upstream
+assert_eq!(parse_money("99999999999999999999"), None); // would overflow: None, not a panic
+```
+
+That last line matters: the cents arithmetic is checked, so no amount
+field in any filing -- however malformed -- can make the parser panic.
 
 This isn't just a parser-level guarantee. The same `Decimal` type is what
 gets written to and read back from Postgres `NUMERIC` columns in the
@@ -66,32 +195,30 @@ client receives -- you can see this directly in the API chapter, where a
 real query returns `"expenditure_amt":"11282.23"` as an exact JSON
 string, not a floating-point number.
 
-```rust
-use hardmoney::{Filing, ScheduleA};
-use rust_decimal::Decimal;
-
-let bytes = std::fs::read("tests/fixtures/F3A_2011812.fec")?;
-let filing = Filing::parse_bytes(&bytes)?;
-
-let mut total = Decimal::ZERO;
-for line in filing.lines.iter().filter(|l| l.table == "SchA") {
-    let row: ScheduleA = line.try_into()?;
-    if let Some(amount) = row.contribution_amount {
-        total += amount; // exact decimal addition, no drift
-    }
-}
-println!("total: ${total}");
-# Ok::<(), Box<dyn std::error::Error>>(())
-```
-
 ## Real dates, not string-shaped placeholders
 
-`parse_fec_date` converts the FEC's `YYYYMMDD` string fields into
-`chrono::NaiveDate`, and specifically treats a blank string *and* an
-all-zero string (`"00000000"`) as `None` rather than a parse error --
-both show up routinely in real filings (an unset date, versus a date
-field that's present but zeroed out by the filing software), and callers
-almost always want to treat them the same way.
+`hardmoney::parse_fec_date` converts the FEC's `YYYYMMDD` string fields
+into `chrono::NaiveDate`. It requires **exactly eight digits** and treats
+a blank string *and* an all-zero string (`"00000000"`) as `None` rather
+than a parse error -- both show up routinely in real filings (an unset
+date, versus a date field that's present but zeroed out by the filing
+software), and callers almost always want to treat them the same way.
+
+```rust
+use chrono::NaiveDate;
+use hardmoney::parse_fec_date;
+
+assert_eq!(parse_fec_date("20260912"), NaiveDate::from_ymd_opt(2026, 9, 12));
+assert_eq!(parse_fec_date("00000000"), None);
+assert_eq!(parse_fec_date(""), None);
+assert_eq!(parse_fec_date("2026091"), None);   // seven digits: not a date
+assert_eq!(parse_fec_date("202609121"), None); // nine digits: not a date either
+```
+
+(A looser parse -- anything `%Y%m%d` can make sense of -- would let a
+truncated or over-long field come back as a plausible-looking wrong
+date.) Note that this is the *filing* date format; the FEC's *bulk* files
+use two different ones, covered in [Dates](./dates.md).
 
 ## Names that resolve correctly regardless of filing era
 
@@ -99,27 +226,110 @@ Each typed view's name field (`contributor_name` on `ScheduleA`,
 `payee_name` on `ScheduleB`/`ScheduleE`, `candidate_name` on `ScheduleE`)
 checks both possible shapes: the old combined field first, and if that's
 absent, the modern organization-name field or the split
-first/middle/last fields, joined together. This means the same field
-resolves correctly whether you're reading a filing from 2001 or one filed
-this year -- you don't need to know or check the filing's spec version
-yourself.
+prefix/first/middle/last/suffix fields, joined together. This means the
+same field resolves correctly whether you're reading a filing from 2001
+or one filed this year -- you don't need to know or check the filing's
+spec version yourself. In the Schedule E line shown in the previous
+chapter, `candidate_last_name: "HUSTED"` and `candidate_first_name: "JON"`
+become `candidate_name: Some("JON HUSTED")`.
+
+## Codes as enums, with the unknowns preserved
+
+`ScheduleA.entity_type` and `ScheduleB.entity_type` are
+`Option<EntityType>`; `ScheduleE.support_oppose` is
+`Option<SupportOppose>`. Both enums have a variant per documented FEC code
+and an `Other(String)` variant that keeps anything else verbatim:
+
+| `EntityType` | code | | `SupportOppose` | code |
+|---|---|---|---|---|
+| `Individual` | `IND` | | `Support` | `S` |
+| `Organization` | `ORG` | | `Oppose` | `O` |
+| `Candidate` | `CAN` | | `Other(String)` | as filed |
+| `CandidateCommittee` | `CCM` | | | |
+| `Committee` | `COM` | | | |
+| `Pac` | `PAC` | | | |
+| `Party` | `PTY` | | | |
+| `Other(String)` | as filed | | | |
+
+Parsing is case-insensitive and trims whitespace. `.code()` gives the FEC
+string back, `.is_known()` is false for `Other`, and both implement
+`Display` as their code. `ScheduleE::support_oppose_code()` is a
+shortcut for the raw `Option<&str>` -- it's what the bulk ingester stores
+in the `support_oppose_code` column.
+
+```rust
+use hardmoney::{EntityType, Filing, ScheduleA, ScheduleE, SupportOppose};
+
+let bytes = std::fs::read("tests/fixtures/F3A_2011812.fec")?;
+let filing = Filing::parse_bytes(&bytes)?;
+
+for a in filing.views::<ScheduleA>() {
+    match &a.entity_type {
+        Some(EntityType::Individual) => { /* a person */ }
+        Some(EntityType::Pac) | Some(EntityType::Committee) => { /* another committee */ }
+        Some(EntityType::Other(code)) => eprintln!("undocumented entity code {code:?}"),
+        Some(other) => println!("{}", other.code()),
+        None => { /* field blank */ }
+    }
+}
+
+for e in filing.views::<ScheduleE>() {
+    match e.support_oppose {
+        Some(SupportOppose::Support) => {}
+        Some(SupportOppose::Oppose) => {}
+        Some(SupportOppose::Other(ref code)) => eprintln!("odd support/oppose code {code:?}"),
+        Some(_) => {} // both enums are #[non_exhaustive]: a wildcard arm is required
+        None => {}
+    }
+    let raw: Option<&str> = e.support_oppose_code();
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Like `Table`, both enums are `#[non_exhaustive]`, so a `match` needs a
+wildcard arm even after listing every current variant.
 
 ## A real error type, not a panic
 
-`TryFrom<&ParsedLine>` returns `Result<_, TypedViewError>`, not a panic,
-if a field that's genuinely required for the row to make sense (the
-filer's committee ID) is missing. Every other field degrades gracefully
-to `None` instead of failing the whole conversion, since real-world FEC
-data is routinely incomplete on optional fields -- a `.unwrap()` on every
-field would make the typed views nearly unusable on real data.
-[`examples/handle_parse_errors.rs`](https://github.com/cgorski/hardmoney/blob/main/examples/handle_parse_errors.rs)
-demonstrates matching on this error type directly.
+`TypedViewError` has two variants, both carrying enough context to find
+the line in a large filing:
 
-## Putting it together: a live-fetched filing
+- `WrongTable { expected, found, line_no }` -- the line belongs to a
+  different table than the view reads (shown above).
+- `MissingField { table, field, line_no }` -- a field the view genuinely
+  requires (the filer's committee ID) is absent or blank.
 
-Combining all three typed conversions, here's `Form3XSummary` applied to
-a filing fetched live over the network (requires the `fetch` feature, on
-by default) rather than from a bundled fixture:
+Every other field degrades gracefully to `None` instead of failing the
+whole conversion. `TypedViewError` is `#[non_exhaustive]`.
+
+Behind all four views is one trait, `hardmoney::TypedView`, with a
+`TABLE` constant and `from_fields`/`from_line` methods. You won't
+normally call it directly -- `view()` and `views()` are the intended
+surface -- but it's public, so you can write your own view over a table
+the crate doesn't cover yet and use it with the same two methods.
+
+## The summary line is a `ParsedLine` too: `Form3XSummary`
+
+`filing.summary` has the same type as a body line, so it has the same
+`view()` method. `Form3XSummary` reads a Form 3X cover line into exact
+`Decimal` totals and real coverage dates:
+
+```rust
+use hardmoney::{Filing, Form3XSummary, Table};
+
+let bytes = std::fs::read("tests/fixtures/F3XN_2011834.fec")?;
+let filing = Filing::parse_bytes(&bytes)?;
+
+if filing.summary.table == Table::F3X {
+    let s = filing.summary.view::<Form3XSummary>()?;
+    println!("receipts this period: ${}", s.total_receipts.unwrap_or_default());
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Combining everything in this chapter, here's that view applied to a
+filing fetched live over the network (requires the `fetch` feature, on by
+default) rather than from a bundled fixture:
 
 ```bash
 $ cargo run --quiet --example fetch_live_filing -- 2011831

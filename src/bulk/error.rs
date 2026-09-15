@@ -1,69 +1,72 @@
-use std::fmt;
+//! Errors from the `bulk` module: downloading, unzipping, and loading FEC
+//! bulk-data files, restoring the FEC's official pg_dump files, and
+//! ingesting individual filings.
 
-/// Errors from the `bulk` module (downloading, unzipping, and loading FEC
-/// bulk-data files or restoring the FEC's official pg_dump files).
-#[derive(Debug)]
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum BulkError {
-    Http(String),
-    Io(std::io::Error),
-    Zip(String),
-    Database(sqlx::Error),
+    #[error("HTTP error fetching {url}: {detail}")]
+    Http { url: String, detail: String },
+
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("zip archive error: {0}")]
+    Zip(#[from] zip::result::ZipError),
+
+    #[error("archive for {source_name} contains no entries")]
+    EmptyArchive { source_name: &'static str },
+
+    #[error("database error: {0}")]
+    Database(#[from] sqlx::Error),
+
+    #[error("migration error: {0}")]
+    Migrate(#[from] sqlx::migrate::MigrateError),
+
+    /// The namespace's schema is behind the embedded migration set. Bulk
+    /// loads refuse to write into a stale schema; run `schema-init`.
+    #[error("schema is behind: {pending} pending migration(s); run `hardmoney schema-init` first")]
+    SchemaOutOfDate { pending: usize },
+
+    #[error("filing parse error: {0}")]
+    Parse(#[from] crate::parser::FecError),
+
     /// A source row had fewer pipe-delimited fields than its
     /// [`crate::bulk::source::BulkSource`] declares, or more than are
     /// permitted by `allow_extra_trailing_fields`.
+    #[error("malformed row at line {line_no}: expected {expected} fields, found {found}")]
     MalformedRow {
         line_no: u64,
         expected: usize,
         found: usize,
     },
+
+    #[error("unknown bulk source '{0}'")]
     UnknownSource(String),
-    /// `pg_restore` (or `pg_dump`'s companion tool) was not found on PATH,
-    /// or exited non-zero.
-    ExternalTool {
-        tool: &'static str,
-        detail: String,
+
+    #[error("unknown dump '{0}'")]
+    UnknownDump(String),
+
+    /// `pg_restore` was not found on PATH, or exited with a real error.
+    #[error("{tool} failed: {detail}")]
+    ExternalTool { tool: &'static str, detail: String },
+
+    /// `--replace` would delete more rows than the confirmation threshold
+    /// and the caller did not pass `--yes`.
+    #[error(
+        "replacing {table} for cycle {cycle} would delete {existing} existing rows; pass --yes to confirm"
+    )]
+    ConfirmationRequired {
+        table: &'static str,
+        cycle: i32,
+        existing: i64,
     },
-}
 
-impl fmt::Display for BulkError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            BulkError::Http(msg) => write!(f, "HTTP error: {msg}"),
-            BulkError::Io(e) => write!(f, "I/O error: {e}"),
-            BulkError::Zip(msg) => write!(f, "zip error: {msg}"),
-            BulkError::Database(e) => write!(f, "database error: {e}"),
-            BulkError::MalformedRow {
-                line_no,
-                expected,
-                found,
-            } => write!(
-                f,
-                "malformed row at line {line_no}: expected {expected} fields, found {found}"
-            ),
-            BulkError::UnknownSource(name) => write!(f, "unknown bulk source: {name}"),
-            BulkError::ExternalTool { tool, detail } => write!(f, "{tool} failed: {detail}"),
-        }
-    }
-}
-
-impl std::error::Error for BulkError {}
-
-impl From<std::io::Error> for BulkError {
-    fn from(e: std::io::Error) -> Self {
-        BulkError::Io(e)
-    }
-}
-
-impl From<sqlx::Error> for BulkError {
-    fn from(e: sqlx::Error) -> Self {
-        BulkError::Database(e)
-    }
-}
-
-impl From<zip::result::ZipError> for BulkError {
-    fn from(e: zip::result::ZipError) -> Self {
-        BulkError::Zip(e.to_string())
-    }
+    /// A blocking task panicked or was cancelled.
+    #[error("background task failed: {0}")]
+    Task(#[from] tokio::task::JoinError),
 }
 
 pub type Result<T> = std::result::Result<T, BulkError>;

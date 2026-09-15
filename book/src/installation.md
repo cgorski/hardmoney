@@ -6,7 +6,7 @@ Add `hardmoney` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-hardmoney = "0.1"
+hardmoney = "1"
 ```
 
 That pulls in every feature: the parser, the Postgres bulk-ETL module, and
@@ -16,15 +16,16 @@ feature set instead:
 
 ```toml
 [dependencies]
-hardmoney = { version = "0.1", default-features = false, features = ["fetch"] }
+hardmoney = { version = "1", default-features = false, features = ["fetch"] }
 ```
 
 `fetch` enables `Filing::fetch`, which downloads a raw filing directly
 from `docquery.fec.gov` by filing ID instead of requiring you to have the
 file on disk already. Drop it too if you only ever parse local files.
 
-See [Feature flags](#feature-flags-reference) at the end of this chapter
-for the full list.
+The minimum supported Rust version is **1.94** (the crate uses the 2024
+edition). See [Feature flags](#feature-flags-reference) at the end of this
+chapter for the full list.
 
 ## As a command-line tool
 
@@ -45,12 +46,37 @@ parsing large bulk files is meaningfully faster with optimizations on.
 To confirm it built correctly:
 
 ```bash
+$ cargo run --quiet --bin hardmoney -- --version
+hardmoney 1.0.0
 $ cargo run --quiet --bin hardmoney -- --help
 ```
 
-If that prints a list of subcommands (`parse`, `schema-init`,
-`bulk-load`, `bulk-load-all`, `bulk-restore-dump`, `bulk-load-filing`,
-`serve`), you're set up correctly.
+```text
+FEC campaign-finance data: parse .fec filings, load bulk data, serve a REST API
+
+Usage: hardmoney <COMMAND>
+
+Commands:
+  parse              Parse a single `.fec` filing and print a JSON summary
+  schema-init        Create or upgrade the Postgres schema in the target namespace
+  schema-status      Show migration state and recorded loads for the target namespace
+  schema-list        List hardmoney namespaces (schemas) in the database
+  schema-drop        Drop a namespace and all data in it
+  bulk-load          Load one bulk-data source into Postgres
+  bulk-load-all      Load every bulk source for one cycle
+  bulk-restore-dump  Restore one of the FEC's own official pg_dump archives
+  bulk-load-filing   Ingest a single raw `.fec` filing directly
+  serve              Run the REST API server
+  help               Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+
+Database commands read DATABASE_URL (or --database-url) and an optional HARDMONEY_SCHEMA (or --schema) naming an isolated namespace inside that database. Include a username in the URL: postgres://user@host/db
+```
+
+If you see that list of ten subcommands, you're set up correctly.
 
 ## What you need for each part of the crate
 
@@ -58,9 +84,10 @@ Not every chapter of this book needs every dependency:
 
 | If you want to... | You need |
 |---|---|
-| Parse `.fec` files (Quick Start, [Parsing a Filing](./parsing-explained.md), [Money/Dates/Names](./typed-views.md)) | Just Rust and Cargo. Nothing else. |
+| Parse `.fec` files ([Quick Start](./quick-start.md), [Parsing a Filing](./parsing-explained.md), [Tables and Typed Views](./typed-views.md)) | Just Rust and Cargo. Nothing else. |
 | Download a filing live from the FEC ([Quick Start](./quick-start.md)'s live-fetch example) | Network access. No database. |
 | Load bulk data into Postgres ([Bulk ETL](./bulk-etl.md)) | A running Postgres server and a database URL. |
+| Restore the FEC's own `pg_dump` archives ([Bulk ETL](./bulk-etl.md#an-alternative-restoring-the-fecs-own-database-dumps)) | The same, plus `pg_restore` on your `PATH`. |
 | Run the REST API ([The REST API](./rest-api.md)) | The same Postgres database, already loaded with data. |
 
 If you don't have Postgres handy, the fastest way to get one for local
@@ -68,18 +95,33 @@ experimentation is usually a container:
 
 ```bash
 docker run --name fec-postgres -e POSTGRES_PASSWORD=postgres \
-  -p 5432:5432 -d postgres:16
+  -p 5432:5432 -d postgres:18
 ```
 
 Then set:
 
 ```bash
-export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:5432/postgres"
+export DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/postgres"
 ```
 
-(This book's own examples were run against a local Postgres instance with
-a database named `fec_dev`; the exact database name doesn't matter, only
-that `DATABASE_URL` points at it.)
+Two things about that URL:
+
+- **Include a username.** If the URL has no user (`postgres://localhost/fec`),
+  `sqlx` falls back to your operating-system username, which is only
+  right when your Postgres role happens to share it. An explicit `user@`
+  is the form every example in this book uses, and the form the CLI's own
+  help text recommends.
+- **The database name doesn't matter.** This book's database examples
+  were run against a local Postgres 18 database named
+  `hardmoney_v1_test`; yours can be called anything, as long as
+  `DATABASE_URL` points at it and it already exists (Postgres doesn't
+  auto-create databases -- see [Troubleshooting](./troubleshooting.md)).
+
+Every database command also accepts `--schema <name>` (or the
+`HARDMONEY_SCHEMA` environment variable) to work inside an isolated
+**namespace** within that database. You don't need one to get started --
+the default is Postgres's `public` schema -- but they're worth knowing
+about early and get their own chapter: [Namespaces](./namespaces.md).
 
 ## Feature flags reference
 
@@ -87,10 +129,33 @@ that `DATABASE_URL` points at it.)
 |---|---|---|
 | `fetch` | `Filing::fetch` (download a raw filing from `docquery.fec.gov`) | on |
 | `serde` | `Serialize`/`Deserialize` on parser types | on (pulled in by `bulk`/`api`) |
-| `bulk` | the `bulk` module (Postgres ETL, needs `sqlx`) | on |
+| `bulk` | the `bulk`, `db`, and `cycle` modules (Postgres ETL, needs `sqlx`) | on |
 | `api` | the `api` module (Axum REST server) | on |
 | `cli` | the `hardmoney` binary itself | on |
 
 Turning off `default-features` and picking only what you need keeps
-compile times down and avoids pulling in `sqlx`/`axum` if you're only
-ever parsing files.
+compile times down and avoids pulling in `sqlx`/`axum`/`tokio` if you're
+only ever parsing files. All four bundled examples build under the
+minimal `--no-default-features --features fetch` set.
+
+## Running the test suite
+
+The parser and format-table tests need nothing but Cargo:
+
+```bash
+cargo test --all-features
+```
+
+The end-to-end Postgres tests (migrations, namespace isolation,
+replace/append semantics, filing ingestion, and the REST API) only run
+when you point them at a database; otherwise they print a skip notice and
+pass:
+
+```bash
+HARDMONEY_TEST_DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/postgres" \
+  cargo test --all-features
+```
+
+Each integration test works in its own randomly-named namespace and drops
+it when it finishes, so it's safe to point at a database you're also
+using for something else.

@@ -1,14 +1,20 @@
 [package]
 name = "hardmoney"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
+rust-version = "1.94"
 license = "Apache-2.0 OR BSD-3-Clause"
-description = "A single Rust crate for FEC campaign-finance data: a .fec electronic-filing parser (nyt-pyfec, kept current through spec 8.5), a Postgres bulk-data ETL, and a REST API -- usable as a library or as the `hardmoney` CLI."
+description = "FEC campaign-finance data toolkit: a .fec electronic-filing parser (spec 3.x through 8.5), typed views with exact decimal money, a Postgres bulk-data ETL, and a REST API -- usable as a library or as the `hardmoney` CLI."
 readme = "README.md"
 repository = "https://github.com/cgorski/hardmoney"
 homepage = "https://github.com/cgorski/hardmoney"
+documentation = "https://docs.rs/hardmoney"
 keywords = ["fec", "campaign-finance", "election", "parser", "government-data"]
 categories = ["parser-implementations", "database"]
+exclude = ["/book", "/.github", "/scripts", "/tmp", "/.gitignore"]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [lib]
 name = "hardmoney"
@@ -23,7 +29,6 @@ required-features = ["cli"]
 # parser (always available)
 csv = "1.3"
 regex = "1.10"
-once_cell = "1.19"
 thiserror = "2"
 indexmap = "2"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
@@ -38,31 +43,39 @@ serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 
 # bulk ETL (optional)
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "macros", "rust_decimal"], optional = true }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "macros", "migrate", "rust_decimal"], optional = true }
+# sqlx-postgres 0.9.0 depends on `whoami` with default-features = false,
+# which stubs out the Unix username lookup and reports "anonymous" when a
+# DATABASE_URL omits the user (sqlx#4277). Enabling `std` here restores the
+# lookup. Remove once sqlx ships the fix.
+whoami = { version = "2", default-features = false, features = ["std"], optional = true }
 zip = { version = "8", default-features = false, features = ["deflate"], optional = true }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "net"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "net", "signal"], optional = true }
 indicatif = { version = "0.18", optional = true }
 
 # api (optional)
 axum = { version = "0.8", optional = true }
-tower-http = { version = "0.7", features = ["trace", "cors"], optional = true }
+tower = { version = "0.5", features = ["timeout"], optional = true }
+tower-http = { version = "0.7", features = ["trace", "cors", "timeout", "validate-request", "limit"], optional = true }
 tracing = { version = "0.1", optional = true }
-tracing-subscriber = { version = "0.3", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
-# cli (optional, but required for the `fec` binary)
+# cli (optional, required for the `hardmoney` binary)
 clap = { version = "4", features = ["derive", "env"], optional = true }
 dotenvy = { version = "0.15", optional = true }
 
 [features]
 default = ["fetch", "bulk", "api", "cli"]
 fetch = ["dep:ureq"]
-serde = ["dep:serde", "dep:serde_json", "rust_decimal/serde"]
-bulk = ["dep:sqlx", "dep:zip", "dep:tokio", "dep:ureq", "dep:indicatif", "serde"]
-api = ["dep:axum", "dep:tower-http", "dep:tracing", "dep:tracing-subscriber", "dep:tokio", "bulk", "serde"]
+serde = ["dep:serde", "dep:serde_json", "rust_decimal/serde", "indexmap/serde"]
+bulk = ["dep:sqlx", "dep:whoami", "dep:zip", "dep:tokio", "dep:ureq", "dep:indicatif", "serde"]
+api = ["dep:axum", "dep:tower", "dep:tower-http", "dep:tracing", "dep:tracing-subscriber", "dep:tokio", "bulk", "serde"]
 cli = ["dep:clap", "dep:dotenvy", "bulk", "api", "fetch"]
 
 [dev-dependencies]
 rust_decimal_macros = "1"
+tower = { version = "0.5", features = ["util"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [profile.release]
 opt-level = 3

@@ -13,7 +13,7 @@
 //! raw download straight into exact `Decimal` totals -- no `f64` anywhere
 //! in the path from the FEC's own bytes to what's printed below.
 
-use hardmoney::{Filing, Form3XSummary};
+use hardmoney::{Filing, Form3XSummary, Table};
 
 fn main() {
     let filing_id: u64 = std::env::args()
@@ -29,8 +29,8 @@ fn main() {
         filing.raw_form_type, filing.base_form_type, filing.version
     );
 
-    if filing.base_form_type == "F3X" {
-        match Form3XSummary::try_from(&filing.summary) {
+    if filing.summary.table == Table::F3X {
+        match filing.summary.view::<Form3XSummary>() {
             Ok(summary) => {
                 println!("committee:            {:?}", summary.committee_name);
                 println!(

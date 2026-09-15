@@ -69,10 +69,13 @@ research, not just watching current filings come in.
   which era wrote the file.
 
 This is verified against real historical filings, not just synthetic test
-strings -- `hardmoney`'s own test suite includes a real 2001 Merck PAC
-Form 3X filing under spec 3.00 (2,837 real body lines), real spec 5.1 and
-5.3 filings, a real spec 6.1 filing (the first ASCII-28 era), and 17
-current spec-8.5 filings across every major form type.
+strings -- `hardmoney`'s own test suite (`tests/real_filings.rs`) parses
+a real 2001 Merck PAC Form 3X under spec 3.00 (2,837 real body lines),
+real spec 5.1 and 5.3 filings, a real spec 6.1 filing (the first ASCII-28
+era), a real spec 8.0 amended Form 3 with 641 body lines, and 20 current
+spec-8.5 filings across every major form type. Every fixture is also
+parsed a second time in lenient mode and must produce an identical result
+with zero skipped lines.
 
 ## From bytes to structured data
 
@@ -93,22 +96,192 @@ it's `parse_bytes` and not just `parse` on a `&str`: you often don't know
 the encoding until you've tried. It then:
 
 1. Reads the header line to determine the spec version and pick the
-   correct header/body parsing rules.
-2. Reads the summary line into `filing.summary`, an
-   `IndexMap<String, String>` keyed by canonical field name (e.g.
-   `"col_a_total_receipts"`).
-3. Reads every remaining line, looks up which schedule/table it belongs
-   to (`filing.lines[i].table`, e.g. `"SchA"`, `"SchE"`), and builds a
-   `ParsedLine` with its own `IndexMap<String, String>` of canonical
-   field names to raw string values.
+   correct header/body parsing rules. The result is `filing.headers` (a
+   `HeaderMap`) and `filing.version` (e.g. `"8.5"`).
+2. Reads the summary line into `filing.summary`. This is a `ParsedLine`
+   -- the same type as every body line -- so `filing.summary.table`
+   tells you which form it is (`Table::F24` here), and
+   `filing.summary.get("committee_name")` returns `Option<&str>`. The
+   underlying ordered map of canonical field name to raw value is
+   `filing.summary.fields`.
+3. Reads every remaining line, looks up which schedule or sub-form table
+   it belongs to from its first column (`SE` -> `Table::SchE`, `SA11AI` ->
+   `Table::SchA`, `F3ZT` -> `Table::F3Z`, ...), parses it with that
+   table's column positions for this filing's spec version, and pushes a
+   `ParsedLine` onto `filing.lines`.
+
+A `ParsedLine` has four public fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `raw_form_type` | `String` | column 0 exactly as filed, e.g. `"SE"`, `"SA11AI"`, `"SC/10"` |
+| `table` | `Table` | which format table parsed it -- an **enum**, not a string |
+| `line_no` | `u64` | the 1-based physical line number in the file |
+| `fields` | `IndexMap<String, String>` | canonical field name -> raw value, in column order |
+
+Here's what the two Schedule E body lines of the fixture above look like
+after parsing. This is the real output of
+`hardmoney parse --lines tests/fixtures/F24N_2011832.fec`, trimmed to a
+handful of the 44 fields each line carries:
+
+```json
+{
+  "raw_form_type": "SE",
+  "table": "SchE",
+  "line_no": 3,
+  "fields": {
+    "filer_committee_id_number": "C00865444",
+    "transaction_id_number": "500196509",
+    "entity_type": "ORG",
+    "payee_organization_name": "DECLARATION MEDIA LLC",
+    "expenditure_amount": "11282.23",
+    "dissemination_date": "20260912",
+    "disbursement_date": "",
+    "support_oppose_code": "O",
+    "candidate_id_number": "S6OH00304",
+    "candidate_last_name": "HUSTED",
+    "candidate_first_name": "JON",
+    "candidate_office": "S",
+    "candidate_state": "OH",
+    "expenditure_purpose_descrip": "MEDIA PRODUCTION - ESTIMATE"
+  }
+}
+```
+
+(`line_no` is 3 because line 1 is the header and line 2 is the summary.
+In JSON the `Table` serializes as its name, `"SchE"`; in Rust it's
+`Table::SchE`.)
+
+Because `table` is an enum, filtering and matching on it is exact and
+checked by the compiler -- there is no way to typo `"ScheE"` and silently
+match nothing:
+
+```rust
+use hardmoney::{Filing, Table};
+
+let bytes = std::fs::read("tests/fixtures/F24N_2011832.fec")?;
+let filing = Filing::parse_bytes(&bytes)?;
+
+// Just the lines of one table:
+for line in filing.lines_for(Table::SchE) {
+    println!(
+        "line {}: {} -> {:?}",
+        line.line_no,
+        line.raw_form_type,
+        line.get("expenditure_amount")
+    );
+}
+
+// Or dispatch on the table yourself:
+for line in &filing.lines {
+    match line.table {
+        Table::SchA => println!("contribution"),
+        Table::SchB => println!("disbursement"),
+        Table::SchE => println!("independent expenditure"),
+        other => println!("other: {other}"), // Table implements Display
+    }
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+```text
+line 3: SE -> Some("11282.23")
+line 4: SE -> Some("4555.33")
+independent expenditure
+independent expenditure
+```
+
+`Table` is `#[non_exhaustive]` (the FEC adds record types over time), so
+a `match` on it always needs a wildcard arm like `other` above.
+`Table::as_str()` gives the string name (`"SchE"`) and
+`"SchE".parse::<Table>()` goes the other way; `Table::ALL` lists every
+variant.
 
 Every value at this layer is still a raw string -- `"11282.23"`, not a
-number; `"20260912"`, not a date. That's intentional: this layer's job is
-to faithfully reproduce the wire format with human-readable field names,
-nothing more. Turning those strings into real `Decimal` amounts,
-`NaiveDate` values, and correctly-resolved names is what the **typed
-views** layer does, covered next in
-[Working with Money, Dates, and Names](./typed-views.md).
+number; `"20260912"`, not a date; `"O"`, not "oppose". That's intentional:
+this layer's job is to faithfully reproduce the wire format with
+human-readable field names, nothing more. Turning those strings into real
+`Decimal` amounts, `NaiveDate` values, enums, and correctly-resolved
+names is what the **typed views** layer does, covered in
+[Tables and Typed Views](./typed-views.md).
+
+## Which forms and schedules are covered
+
+`hardmoney::Table` has 59 variants -- one per bundled format table. They
+fall into three groups:
+
+- **Top-level forms** that can appear on a filing's summary line: `F1`,
+  `F1M`, `F2`, `F3`, `F3X`, `F3P`, `F3L`, `F4`, `F5`, `F6`, `F7`, `F8`,
+  `F9`, `F10`, `F13`, `F24`, `F99`. The list of base form types the crate
+  processes end to end is `hardmoney::parser::form::ALLOWED_TOP_LEVEL_FORMS`,
+  checked by `Filing::is_allowed()`.
+- **Sub-forms** that appear as body lines under one of those: `F1S`,
+  `F2S`, `F3S`, `F3Z`/`F3Z1`/`F3Z2`, `F3PS`, `F3P31`/`F3PZ1`/`F3PZ2`,
+  `F56`/`F57`, `F65`, `F76`, `F82`/`F83` (Form 8 parts II and III),
+  `F91`-`F94`, `F105`, `F132`/`F133`, and the `H1`-`H6` allocation
+  schedules.
+- **Schedules**: `SchA`, `SchA3L`, `SchB`, `SchC`, `SchC1`, `SchC2`,
+  `SchD`, `SchE`, `SchF`, `SchI`, `SchL`, plus `Text` (free-text `TEXT`
+  records) and `Hdr` (the header, parsed separately).
+
+Body-line dispatch is a list of regular expressions tried in order
+against column 0, in `src/parser/form.rs`. Order matters -- `SA3L` has to
+be tried before `SA`, `F3Z1` before `F3Z`, `F1S` and `F1M` before `F1` --
+and the first match wins.
+
+Twenty of those tokens (`F1`, `F1S`, `F1M`, `F2`, `F2S`, `F3Z`, `F3ZT`,
+`F3Z1`, `F3Z2`, `F3P31`, `F3PZ1`, `F3PZ2`, `F8`, `F8II`, `F82`, `F8III`,
+`F83`, `F10`, `F105`, `SI`) have format tables in the shared
+`fech-sources` lineage that other parsers built on the same data commonly
+leave unrouted. Some of them matter more than their obscurity suggests:
+
+- **Form 1 / 1S / 1M and Form 2 / 2S** (committee and candidate
+  registrations). These are about 26% of daily volume on the FEC's live
+  feed, so a parser without them refuses a quarter of everything filed.
+  `F2S.csv` is authored locally; the upstream `fech-sources` project has
+  no table for it. Three real fixtures cover these: `F1A_2011905.fec`,
+  `F1MN_2011755.fec`, and `F2A_2011896.fec`.
+- **F3Z / F3Z1 / F3Z2 and F3P31 / F3PZ1 / F3PZ2** (consolidated
+  candidate-committee sub-forms). An amended Form 3 typically carries a
+  handful of `F3Z` lines among hundreds of Schedule A lines; under strict
+  parsing, one unrouted token would refuse the whole filing and lose
+  *every* body line with it. The real fixture `F3A_767339_v8.0.fec` has
+  three:
+
+  ```bash
+  $ cargo run --quiet --bin hardmoney -- parse tests/fixtures/F3A_767339_v8.0.fec
+  ```
+
+  ```json
+  {
+    "amends_filing": "467627",
+    "base_form_type": "F3",
+    "form_type": "F3A",
+    "is_amendment": true,
+    "line_count": 641,
+    "lines_by_table": {
+      "F3Z": 3,
+      "SchA": 576,
+      "SchB": 60,
+      "SchD": 2
+    },
+    "skipped_count": 0,
+    "version": "8.0"
+  }
+  ```
+
+  (Trimmed.) All 641 body lines parse, under a spec version -- 8.0 --
+  that no other fixture covers.
+- **Form 8 / 8II / 8III and Form 10 / 10.5** (historical debt-settlement
+  and personal-funds forms). The on-the-wire tokens are `F8II`/`F8III`
+  while the table names are `F82`/`F83`; both are accepted.
+- **Schedule I** (Levin funds), spec 3.x through 8.4. The FEC dropped it
+  in 8.5.
+
+If a body line's form type matches nothing, strict parsing fails the
+whole filing with `FecError::ParserMissing { form_type, version, line_no }`
+-- and the line number tells you exactly where to look. The next chapter
+covers what to do instead when you'd rather keep going.
 
 ## A real bug this design caught: the field-name collision fix
 
@@ -121,15 +294,14 @@ F3P, F3X, F4, SchC1, SchL** -- assigned the *same* canonical name to two
 genuinely different column positions within a single spec-version bucket.
 
 Because the line parser builds an ordered `name -> value` map per line, an
-unresolved collision meant the second-occurring field silently overwrote
-the first, discarding real data. This wasn't a hypothetical: in
-`tests/fixtures/F3XN_2011834.fec`, two colliding "total contribution
-refunds" fields held genuinely different values (5000.00 vs 0.00, and
-20000.00 vs 5000.00) before the fix -- one was quietly being thrown away.
+unresolved collision would mean the second-occurring field silently
+overwrote the first, discarding real data. This isn't a hypothetical: in
+`tests/fixtures/F3XN_2011834.fec`, the two colliding "total contribution
+refunds" fields hold genuinely different values (5000.00 vs 0.00, and
+20000.00 vs 5000.00), so one of them would have been quietly thrown away.
 
 All six tables were corrected with distinct, form-accurate names, and two
-permanent safeguards now guard against a regression ever passing silently
-again:
+permanent safeguards guard against a regression ever passing silently:
 
 - `Line::from_csv_str` returns a hard `FecError::DuplicateCanonicalField`
   error instead of silently overwriting, if any future edit (including an

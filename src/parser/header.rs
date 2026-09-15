@@ -1,12 +1,10 @@
 //! Port of `pyfec/header.py`: parses the first record of a filing, which
 //! identifies the format version used by the rest of the file.
 
-use once_cell::sync::Lazy;
-use regex::Regex;
-
 use crate::parser::error::{FecError, Result};
 use crate::parser::utils::clean_entry;
 
+/// Spec 3.x-5.x electronic header: eight fields including `name_delim`.
 static OLD_EHEADERS: &[&str] = &[
     "record_type",
     "ef_type",
@@ -17,8 +15,8 @@ static OLD_EHEADERS: &[&str] = &[
     "report_id",
     "report_number",
 ];
-static OLD_EHEADERS_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[3|4|5]").unwrap());
 
+/// Spec 6.x-8.x electronic header: seven fields (`name_delim` dropped).
 static NEW_EHEADERS: &[&str] = &[
     "record_type",
     "ef_type",
@@ -28,15 +26,9 @@ static NEW_EHEADERS: &[&str] = &[
     "report_id",
     "report_number",
 ];
-static NEW_EHEADERS_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[6|7|8]").unwrap());
 
 static PAPER_HEADERS_V1: &[&str] = &["record_type", "fec_version", "vendor", "batch_number"];
-static PAPER_HEADERS_V1_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^P1\.0").unwrap());
-
 static PAPER_HEADERS_V2_2: &[&str] = &["record_type", "fec_version", "vendor", "batch_number"];
-static PAPER_HEADERS_V2_2_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^P2\.2|^P2\.3|^P2\.4").unwrap());
-
 static PAPER_HEADERS_V2_6: &[&str] = &[
     "record_type",
     "fec_version",
@@ -44,8 +36,36 @@ static PAPER_HEADERS_V2_6: &[&str] = &[
     "batch_number",
     "report_id",
 ];
-static PAPER_HEADERS_V2_6_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^P2\.6|^P3\.0|^P3\.1").unwrap());
+
+/// The header layout for an electronic filing whose `fec_version` starts
+/// with `version`. pyfec matched `^[3|4|5]` and `^[6|7|8]` (character
+/// classes, so the pipes were literal and harmless); this is the same
+/// test as a plain leading-character check.
+fn electronic_layout(version: &str) -> Option<&'static [&'static str]> {
+    match version.chars().next()? {
+        '3' | '4' | '5' => Some(OLD_EHEADERS),
+        '6' | '7' | '8' => Some(NEW_EHEADERS),
+        _ => None,
+    }
+}
+
+fn paper_layout(version: &str) -> Option<&'static [&'static str]> {
+    if version.starts_with("P1.0") {
+        Some(PAPER_HEADERS_V1)
+    } else if ["P2.2", "P2.3", "P2.4"]
+        .iter()
+        .any(|p| version.starts_with(p))
+    {
+        Some(PAPER_HEADERS_V2_2)
+    } else if ["P2.6", "P3.0", "P3.1"]
+        .iter()
+        .any(|p| version.starts_with(p))
+    {
+        Some(PAPER_HEADERS_V2_6)
+    } else {
+        None
+    }
+}
 
 /// Parsed header fields, keyed by canonical name (see the `*_HEADERS`
 /// constants above for which keys are present for a given format).
@@ -55,26 +75,12 @@ pub type HeaderMap = indexmap::IndexMap<String, String>;
 /// field map. `is_paper` selects electronic vs. paper header layouts,
 /// mirroring `header.parse(header_array, is_paper)`.
 pub fn parse(header_array: &[String], is_paper: bool) -> Result<HeaderMap> {
-    let (headers_list, _version): (&[&str], String) = if !is_paper {
+    let headers_list: &[&str] = if !is_paper {
         let version = clean_entry(header_array.get(2).map(|s| s.as_str()).unwrap_or(""));
-        if OLD_EHEADERS_RE.is_match(&version) {
-            (OLD_EHEADERS, version)
-        } else if NEW_EHEADERS_RE.is_match(&version) {
-            (NEW_EHEADERS, version)
-        } else {
-            return Err(FecError::UnknownElectronicHeaderVersion(version));
-        }
+        electronic_layout(&version).ok_or(FecError::UnknownElectronicHeaderVersion(version))?
     } else {
         let version = clean_entry(header_array.get(1).map(|s| s.as_str()).unwrap_or(""));
-        if PAPER_HEADERS_V1_RE.is_match(&version) {
-            (PAPER_HEADERS_V1, version)
-        } else if PAPER_HEADERS_V2_2_RE.is_match(&version) {
-            (PAPER_HEADERS_V2_2, version)
-        } else if PAPER_HEADERS_V2_6_RE.is_match(&version) {
-            (PAPER_HEADERS_V2_6, version)
-        } else {
-            return Err(FecError::UnknownPaperHeaderVersion(version));
-        }
+        paper_layout(&version).ok_or(FecError::UnknownPaperHeaderVersion(version))?
     };
 
     let mut headers = HeaderMap::new();
@@ -125,5 +131,16 @@ mod tests {
     fn unknown_version_errors() {
         let arr = v(&["HDR", "FEC", "9.9", "X", "1"]);
         assert!(parse(&arr, false).is_err());
+        assert!(parse(&v(&["HDR", "FEC"]), false).is_err());
+        assert!(parse(&[], false).is_err());
+        assert!(parse(&[], true).is_err());
+    }
+
+    #[test]
+    fn paper_layouts_select_by_version_prefix() {
+        let h = parse(&v(&["HDR", "P2.6", "VENDOR", "7", "FEC-1"]), true).unwrap();
+        assert_eq!(h.get("report_id").unwrap(), "FEC-1");
+        let h = parse(&v(&["HDR", "P1.0", "VENDOR", "7"]), true).unwrap();
+        assert!(!h.contains_key("report_id"));
     }
 }

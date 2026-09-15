@@ -2,12 +2,12 @@
 
 ## What is this book?
 
-This is a tutorial for **hardmoney**, a Rust crate (library and command-line
-tool) for working with United States Federal Election Commission (FEC)
-campaign-finance data. It's written for people who have never touched FEC
-data before and want to understand, step by step, what the tool does and
-why -- with real commands and real output at every step, not made-up
-examples.
+This is a tutorial for **hardmoney** 1.0, a Rust crate (library and
+command-line tool) for working with United States Federal Election
+Commission (FEC) campaign-finance data. It's written for people who have
+never touched FEC data before and want to understand, step by step, what
+the tool does and why -- with real commands and real output at every
+step, not made-up examples.
 
 If you already know Rust and just want the API surface, the
 [crate documentation on docs.rs](https://docs.rs/hardmoney) and the
@@ -16,6 +16,12 @@ This book is for the parts in between: what the data actually looks like,
 why certain design decisions were made, and how to go from "I have a
 `.fec` file" or "I want a searchable database of committees" to a working
 program.
+
+If you'd rather start from a concrete goal than from the concepts, the
+[Tutorials](./tutorials.md) section has five end-to-end walkthroughs --
+each written for one kind of reader (a reporter, a research team, a
+watchdog, a Rust developer, a data engineer) with real commands and real
+output from start to finish.
 
 ## What is FEC data, in plain English?
 
@@ -56,7 +62,15 @@ silently misread fields, or crash on older real-world filings. `hardmoney`
 was built to handle every spec version the FEC has used, verified against
 real historical filings, not just synthetic test strings.
 
-The other reason is money correctness. Money amounts in FEC filings are
+The second reason is coverage of the *forms*. Committee and candidate
+registrations -- Form 1, Form 1M, and Form 2 -- are roughly 26% of the
+FEC's daily filing volume, and a parser that only routes the
+money-reporting forms refuses all of them. `hardmoney` dispatches those,
+the F3Z/F3P consolidated sub-forms, Form 8, Form 10, and Schedule I, along
+with every schedule and form the format tables describe (see
+[Parsing a Filing, Explained](./parsing-explained.md#which-forms-and-schedules-are-covered)).
+
+The third reason is money correctness. Money amounts in FEC filings are
 decimal currency values (dollars and cents). Representing them as
 floating-point numbers (`f64`) risks the well-known problem that binary
 floating point cannot represent every decimal fraction exactly -- `0.1 +
@@ -74,7 +88,9 @@ amount is never round-tripped through `f64` at any layer.
 - Someone who has a `.fec` file (maybe downloaded from `docquery.fec.gov`,
   or received from a client) and needs to read it programmatically.
 - Someone who wants a local, queryable database of FEC bulk data instead
-  of re-downloading and re-parsing giant CSV files every time.
+  of re-downloading and re-parsing giant CSV files every time -- and who
+  wants to keep several independent copies (this cycle, last cycle, a
+  snapshot from last week) in one database without them colliding.
 - Someone building a small internal tool or public-facing site on top of
   campaign-finance data and wants a REST API rather than direct database
   access.
@@ -89,18 +105,35 @@ that matches what you're trying to do:
 1. [Installation](./installation.md) -- get `hardmoney` building.
 2. [Quick Start](./quick-start.md) -- parse your first filing in under a
    minute.
-3. [Parsing a Filing, Explained](./parsing-explained.md) -- what's inside
+3. [Tutorials](./tutorials.md) -- five goal-driven walkthroughs: funding
+   a candidate, loading a full cycle, tracking independent expenditures,
+   building a Rust pipeline, and what the tool does with messy FEC data.
+4. [Parsing a Filing, Explained](./parsing-explained.md) -- what's inside
    a `.fec` file and how the parser turns it into structured data.
-4. [Working with Money, Dates, and Names](./typed-views.md) -- the
-   ergonomic typed-view layer, and why it exists.
-5. [Loading Bulk Data into Postgres](./bulk-etl.md) -- go from "the FEC's
-   own bulk downloads" to a normalized, queryable schema.
-6. [The REST API](./rest-api.md) -- serve that database over HTTP, with
+   - [Strict vs. Lenient Parsing](./strict-vs-lenient.md) -- what happens
+     when one line of a filing can't be parsed, and how to choose.
+5. [Tables and Typed Views](./typed-views.md) -- the `Table` enum, the
+   `view()`/`views()` typed layer, and why money, dates, and names need
+   special handling.
+6. [Loading Bulk Data into Postgres](./bulk-etl.md) -- go from "the FEC's
+   own bulk downloads" to a normalized, migrated, queryable schema.
+   - [Namespaces](./namespaces.md) -- many isolated sessions in one
+     database.
+   - [Reloading](./reloading.md) -- `--mode replace`, `--mode append`,
+     `--if-changed`, and the `loads` table.
+   - [Dates](./dates.md) -- the FEC's two date formats and the raw/parsed
+     twin columns.
+7. [The REST API](./rest-api.md) -- serve that database over HTTP, with
    real request/response examples.
-7. [CLI Reference](./cli-reference.md) -- every subcommand, with options.
-8. [Troubleshooting & FAQ](./troubleshooting.md).
+   - [Hardening the API](./api-hardening.md) -- API keys, CORS, timeouts,
+     and what error responses look like.
+8. [CLI Reference](./cli-reference.md) -- every subcommand, with options.
+9. [Troubleshooting & FAQ](./troubleshooting.md).
 
 Every command and every piece of output shown in this book was actually
-run against this crate's own bundled test fixtures (or, where noted, a
-live network call to `docquery.fec.gov` or `fec.gov`) while writing it.
-Nothing here is invented.
+run against hardmoney 1.0.0 -- against the crate's own bundled test
+fixtures, a local Postgres 18 database, or (where noted) a live network
+call to `docquery.fec.gov` or `fec.gov` -- while writing it. The handful
+of outputs that could not be reproduced on demand (for example, a
+confirmation prompt that only fires when a million rows are about to be
+deleted) are explicitly marked *illustrative*.

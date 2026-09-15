@@ -18,6 +18,7 @@ $ cargo run --quiet --bin hardmoney -- parse tests/fixtures/F24N_2011832.fec
 
 ```json
 {
+  "amends_filing": null,
   "base_form_type": "F24",
   "form_type": "F24N",
   "header": {
@@ -31,6 +32,11 @@ $ cargo run --quiet --bin hardmoney -- parse tests/fixtures/F24N_2011832.fec
   },
   "is_amendment": false,
   "line_count": 2,
+  "lines_by_table": {
+    "SchE": 2
+  },
+  "skipped": [],
+  "skipped_count": 0,
   "summary": {
     "city": "WASHINGTON",
     "committee_name": "WINSENATE",
@@ -54,13 +60,24 @@ $ cargo run --quiet --bin hardmoney -- parse tests/fixtures/F24N_2011832.fec
 ```
 
 This is Form 24 (an independent expenditure notice) filed by committee
-`C00865444` ("WINSENATE"). `form_type` is the exact form variant as
-written in the file (`F24N` -- an "N" suffix means "new", i.e. not an
-amendment); `base_form_type` strips that suffix down to the form family
-(`F24`) if you want to group F24N/F24A/F24T together. `line_count` tells
-you there are 2 itemized body lines beyond the header/summary -- in this
-case, 2 Schedule E (independent expenditure) line items, which you'll see
-parsed in full in [Parsing a Filing, Explained](./parsing-explained.md).
+`C00865444` ("WINSENATE"). Reading the fields from the top:
+
+- `form_type` is the exact form variant as written in the file (`F24N`
+  -- an "N" suffix means "new", i.e. not an amendment); `base_form_type`
+  strips that suffix down to the form family (`F24`) if you want to group
+  F24N/F24A/F24T together.
+- `is_amendment` and `amends_filing` go together: for an amendment
+  (`F24A`, `F3XA`, ...), `amends_filing` holds the filing number of the
+  report being amended, recovered from the header. It's `null` here
+  because this is an original.
+- `line_count` says there are 2 itemized body lines beyond the
+  header/summary, and `lines_by_table` breaks that down by which
+  **table** (schedule or sub-form) each line was parsed with -- here, 2
+  Schedule E (independent expenditure) line items. You'll see them parsed
+  in full in [Parsing a Filing, Explained](./parsing-explained.md).
+- `skipped_count` and `skipped` are both empty because every body line
+  parsed. They matter when you pass `--lenient`; see
+  [Strict vs. Lenient Parsing](./strict-vs-lenient.md).
 
 Try a different fixture to see a real Form 3X (a PAC's periodic financial
 summary, with itemized receipts and disbursements):
@@ -71,10 +88,16 @@ $ cargo run --quiet --bin hardmoney -- parse tests/fixtures/F3XN_2011834.fec
 
 ```json
 {
+  "amends_filing": null,
   "base_form_type": "F3X",
   "form_type": "F3XN",
   "is_amendment": false,
   "line_count": 16,
+  "lines_by_table": {
+    "SchA": 9,
+    "SchB": 7
+  },
+  "skipped_count": 0,
   "summary": {
     "committee_name": "REPUBLICAN MAJORITY FUND",
     "col_a_total_receipts": "30408.30",
@@ -86,11 +109,45 @@ $ cargo run --quiet --bin hardmoney -- parse tests/fixtures/F3XN_2011834.fec
 
 (The JSON above is trimmed to the fields discussed here -- run the
 command yourself to see the full output, including the header and every
-summary field.)
+summary field. Add `--lines` to also dump every body line with every
+field; it's large.)
+
+And a registration form -- an amended Form 2 (candidate registration),
+whose body lines are `F2S` records listing the candidate's authorized
+committees:
+
+```bash
+$ cargo run --quiet --bin hardmoney -- parse tests/fixtures/F2A_2011896.fec
+```
+
+```json
+{
+  "amends_filing": "1890108",
+  "base_form_type": "F2",
+  "form_type": "F2A",
+  "is_amendment": true,
+  "line_count": 3,
+  "lines_by_table": {
+    "F2S": 3
+  },
+  "summary": {
+    "candidate_id_number": "S6IL00458",
+    "candidate_last_name": "STRATTON",
+    "candidate_first_name": "JULIANA",
+    "candidate_office": "S",
+    "candidate_state": "IL",
+    "election_year": "2026"
+  },
+  "version": "8.5"
+}
+```
+
+(Also trimmed.) Note `is_amendment: true` and `amends_filing: "1890108"`
+-- this filing supersedes FEC filing number 1890108.
 
 ## Parsing a filing as a Rust program
 
-The same filing, parsed as a five-line library call
+The same Form 3X, parsed as a five-line library call
 (from [`examples/parse_filing.rs`](https://github.com/cgorski/hardmoney/blob/main/examples/parse_filing.rs)):
 
 ```rust
@@ -118,15 +175,22 @@ body lines:    16
 summary.committee_name               Some("REPUBLICAN MAJORITY FUND")
 summary.col_a_total_receipts         Some("30408.30")
 summary.col_a_total_disbursements    Some("22579.85")
-lines by table: {"SchA": 9, "SchB": 7}
+lines by table: {SchA: 9, SchB: 7}
 ```
 
-Note that `col_a_total_receipts` here is a raw `String` (`"30408.30"`), not
-a number -- that's what the raw parser layer (`filing.summary`,
-`filing.lines`) hands back for every field, faithfully matching the wire
-format. If you want that converted into an exact numeric type, plus real
-dates and resolved names, that's exactly what the **typed views** layer
-covered in the next-but-one chapter is for. Run
+Two things worth noticing about that output:
+
+- `col_a_total_receipts` is a raw `&str` (`"30408.30"`), not a number --
+  that's what the raw parser layer (`filing.summary`, `filing.lines`)
+  hands back for every field, faithfully matching the wire format.
+- `lines by table` prints `{SchA: 9, SchB: 7}` *without* quotes around
+  `SchA`, because it's a map keyed by `hardmoney::Table`, an enum -- not
+  by a string. Every parsed line carries a `Table` saying which
+  schedule/form it belongs to.
+
+If you want those raw strings converted into an exact numeric type, plus
+real dates and resolved names, that's exactly what the **typed views**
+layer covered in [Tables and Typed Views](./typed-views.md) is for. Run
 `cargo run --example typed_schedule_a_totals -- tests/fixtures/F3XN_2011834.fec`
 for a preview:
 
@@ -146,16 +210,28 @@ straight from `docquery.fec.gov` by its filing ID:
 $ cargo run --quiet --example fetch_live_filing -- 2011831
 ```
 
+```text
+fetching filing 2011831 from docquery.fec.gov ...
+F3XN (F3X), spec 8.5
+committee:            Some("FIRSTENERGY CORP POLITICAL ACTION COMMITTEE")
+receipts this period: $15245.52
+disbursements period: $10023.01
+cash on hand (close): $1985550.44
+```
+
 This downloads the filing, parses it, and prints a `Form3XSummary` --
-covered in full in [Working with Money, Dates, and Names](./typed-views.md).
+covered in full in [Tables and Typed Views](./typed-views.md).
 
 ## Where to go next
 
 - Want to understand exactly what's inside a `.fec` file and how the
   parser handles decades of format changes? Read
   [Parsing a Filing, Explained](./parsing-explained.md).
+- Want to know what happens when one line of a filing is unparseable, and
+  how to keep going anyway? Read
+  [Strict vs. Lenient Parsing](./strict-vs-lenient.md).
 - Want exact money math and real dates instead of raw strings? Read
-  [Working with Money, Dates, and Names](./typed-views.md).
+  [Tables and Typed Views](./typed-views.md).
 - Want a queryable database of *every* candidate, committee, and
   contribution, not just one filing at a time? Read
   [Loading Bulk Data into Postgres](./bulk-etl.md).

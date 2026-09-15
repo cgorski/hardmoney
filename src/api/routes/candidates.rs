@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 use crate::api::error::ApiError;
-use crate::api::pagination::Pagination;
+use crate::api::pagination::{Pagination, cycle_param};
 
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct Candidate {
     pub cand_id: String,
     pub cycle: i32,
@@ -24,7 +24,7 @@ pub struct Candidate {
     pub cand_zip: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct ListParams {
     pub cycle: Option<i32>,
     pub state: Option<String>,
@@ -40,6 +40,7 @@ pub async fn list(
     Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<Candidate>>, ApiError> {
     let page = Pagination::new(params.limit, params.offset);
+    let cycle = cycle_param(params.cycle)?;
     let rows = sqlx::query_as::<_, Candidate>(
         "SELECT cand_id, cycle, cand_name, cand_pty_affiliation, cand_election_yr, cand_office_st, \
                 cand_office, cand_office_district, cand_ici, cand_status, cand_pcc, cand_city, cand_st, cand_zip \
@@ -51,7 +52,7 @@ pub async fn list(
          ORDER BY cand_id, cycle \
          LIMIT $5 OFFSET $6",
     )
-    .bind(params.cycle)
+    .bind(cycle)
     .bind(params.state)
     .bind(params.office)
     .bind(params.q)

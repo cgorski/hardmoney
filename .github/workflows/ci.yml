@@ -15,50 +15,82 @@ jobs:
     name: cargo fmt --check
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-
-      - name: Check formatting
-        run: cargo fmt --all --check
+      - run: cargo fmt --all --check
 
   clippy:
     name: cargo clippy --all-features
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-features --all-targets -- -D warnings
 
-      - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@v2
+  docs:
+    name: cargo doc (deny warnings)
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --all-features --no-deps
 
-      - name: Clippy (all features, deny warnings)
-        run: cargo clippy --all-features --all-targets -- -D warnings
-
-  test:
-    name: cargo test --all-features
+  msrv:
+    name: build on MSRV (parser only + all features)
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --no-default-features --features fetch
+      - run: cargo build --all-features
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@v2
-
+  test:
+    name: cargo test --all-features (with Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # Aurora PostgreSQL's newest supported major (18.x) is the deployment
+        # target; test against the same major.
+        image: postgres:18
+        env:
+          POSTGRES_USER: hardmoney
+          POSTGRES_PASSWORD: hardmoney
+          POSTGRES_DB: hardmoney_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U hardmoney"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      HARDMONEY_TEST_DATABASE_URL: postgres://hardmoney:hardmoney@localhost:5432/hardmoney_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Build (all features)
         run: cargo build --all-features --verbose
-
-      - name: Test (all features)
+      - name: Test (all features, parser + Postgres integration)
         run: cargo test --all-features --verbose
+      - name: Test (parser only, no default features)
+        run: cargo test --no-default-features --features fetch
+
+  package:
+    name: cargo package (verifies the crate builds from its tarball)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo package --all-features
