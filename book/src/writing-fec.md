@@ -1,11 +1,11 @@
-# Writing `.fec` Files
+# Writing `.fec` files
 
 Everything before this chapter reads filings. This one goes the other
 way: `Filing::to_fec` turns a parsed `Filing` back into the `.fec` wire
 format, and `hardmoney write` does the same from the command line. It
-exists for three jobs -- fixing a field and writing the filing back out,
+exists for three jobs: fixing a field and writing the filing back out,
 normalising what a vendor's software produced, and proving that the
-parser lost nothing -- and it is the reason the parser preserves values
+parser lost nothing. It is also the reason the parser preserves values
 as filed (see [Fidelity](./fidelity.md)): a writer cannot put back what
 the parser threw away.
 
@@ -25,7 +25,7 @@ filing.write_fec(std::fs::File::create("/tmp/F3XA_2011827.canonical.fec")?)?;
 ```
 
 `to_fec_string` and `to_fec` return a value directly, not a `Result`:
-every `ParsedLine` remembers the `Layout` it was parsed with, so each
+every `ParsedLine` carries the `Layout` it was parsed with, so each
 field always has a column to go back to. `write_fec` only fails if the
 `io::Write` you hand it does.
 
@@ -40,9 +40,8 @@ parse(to_fec(parse(f)))  ==  parse(f)
 in the sense that matters: the same header, the same cover line, and the
 same body lines with the same fields in the same tables. This is tested
 over every real fixture in `tests/fixtures/` and with `proptest` over
-arbitrary field values (`src/parser/writer.rs`), and the output is
-*idempotent* -- writing the re-parsed filing produces the same bytes
-again.
+arbitrary field values (`src/parser/writer.rs`). The output is also
+idempotent: writing the re-parsed filing produces the same bytes again.
 
 ```rust
 use hardmoney::Filing;
@@ -77,7 +76,7 @@ Nine bytes grew. That is the whole difference between "as filed" and
 
 ## Canonical form: what is and is not preserved
 
-The output is *canonical*, not byte-identical. The parser removes two
+The output is canonical, not byte-identical. The parser removes two
 wire-format conventions (surrounding whitespace and one pair of wrapping
 quotes) and does not care about line endings, trailing empty columns, or
 blank lines; the writer emits one fixed choice for each:
@@ -87,11 +86,11 @@ blank lines; the writer emits one fixed choice for each:
 | Line endings | always `CRLF`, the FEC's convention |
 | Delimiter | ASCII 28 for spec 6.0+, comma for 3.x-5.x |
 | CSV quoting (3.x-5.x) | only where a value contains `,`, `"`, or a line break; `"` inside a value is doubled |
-| Record width | every record has the full column count of its layout -- trailing empty columns the original omitted are added, and padding beyond the layout is dropped |
+| Record width | every record has the full column count of its layout: trailing empty columns the original omitted are added, and padding beyond the layout is dropped |
 | Field values | as the parser holds them: trimmed, one wrapping quote pair removed, otherwise verbatim |
-| Form 99 free text | a `[BEGINTEXT]`/`[ENDTEXT]` block after the cover line, with the cover's `text` column blank -- how FECfile itself writes it |
+| Form 99 free text | a `[BEGINTEXT]`/`[ENDTEXT]` block after the cover line, with the cover's `text` column blank, which is how FECfile itself writes it |
 | Blank lines | dropped |
-| A delimiter or line break *inside* a value | replaced with a space (it could not have survived parsing anyway) |
+| A delimiter or line break inside a value | replaced with a space (it could not have survived parsing anyway) |
 
 Here is the fixture above, original and canonical, through `cat -v` so
 the control characters show (`^\` is ASCII 28, `^M` is the carriage
@@ -111,7 +110,7 @@ FECfile wrote the header with seven columns and `LF` line endings; the
 canonical form has the eighth (`HDRcomment`, blank) and `CRLF`. Eight
 lines gained a `CR` each and the header gained one delimiter: nine bytes.
 
-The same rules can also *shrink* a file. The 2001 Merck PAC filing at
+The same rules can also shrink a file. The 2001 Merck PAC filing at
 spec 3.00 was written with its fields quoted throughout; canonical CSV
 quotes only what needs it:
 
@@ -130,10 +129,10 @@ F3XA,C00097485,"MERCK PAC, The Political Action Committee of Merck & Co., Inc.",
 SA11A1,C00097485,IND,Aaland^Lyla L^Ms^,19017 Baldwin Street Nw,,Elk River,MN,553305533,,,Merck-Medco
 ```
 
-Note that `Merck & Co.` keeps its ampersand and `Aaland^Lyla L^Ms^`
-keeps its carets; 1.x would have written `MERCK  CO.`.
+`Merck & Co.` keeps its ampersand and `Aaland^Lyla L^Ms^` keeps its
+carets.
 
-In Rust, the same normalisation on a synthetic line -- trailing
+In Rust, the same normalisation on a synthetic line with trailing
 whitespace, a quoted field, a lower-case form-type token, and a record
 that stops after nine of the 8.5 Schedule A layout's 45 cells:
 
@@ -157,18 +156,18 @@ assert!(out.ends_with("\r\n"));
 ```
 
 The token `sa11ai` is written back in the filer's lower case (the
-`form_type` *field* is as filed; only `raw_form_type` is upper-cased),
+`form_type` field is as filed; only `raw_form_type` is upper-cased),
 `"Smith"` lost its quotes and `Jane` its padding, and the short record
 was padded to the 45 cells the layout defines.
 
 ## Encoding
 
 The FEC's character set is single-byte: ASCII 32-126 plus Latin-1
-128-168 and 173. `to_fec` therefore encodes as **Windows-1252 when every
-character is representable, and as UTF-8 otherwise** -- the mirror image
-of the parser's "UTF-8 first, Windows-1252 fallback" decoding, so a
-round trip always reproduces the same characters. (One guard: if the
-Windows-1252 bytes would *also* be valid UTF-8 that decodes differently,
+128-168 and 173. `to_fec` therefore encodes as Windows-1252 when every
+character is representable, and as UTF-8 otherwise. This is the mirror
+image of the parser's "UTF-8 first, Windows-1252 fallback" decoding, so
+a round trip always reproduces the same characters. (One guard: if the
+Windows-1252 bytes would also be valid UTF-8 that decodes differently,
 UTF-8 is used so the parser cannot misread them.) `to_fec_string` gives
 you the text before encoding, if you want to choose yourself.
 
@@ -224,10 +223,10 @@ Options:
 
 Without flags it writes the canonical bytes to stdout (or `-o FILE`).
 `--lenient` parses with `ParseOptions::LENIENT`; a skipped line is
-*omitted* from the output and reported on stderr as `warning: omitted
-line N: 'ZZZ' skipped (unknown form type)`, so the result is a filing
-the parser fully understands -- be aware that it is also a filing with
-fewer lines than the input.
+omitted from the output and reported on stderr as `warning: omitted
+line N: 'ZZZ' skipped (unknown form type)`. The result is a filing the
+parser fully understands, and also a filing with fewer lines than the
+input.
 
 `--check` is the round-trip test as a command. It writes the filing to
 memory, parses that, and compares header, cover line, and every body
@@ -240,10 +239,10 @@ OK: tests/fixtures/F3XA_2011827.fec round-trips (6 body lines, 1867 bytes in, 18
 
 Exit 0. On a mismatch it prints one `MISMATCH: ...` line per problem
 (`header differs`, `cover line differs`, `line count differs: 10 vs 9`,
-`line 14 differs` -- the per-line list is cut off after eleven) on
-stderr and exits 1. Every one of the 25 bundled real filings, spec 3.00
-through 8.5, passes; so did 144 of 144 parseable filings in a wider
-local corpus when the writer was built.
+`line 14 differs`; the per-line list is cut off after eleven) on stderr
+and exits 1. Every one of the 25 bundled real filings, spec 3.00 through
+8.5, passes; so did 144 of 144 parseable filings in a wider local corpus
+when the writer was built.
 
 ## Editing a filing and writing it back
 
@@ -285,27 +284,30 @@ table SchA has no field named 'no_such_field'
 line 3: Some("Self-employed")
 ```
 
-Things to know when editing:
+Some things to know when editing.
 
-- **`set` normalises like the parser.** The value is trimmed and one
-  pair of wrapping quotes is removed, so what you `set` is what `get`
-  returns and what the writer emits. Setting `form_type` also updates
-  `raw_form_type`.
-- **Unknown fields are `FecError::UnknownField`.** The layout is the
-  filing's spec version, so a field that only exists in 8.x cannot be
-  set on a 5.3 filing -- the error tells you the table and the name.
-- **New lines come from `ParsedLine::from_pairs`.** Give it the table,
-  the filing's `version`, a line number (0 for synthetic), and
-  `(field, value)` pairs, then push it onto `filing.lines`. Anything you
-  do not name is blank. See
-  [The Schema](./library-schema.md#parsedline-get-iter-set-from_pairs).
-- **You cannot build a `Filing` from nothing.** `Filing` is
-  `#[non_exhaustive]`; start from a parsed one (or a minimal synthetic
-  filing parsed from a string, as in the snippets above) and edit it.
-- **The header is a plain struct.** `filing.header.comment = "...".into()`
-  works; `Header::to_fields` is what the writer calls.
-- **The writer does not validate.** It will happily write a 31-character
-  last name or a `$5,500.00` amount. Run `hardmoney validate` on the
-  result -- see [Validating a Filing](./validating.md) -- and, for a
-  periodic report whose totals you touched,
-  [Reconciling a Filing](./reconciling.md).
+`set` normalises like the parser. The value is trimmed and one pair of
+wrapping quotes is removed, so what you `set` is what `get` returns and
+what the writer emits. Setting `form_type` also updates `raw_form_type`.
+
+Unknown fields are `FecError::UnknownField`. The layout is the filing's
+spec version, so a field that only exists in 8.x cannot be set on a 5.3
+filing. The error names the table and the field.
+
+New lines come from `ParsedLine::from_pairs`. Give it the table, the
+filing's `version`, a line number (0 for synthetic), and `(field, value)`
+pairs, then push it onto `filing.lines`. Anything you do not name is
+blank. See
+[The schema](./library-schema.md#parsedline-get-iter-set-from_pairs).
+
+You cannot build a `Filing` from nothing. `Filing` is
+`#[non_exhaustive]`; start from a parsed one (or a minimal synthetic
+filing parsed from a string, as in the snippets above) and edit it.
+
+The header is a plain struct. `filing.header.comment = "...".into()`
+works; `Header::to_fields` is what the writer calls.
+
+The writer does not validate. It will write a 31-character last name or
+a `$5,500.00` amount without complaint. Run `hardmoney validate` on the
+result (see [Validating a filing](./validating.md)) and, for a periodic
+report whose totals you touched, [Reconciling a filing](./reconciling.md).

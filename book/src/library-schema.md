@@ -1,36 +1,35 @@
-# The Schema: Versions, Layouts, and Compile-Time-Checked Fields
+# The schema: versions, layouts, and compile-time-checked fields
 
 The previous two chapters treated a `.fec` file as something the parser
-*does* things to. This one is about the data the parser does them
-*with*: the description of the format itself. hardmoney 2.0 compiles the
-FEC's per-version column positions and the FEC's own field
-specifications into static Rust data, and exposes that data through a
-handful of types. Knowing them lets you answer questions like "where does
-`contribution_amount` live in a 6.4 filing?" without opening a
-spreadsheet, and lets the compiler catch you asking an F3X cover page
-for a Schedule A field.
+does things to. This one is about the data the parser does them with:
+the description of the format itself. hardmoney compiles the FEC's
+per-version column positions and the FEC's own field specifications
+into static Rust data, and exposes that data through a handful of types.
+With them you can answer questions like "where does `contribution_amount`
+live in a 6.4 filing?" without opening a spreadsheet, and the compiler
+catches you asking an F3X cover page for a Schedule A field.
 
 Everything in this chapter lives in `hardmoney::parser::schema` and
 `hardmoney::parser::tables`; the commonly used names (`SpecVersion`,
 `Table`, `Field`, `Typed`, `ParsedLine`) are re-exported at the crate
-root. Every Rust snippet below was compiled and run against the 2.0
-source tree, and the assertions shown all hold.
+root. Every Rust snippet below was compiled and run against the source
+tree, and the assertions shown all hold.
 
 ## Where the data comes from
 
 Three inputs, all in the repository's `data/` directory, are compiled by
-`build.rs` into `$OUT_DIR/tables.rs` on every build -- so nothing here
+`build.rs` into `$OUT_DIR/tables.rs` on every build, so nothing here
 can be stale relative to the data:
 
 | Input | What it contributes | Rust surface |
 |---|---|---|
 | `data/fec-csv-sources/*.csv` | for each table, the canonical field name at each column, bucketed by spec version (fech-sources lineage, with the fixes in `NOTICE`; `F2S.csv` authored locally) | `Table`, `Layout`, `FieldDef`, the `tables::<table>` modules |
-| `data/fec-spec/spec-8.5.json` | the FEC's *Electronic Filing Specification Requirements, Part II* workbook, distilled: type, length, required level, sample, rule text, allowed values | `FieldSpec`, `FieldKind`, `Requirement`, `BUNDLED_SPEC_VERSION` |
+| `data/fec-spec/spec-8.5.json` | the FEC's "Electronic Filing Specification Requirements, Part II" workbook, distilled: type, length, required level, sample, rule text, allowed values | `FieldSpec`, `FieldKind`, `Requirement`, `BUNDLED_SPEC_VERSION` |
 | the two together | which canonical field each spec row describes | `FieldSpec::canonical` |
 
 The generator refuses inconsistent data (two fields at one column, one
 field at two columns, overlapping version buckets), which is why the
-project's rule is *data, not code, for facts about the format*: a column
+project's rule is "data, not code, for facts about the format": a column
 number is never typed into a `.rs` file by hand. The same compiled data
 is what [`hardmoney spec`](./cli-reference.md#spec) prints.
 
@@ -56,25 +55,26 @@ assert!("8.a".parse::<SpecVersion>().is_err());
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Things to notice:
+Parsing is forgiving about spelling and strict about shape. `3.00`,
+`3.0`, and `3` are one version; `8.5.0.1` is a build of `8.5` (only the
+first minor digit is significant, which is how the FEC has always
+numbered releases). Letters, empty components, and negative numbers are
+errors, not versions. A well-formed but unknown version like `180.5`
+(seen in a real corpus file) parses here and is rejected later by the
+header parser, with the line number.
 
-- **Parsing is forgiving about spelling, strict about shape.** `3.00`,
-  `3.0`, and `3` are one version; `8.5.0.1` is a build of `8.5` (only
-  the first minor digit is significant, which is how the FEC has always
-  numbered releases). Letters, empty components, and negative numbers are
-  errors, not versions. A well-formed but unknown version like `180.5`
-  (seen in a real corpus file) parses here and is rejected later by the
-  header parser, with the line number.
-- **Ordering is numeric**, so `8.5 > 8.4 > 7.0 > 6.4` and you can write
-  `if filing.version >= SpecVersion::electronic(8, 0)`. Paper-conversion
-  versions (`P3.4`, produced when the FEC keys in a paper report) sort
-  after every electronic one.
-- **The wire spelling is not preserved.** `Display` prints `3.0`, not
-  `3.00`. If you need the exact header string, it's in
-  `filing.header.fec_version_raw`.
-- `uses_fs_delimiter()` and `has_name_delim_header()` are the two
-  format-era facts the parser itself needs (ASCII-28 vs. comma
-  delimiting, and the extra header column that 3.x-5.x carried).
+Ordering is numeric, so `8.5 > 8.4 > 7.0 > 6.4` and you can write
+`if filing.version >= SpecVersion::electronic(8, 0)`. Paper-conversion
+versions (`P3.4`, produced when the FEC keys in a paper report) sort
+after every electronic one.
+
+The wire spelling is not preserved. `Display` prints `3.0`, not `3.00`.
+If you need the exact header string, it's in
+`filing.header.fec_version_raw`.
+
+`uses_fs_delimiter()` and `has_name_delim_header()` are the two
+format-era facts the parser itself needs (ASCII-28 vs. comma delimiting,
+and the extra header column that 3.x-5.x carried).
 
 `SpecVersion` implements `FromStr`, `Display`, `Ord`, `Hash`, `Copy`, and
 (with the `serde` feature) serializes as its string form, so it works as
@@ -82,11 +82,11 @@ a map key, a CLI argument, and a JSON value without conversion.
 
 ## `Table` and `Layout`
 
-A `Table` is one format table -- a form, schedule, or record type with
-its own column layout: `Table::F3X`, `Table::SchA`, `Table::Text`, 59 in
+A `Table` is one format table: a form, schedule, or record type with
+its own column layout. `Table::F3X`, `Table::SchA`, `Table::Text`, 59 in
 all (`Table::ALL`). For each table, the compiled data holds one `Layout`
-per *version bucket*: a run of spec versions across which the columns
-did not change.
+per version bucket, a run of spec versions across which the columns did
+not change.
 
 ```rust
 use hardmoney::{SpecVersion, Table};
@@ -146,23 +146,23 @@ The fields of a `Layout`:
 | `table` | `Table` | which table this is a layout of |
 | `versions` | `&[SpecVersion]` | every version this bucket applies to (`supports(v)` checks membership) |
 | `fields` | `&[FieldDef]` | `{ name, column }` for every canonical field, in the order the FEC lists them |
-| `width` | `u16` | one more than the highest column used -- the number of cells a writer must emit |
+| `width` | `u16` | one more than the highest column used; the number of cells a writer must emit |
 
 `Layout::field(name)` and `Layout::index_of(name)` are binary searches
 over a precomputed name index, so per-field lookup on a hot path is
-cheap. Columns are **0-based** in the Rust API and the `spec export`
-JSON, matching how the parser splits a record; the human-facing `spec
-fields` and `spec diff` commands number them from 1 like the FEC's
-workbook does.
+cheap. Columns are 0-based in the Rust API and the `spec export` JSON,
+matching how the parser splits a record; the human-facing `spec fields`
+and `spec diff` commands number them from 1 like the FEC's workbook
+does.
 
 `hardmoney spec diff 7.0 8.5 --table SchA` shows the same 7.0-to-8.5
-change the snippet above probes by hand -- `contribution_purpose_code`
+change the snippet above probes by hand: `contribution_purpose_code`
 dropped, everything after it shifted left by one.
 
 ## `FieldSpec`: what the FEC says about a field
 
-Layouts say *where* a field is. `FieldSpec` says what the FEC says it
-*is*: the row from the spec workbook, at the version named by
+Layouts say where a field is. `FieldSpec` says what the FEC says it is:
+the row from the spec workbook, at the version named by
 `BUNDLED_SPEC_VERSION`.
 
 ```rust
@@ -196,10 +196,10 @@ assert!(Table::SchI.specs().is_empty());
 |---|---|
 | `column` | 0-based column at the bundled version |
 | `canonical` | the canonical field name at that column, if the layout tables name it (a few spec columns are unnamed placeholders) |
-| `description` | the FEC's label, e.g. `"CONTRIBUTOR ORGANIZATION NAME"` -- for display; use `canonical` in code |
+| `description` | the FEC's label, e.g. `"CONTRIBUTOR ORGANIZATION NAME"`; for display, use `canonical` in code |
 | `kind` | `FieldKind::{Alpha, AlphaNumeric, Numeric, Amount, Unknown}` from the workbook's `TYPE` column (`A/N-200`, `AMT-12`, ...) |
 | `max_len` | the `n` in `A/N-n` |
-| `required` | `Requirement::{None, Error, Warning, Conditional(text)}` -- how hard the FEC's validator fails a blank |
+| `required` | `Requirement::{None, Error, Warning, Conditional(text)}`: how hard the FEC's validator fails a blank |
 | `sample`, `value_reference`, `rule` | the workbook's example value, allowed-values prose (`"[IND|ORG|COM]"`), and rule text (`"= 11ai + 11aii"` on a total) |
 | `forms` | for a schedule column, the parent forms it applies to |
 | `allowed_values`, `pattern` | machine-readable closed sets and regexes, where the FEC publishes them |
@@ -207,9 +207,9 @@ assert!(Table::SchI.specs().is_empty());
 This is the data `hardmoney validate` checks a filing against (length,
 type, required level, allowed values), and the `= 19`-style rule text is
 what a cover-page reconciler needs to know which schedule lines a total
-is supposed to equal. Tables the current spec no longer documents --
-Schedule I, Form 8, Form 10 -- have layouts but no spec rows, which
-`hardmoney spec tables` shows as `spec_rows 0`.
+is supposed to equal. Tables absent from the current spec (Schedule I,
+Form 8, Form 10) have layouts but no spec rows, which `hardmoney spec
+tables` shows as `spec_rows 0`.
 
 Both `FieldKind` and `Requirement` are `#[non_exhaustive]`: match them
 with a wildcard arm.
@@ -221,9 +221,9 @@ types. For every table, `build.rs` generates a module named in
 `snake_case` (`tables::sch_a`, `tables::f3x`, `tables::hdr`, ...)
 containing:
 
-- a zero-sized **marker type** with the table's name (`sch_a::SchA`,
+- a zero-sized marker type with the table's name (`sch_a::SchA`,
   `f3x::F3X`), also re-exported from `tables::markers`;
-- one **`Field<Marker>` constant per canonical field**, in
+- one `Field<Marker>` constant per canonical field, in
   `UPPER_SNAKE_CASE`: `sch_a::CONTRIBUTION_AMOUNT`,
   `f3x::COL_A_TOTAL_RECEIPTS`, `sch_e::SUPPORT_OPPOSE_CODE`. Each is
   documented with the FEC's description, so IDE completion on `sch_a::`
@@ -253,10 +253,10 @@ they can sit in your own `static` tables and `match` arms.
 
 ## `Typed<'_, T>`: the compiler checks the table
 
-A `Typed<'_, T>` is a `ParsedLine` that has been *checked* (at
+A `Typed<'_, T>` is a `ParsedLine` that has been checked (at
 construction, at runtime) to belong to table `T`, and whose accessors
 therefore only accept `Field<T>`. Asking it for a field of a different
-table is a **compile error**, not a `None`:
+table is a compile error, not a `None`:
 
 ```rust
 use hardmoney::Filing;
@@ -311,22 +311,22 @@ is `None`), and `string` (an owned copy). `Typed::line()` gets the
 underlying `ParsedLine` back.
 
 How this relates to the [typed views](./typed-views.md) chapter:
-`ScheduleA`, `ScheduleB`, `ScheduleE`, and `Form3XSummary` are *domain*
-views -- they pick fields, resolve names across old and new formats, and
+`ScheduleA`, `ScheduleB`, `ScheduleE`, and `Form3XSummary` are domain
+views. They pick fields, resolve names across old and new formats, and
 parse codes into enums, so they are what you want for the common
-schedules. `Typed<T>` is the *general* mechanism, one per table, with no
-interpretation beyond money and dates: it is how you read an `H4`
+schedules. `Typed<T>` is the general mechanism, one per table, with no
+interpretation beyond money and dates. It is how you read an `H4`
 line's `FEDERAL_SHARE`/`NONFEDERAL_SHARE` split or an `F1M` line's
 dates without waiting for someone to write a view for it, and it is how
 the crate's own views and validator are written underneath.
 
 ## `ParsedLine`: `get`, `iter`, `set`, `from_pairs`
 
-Every line -- the cover line and every body line -- is a `ParsedLine`:
-its values as a flat slice, parallel to the fields of the `Layout` it
-was parsed with. The layout is what makes the untyped string API
-precise about *absent* versus *blank*, and what lets a line be edited
-and written back at the right columns:
+Every line, the cover line and every body line, is a `ParsedLine`: its
+values as a flat slice, parallel to the fields of the `Layout` it was
+parsed with. The layout is what makes the untyped string API precise
+about absent versus blank, and what lets a line be edited and written
+back at the right columns:
 
 ```rust
 use hardmoney::{ParsedLine, SpecVersion, Table};
@@ -368,35 +368,35 @@ assert_eq!(line.to_cells().len(), 45);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-- **`get(name)`** returns `Some("")` for a field that exists in this
-  layout but is blank, and `None` for a field this version does not have
-  at all. That distinction is the one that matters when you're
-  processing a 2003 filing with 2026 code: `None` means "don't look for
-  it here," not "the filer left it empty." `get_non_empty` folds the two
-  together when you don't care.
-- **`iter()`** yields every `(field, value)` in layout order, blanks
-  included -- exactly what the writer emits and what `--lines` JSON
-  shows. `field_names()` is the same walk without values.
-- **`set(name, value)`** trims and stores, fails with
-  `FecError::UnknownField` if the layout has no such field, and keeps
-  `raw_form_type` in step if you change `form_type`. Together with
-  `from_pairs` this is how you build synthetic lines for tests, fix a
-  field before writing a filing back out, or construct records in an
-  editor.
-- **`from_pairs(table, version, line_no, pairs)`** builds a line from
-  names and values; anything unspecified is blank, `form_type` defaults
-  to the table's name, and an unknown name is an error rather than a
-  silently dropped value.
-- **`to_cells()`** is the record in wire order -- `layout.width` cells
-  with unassigned columns blank -- which is what a writer joins with the
-  version's delimiter to reproduce the line.
+`get(name)` returns `Some("")` for a field that exists in this layout
+but is blank, and `None` for a field this version does not have at all.
+That distinction is the one that matters when you're processing a 2003
+filing with 2026 code: `None` means "don't look for it here," not "the
+filer left it empty." `get_non_empty` folds the two together when you
+don't care.
 
-The `table()` and `layout()` accessors replace the 1.x `table` field and
-the per-line `fields` map. Field *names* are now shared `&'static str`s
-from the layout rather than per-line `String`s, and values are stored
-inline when short (most FEC values are), which together roughly halve
-the memory of a parsed 700,000-line presidential filing compared with
-1.x.
+`iter()` yields every `(field, value)` in layout order, blanks included,
+which is exactly what the writer emits and what `--lines` JSON shows.
+`field_names()` is the same walk without values.
+
+`set(name, value)` trims and stores, fails with `FecError::UnknownField`
+if the layout has no such field, and keeps `raw_form_type` in step if
+you change `form_type`. Together with `from_pairs` this is how you build
+synthetic lines for tests, fix a field before writing a filing back out,
+or construct records in an editor.
+
+`from_pairs(table, version, line_no, pairs)` builds a line from names
+and values; anything unspecified is blank, `form_type` defaults to the
+table's name, and an unknown name is an error rather than a silently
+dropped value.
+
+`to_cells()` is the record in wire order (`layout.width` cells, with
+unassigned columns blank), which is what a writer joins with the
+version's delimiter to reproduce the line.
+
+Field names are shared `&'static str`s from the layout, not per-line
+`String`s, and values are stored inline when short (most FEC values
+are), so a parsed 700,000-line presidential filing is compact in memory.
 
 ## Putting it together: version-aware code without version checks
 
@@ -404,10 +404,10 @@ The point of all this machinery is that most code never needs to look
 at `filing.version`. A `Typed<SchA>` view over a 5.3 line and one over
 an 8.5 line answer `a.money(sch_a::CONTRIBUTION_AMOUNT)` the same way,
 because each line carries the layout that puts that field in the right
-place; a field that a version genuinely lacks comes back `None`. When
-you *do* need the version -- to decide whether a split-name field can
-exist, say -- `layout.field(name).is_some()` asks the data instead of
-hard-coding `>= 8.0`.
+place; a field that a version lacks comes back `None`. When you do need
+the version (to decide whether a split-name field can exist, say),
+`layout.field(name).is_some()` asks the data instead of hard-coding
+`>= 8.0`.
 
 To see the full picture for any table from the terminal:
 
@@ -418,4 +418,4 @@ hardmoney spec diff 5.3 6.1 --table SchA    # what changed between two versions
 hardmoney spec export > fec-spec.json       # the whole thing, as data
 ```
 
-See [CLI Reference](./cli-reference.md#spec) for the output formats.
+See [CLI reference](./cli-reference.md#spec) for the output formats.

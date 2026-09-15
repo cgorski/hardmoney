@@ -1,19 +1,19 @@
-# Strict vs. Lenient Parsing
+# Strict vs. lenient parsing
 
-Real filings are big -- a presidential committee's Form 3P can run to
-hundreds of thousands of body lines -- and every so often one of those
+Real filings are big (a presidential committee's Form 3P can run to
+hundreds of thousands of body lines), and every so often one of those
 lines has a form-type token the parser has never seen, or belongs to a
 schedule whose format table has no column layout for that filing's spec
-version. What should happen to the *other* 699,999 lines?
+version. What should happen to the other 699,999 lines?
 
-`hardmoney` gives you both answers and makes you pick one explicitly.
+`hardmoney` has both answers and makes you pick one explicitly.
 
 ## Strict is the default
 
-`Filing::parse` and `Filing::parse_bytes` are **strict**: the first body
+`Filing::parse` and `Filing::parse_bytes` are strict: the first body
 line that cannot be parsed fails the whole filing. That is the right
-default for a library -- silently dropping lines is how data goes missing
--- and the error tells you exactly which line it was.
+default for a library, because silently dropping lines is how data goes
+missing, and the error tells you exactly which line it was.
 
 To see it, take a real fixture and append one line with a made-up form
 type. (Body fields are separated by ASCII 28, which `printf` writes as
@@ -36,7 +36,7 @@ lines (3 and 4), so the junk landed on line 5.
 ## Lenient: keep going and tell me what you skipped
 
 Pass `--lenient` and the same file parses, with the skipped line reported
-on stderr *and* recorded in the JSON:
+on stderr and recorded in the JSON:
 
 ```bash
 $ cargo run --quiet --bin hardmoney -- parse --lenient /tmp/with_junk.fec
@@ -117,22 +117,22 @@ raw bytes (with the UTF-8/Windows-1252 decoding `parse_bytes` does).
 
 ### You can't forget the skipped lines
 
-Notice that `parse_with` doesn't return a `Filing`. It returns a
-`Lenient<Filing>`, and the *only* ways to get the `Filing` out are:
+`parse_with` doesn't return a `Filing`. It returns a `Lenient<Filing>`,
+and the only ways to get the `Filing` out are:
 
-- **`into_parts()`** -- gives you `(Filing, Vec<SkippedLine>)`. You
-  receive the skipped lines whether you want them or not; discarding them
-  is a visible `let (filing, _) = ...`.
-- **`into_strict()`** -- gives you `Result<Filing, FecError>`: the
-  `Filing` if nothing was skipped, otherwise
-  `FecError::LinesSkipped { count, first }` carrying the count and the
-  first underlying error. This is how `Filing::parse` itself is
-  implemented (`parse_with(..., &ParseOptions::STRICT)?.into_strict()`).
+- `into_parts()` gives you `(Filing, Vec<SkippedLine>)`. You receive the
+  skipped lines whether you want them or not; discarding them is a
+  visible `let (filing, _) = ...`.
+- `into_strict()` gives you `Result<Filing, FecError>`: the `Filing` if
+  nothing was skipped, otherwise `FecError::LinesSkipped { count, first }`
+  carrying the count and the first underlying error. This is how
+  `Filing::parse` itself is implemented
+  (`parse_with(..., &ParseOptions::STRICT)?.into_strict()`).
 
 `Lenient<T>` has no `Deref` to `T` and no public fields, and it's marked
 `#[must_use]`, so dropping it on the floor is a compiler warning. You can
 peek with `.skipped()` and `.value()` without consuming it, but those
-don't discharge the `must_use` -- they're for inspection, not for
+don't discharge the `must_use`; they're for inspection, not for
 extracting the value.
 
 ```rust
@@ -152,7 +152,7 @@ On the junk file that last line returns
 
 ## What lenient skips, and what still fails
 
-Lenient mode only relaxes **body-line** problems. Two kinds of line can be
+Lenient mode only relaxes body-line problems. Two kinds of line can be
 skipped, and each `SkippedLine` says which via its `reason`:
 
 | `SkipReason` | Meaning | Strict-mode error |
@@ -160,18 +160,18 @@ skipped, and each `SkippedLine` says which via its `reason`:
 | `UnknownFormType` | column 0 matched no dispatch pattern | `FecError::ParserMissing { form_type, version, line_no }` |
 | `NoLayoutForVersion` | the table exists, but has no column layout for this filing's spec version (typically a filing newer than the bundled tables) | `FecError::NoMatchingVersionBucket { table, version, line_no }` |
 
-Everything that isn't about one body line **always fails**, in either
+Everything that isn't about one body line always fails, in either
 mode: an unrecognized header version
 (`FecError::UnknownElectronicHeaderVersion`), a missing summary line
 (`FecError::MissingFormLine`), or a `[BEGINTEXT]` free-text block that's
 never closed with `[ENDTEXT]` (`FecError::UnterminatedTextBlock { line_no
 }`). Those mean the file as a whole can't be trusted, so there's nothing
 sensible to "keep going" with. (An amendment whose header doesn't say
-what it amends is *not* a parse error in 2.0 -- `filing.amends_filing`
-is simply `None`, and [`hardmoney validate`](./validating.md) reports it
-as `amendment_needs_original_id`, which is how the FEC treats it.)
+what it amends is not a parse error: `filing.amends_filing` is `None`,
+and [`hardmoney validate`](./validating.md) reports it as
+`amendment_needs_original_id`, which is how the FEC treats it.)
 
-`ParseOptions` is two independent knobs, so you can also mix them -- skip
+`ParseOptions` is two independent knobs, so you can also mix them: skip
 unknown form types but fail on missing version layouts, say:
 
 ```rust
@@ -227,18 +227,19 @@ lenient: kept 1 line(s), skipped 1: line 4: 'ZZZ' skipped (unknown form type)
 
 ## Which should you use?
 
-- **Analysis, tests, anything where a wrong answer is worse than no
-  answer:** strict. If the parser doesn't understand a line, you want to
-  know before you compute a total that's missing it.
-- **Ingestion pipelines, where one filing failing shouldn't stop the
-  job:** lenient, *and record the skip count somewhere you'll look*. This
-  is what `hardmoney bulk-load-filing` does by default -- it parses
-  leniently, stores the number of skipped lines in `filings.skipped_lines`,
-  and `GET /filings/{id}` reports it. Pass `--strict` to opt out. See
-  [Loading Bulk Data into Postgres](./bulk-etl.md#ingesting-a-single-filing-directly-for-precise-schedule-e-data).
+For analysis, tests, and anything where a wrong answer is worse than no
+answer: strict. If the parser doesn't understand a line, you want to
+know before you compute a total that's missing it.
+
+For ingestion pipelines, where one filing failing shouldn't stop the
+job: lenient, and record the skip count somewhere you'll look. This is
+what `hardmoney bulk-load-filing` does by default. It parses leniently,
+stores the number of skipped lines in `filings.skipped_lines`, and
+`GET /filings/{id}` reports it. Pass `--strict` to opt out. See
+[Loading bulk data into Postgres](./bulk-etl.md#ingesting-a-single-filing-directly-for-precise-schedule-e-data).
 
 The crate's own real-filing test suite parses every fixture both ways
 and asserts the lenient result is identical to the strict one with zero
-skips -- so on the 25 real filings it ships with, the two modes agree.
-The difference only shows up on data the parser doesn't yet understand,
+skips, so on the 25 real filings it ships with, the two modes agree.
+The difference only shows up on data the parser doesn't understand,
 which is exactly when you want to be told.

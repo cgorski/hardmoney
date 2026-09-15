@@ -1,37 +1,41 @@
-//! `hardmoney`: a single Rust crate for FEC campaign-finance data.
+//! `hardmoney`: FEC campaign-finance data as a Rust library, a CLI, and a
+//! Python package.
 //!
-//! Four things live here, usable independently or together, as a library
-//! or via the `hardmoney` CLI binary:
+//! The crate has five parts. Each can be used on its own.
 //!
-//! 1. [`parser`] -- a parser *and writer* for raw FEC electronic filings
-//!    (`.fec` files), covering every electronic spec era (3.x quoted-CSV,
-//!    5.x comma, 6.x-8.5 ASCII-28) with the column layout of every version
-//!    compiled in from data, compile-time-checked field access, streaming
-//!    for very large files ([`FilingReader`]), the FEC's acceptance rules
-//!    ([`Filing::validate`]), and cover-page reconciliation against the
-//!    schedules ([`Filing::reconcile`]). Validated against real,
-//!    live-downloaded filings (see `tests/real_filings.rs`).
-//! 2. [`bulk`] -- a Postgres ETL that loads the FEC's own pre-aggregated
-//!    bulk-data downloads (candidates, committees, contributions,
-//!    disbursements, ...) into a normalized schema, and can also ingest
-//!    individual raw filings via [`parser`] for precision Schedule E
-//!    extraction.
-//! 3. [`db`] -- the schema those tables live in, with versioned migrations.
-//! 4. [`api`] -- an Axum REST API serving the tables `bulk` builds.
+//! 1. [`parser`]: reads and writes FEC electronic filings (`.fec` files) in
+//!    every spec version since 2001 (3.x quoted CSV, 5.x comma, 6.x-8.5
+//!    ASCII-28). The column layout of every version is compiled in from
+//!    data; field access is checked against the table at compile time;
+//!    [`FilingReader`] streams files of any size; [`Filing::validate`]
+//!    applies the FEC's acceptance rules; [`Filing::reconcile`] checks a
+//!    cover page against its schedules. Tested against real filings
+//!    (`tests/real_filings.rs`).
+//! 2. [`fec`]: the FEC's openFEC API, the e-file RSS feed, the daily
+//!    e-filing archives, and a download cache.
+//! 3. [`export`]: a filing's records as CSV, JSON Lines, Parquet, or SQLite.
+//! 4. [`bulk`] and [`db`]: a Postgres ETL for the FEC's bulk downloads and
+//!    for individual filings, with versioned migrations and isolated
+//!    namespaces.
+//! 5. [`api`]: an Axum REST API over the loaded tables.
+//!
+//! The Python package in `python/` wraps the parser, writer, validator,
+//! and reconciler.
 //!
 //! # Feature flags
 //!
 //! | Feature | Enables | Default |
 //! |---|---|---|
-//! | `fetch` | `Filing::fetch` (download a raw filing from docquery.fec.gov) | on |
-//! | `serde` | `Serialize`/`Deserialize` on parser types | on (via `bulk`/`api`) |
-//! | `bulk` | the [`bulk`] and [`db`] modules (Postgres ETL, needs `sqlx`) | on |
+//! | `fetch` | [`Filing::fetch`], the [`fec`] module, `validate --oracle` | on |
+//! | `serde` | `Serialize` on parser types; the openFEC client | on (via `bulk`/`api`) |
+//! | `export` | the [`export`] module (Parquet, SQLite) | on |
+//! | `bulk` | the [`bulk`] and [`db`] modules (Postgres ETL, `sqlx`) | on |
 //! | `api` | the [`api`] module (Axum server) | on |
 //! | `cli` | the `hardmoney` binary | on |
 //!
-//! A downstream crate that only wants the parser can depend on
-//! `hardmoney = { version = "2", default-features = false, features = ["fetch"] }`
-//! to avoid pulling in `sqlx`, `axum`, and `tokio`.
+//! A crate that only needs the parser can depend on
+//! `hardmoney = { version = "2", default-features = false, features = ["fetch"] }`,
+//! which leaves out `sqlx`, `axum`, `tokio`, `arrow`, and `rusqlite`.
 //!
 //! # Quick start (library)
 //!

@@ -1,11 +1,11 @@
-# Loading Bulk Data into Postgres
+# Loading bulk data into Postgres
 
 A single filing (as parsed in the previous chapters) tells you about one
-committee's one reporting period. Most real questions -- "who gave this
+committee's one reporting period. Most real questions ("who gave this
 candidate money," "how much has this PAC spent this cycle," "which
-committees are active in Maine" -- need data across *every* filer at
-once. The FEC publishes exactly that as **bulk data files**: large,
-pre-aggregated downloads, refreshed weekly, one set per election cycle.
+committees are active in Maine") need data across every filer at once.
+The FEC publishes exactly that as bulk data files: large, pre-aggregated
+downloads, refreshed weekly, one set per election cycle.
 `hardmoney::bulk` loads those into a normal Postgres database with a
 versioned, migrated schema.
 
@@ -18,7 +18,7 @@ pass `--database-url` instead.
 The examples in this chapter were run inside a namespace called
 `book_demo` (`--schema book_demo`) so they could be thrown away
 afterwards. You can leave `--schema` off entirely to work in the default
-`public` schema -- the output is identical -- but namespaces are worth
+`public` schema (the output is identical), but namespaces are worth
 knowing about early, so they get the [next chapter](./namespaces.md).
 
 ## Step 1: apply the schema
@@ -44,7 +44,7 @@ The schema is a set of numbered SQL migrations in the repository's
 
 sqlx records each applied file in a `_sqlx_migrations` table and refuses
 to run if an already-applied file has been edited, so a schema change is
-always a *new* numbered file, never an edit to an old one. (A single
+always a new numbered file, never an edit to an old one. (A single
 `CREATE TABLE IF NOT EXISTS` script can't offer that: it silently does
 nothing when a column is added or a type changes.)
 
@@ -58,8 +58,8 @@ $ cargo run --quiet --bin hardmoney -- schema-init --schema book_demo
 namespace 'book_demo': schema at version 2 (0 migration(s) applied now)
 ```
 
-`schema-status` shows where a namespace stands, and -- once you've loaded
-something -- what's in it:
+`schema-status` shows where a namespace stands, and, once you've loaded
+something, what's in it:
 
 ```bash
 $ cargo run --quiet --bin hardmoney -- schema-status --schema book_demo
@@ -72,7 +72,7 @@ pending:    []
 loads:      (none)
 ```
 
-**Every database command checks this first.** If you try to load into a
+Every database command checks this first. If you try to load into a
 namespace that hasn't been migrated (or is behind), you get a refusal,
 not a `COPY` into a stale table layout:
 
@@ -87,8 +87,8 @@ error: namespace 'fresh_ns' has 2 pending migration(s); run `hardmoney schema-in
 About the trigram indexes: `pg_trgm` is a trusted extension on community
 Postgres 13+ and on Aurora PostgreSQL, so a non-superuser database owner
 can create it. If it's unavailable on your host, the migration raises a
-`WARNING`, skips the indexes, and everything still works -- substring
-searches in the API just fall back to sequential scans.
+`WARNING`, skips the indexes, and everything still works; substring
+searches in the API fall back to sequential scans.
 
 ## Step 2: load one bulk source
 
@@ -106,7 +106,7 @@ candidates: loaded 8557 rows for cycle 2026 (replace)
 That single command downloaded
 `https://www.fec.gov/files/bulk-downloads/2026/cn26.zip`, decoded it,
 and streamed the rows into a `candidates` table via Postgres's `COPY`
-protocol -- in about a second and a half. The URL is built by
+protocol, in about a second and a half. The URL is built by
 `hardmoney::bulk::source::download_url` from the cycle and the source's
 file-name stem (covered by a unit test so a future refactor can't
 quietly break the two-digit-year padding). The `(replace)` at the end is
@@ -123,8 +123,8 @@ $ cargo run --quiet --bin hardmoney -- bulk-load --schema book_demo committees -
 committees: loaded 20674 rows for cycle 2026 (replace)
 ```
 
-Every row landed in a real Postgres table with a real schema -- here's
-what `candidates` actually looks like after that load
+Every row landed in a real Postgres table with a real schema. Here's
+what `candidates` looks like after that load
 (`psql "$DATABASE_URL" -c '\d candidates'`):
 
 ```text
@@ -155,7 +155,7 @@ Indexes:
 Column names mirror the FEC's own bulk-data header files rather than the
 openFEC API's naming, so a column here maps 1:1 onto the FEC's own
 file-description pages. Every bulk table is keyed by its natural key
-*plus* `cycle`, so multiple two-year cycles can coexist in one table.
+plus `cycle`, so multiple two-year cycles can coexist in one table.
 
 The full list of source names accepted by `bulk-load` is: `candidates`,
 `committees`, `candidate_committee_links`, `schedule_a`,
@@ -166,7 +166,7 @@ The full list of source names accepted by `bulk-load` is: `candidates`,
 ### The cycle is validated
 
 `--cycle` is a `hardmoney::Cycle`: an even year from 1976 through 2100.
-An odd year is rejected before anything is downloaded -- fec.gov has no
+An odd year is rejected before anything is downloaded; fec.gov has no
 `2027/` directory, so the alternative would be fetching a 404 page and
 trying to unzip it:
 
@@ -196,9 +196,8 @@ hardmoney bulk-load --schema book_demo candidates --cycle 2026 --file ./cn26.zip
 
 ### Sampling a huge source with `--limit`
 
-Some sources -- `schedule_a` (itemized individual contributions) in
-particular, at over 2 GB per cycle -- are far too big to download just to
-look at. `--limit` caps the number of rows read, and it stops the
+Some sources are far too big to download just to look at; `schedule_a`
+(itemized individual contributions) is over 2 GB per cycle. `--limit` caps the number of rows read, and it stops the
 download once it has them:
 
 ```bash
@@ -214,9 +213,9 @@ real	0m0.926s
 Under a second, for a source whose zip is about 45 MB: the loader stops
 pulling bytes from the network the moment the 50th row is written, so the
 same flag on the 2 GB `schedule_a` file costs seconds, not gigabytes. A
-limited load is recorded as a *sample* -- `schema-status` shows
-`(sample, limit 50)` next to it, and it's never treated as a "current"
-full load by `--if-changed`.
+limited load is recorded as a sample: `schema-status` shows `(sample,
+limit 50)` next to it, and it's never treated as a "current" full load
+by `--if-changed`.
 
 ## Step 3: or load everything for a cycle in one shot
 
@@ -254,9 +253,9 @@ real	0m7.969s
 ```
 
 Eight seconds for the first hundred rows of all ten files, including the
-multi-gigabyte ones -- because the download stops at row 100. Note the
-`replaced 8557 existing` on `candidates`: this sample *replaced* the full
-load from Step 2, because `--mode replace` is the default. If you're
+multi-gigabyte ones, because the download stops at row 100. The
+`replaced 8557 existing` on `candidates` means this sample replaced the
+full load from Step 2, because `--mode replace` is the default. If you're
 sampling alongside real data, use a separate namespace.
 
 Without `--limit`, this is the command for a complete cycle. By default
@@ -281,11 +280,11 @@ restored 549525 rows into disclosure.fec_fitem_sched_e (dump cached at /Users/yo
 independent_expenditures view refreshed in namespace 'book_demo'
 ```
 
-*(Illustrative: the output format is taken from the code, and 549,525 is
+(Illustrative: the output format is taken from the code, and 549,525 is
 the real row count of the `schedule_e` dump restored into this book's
-database -- covering report years 1975 through 2026 -- but the restore
+database, covering report years 1975 through 2026, but the restore
 command itself was not re-run while writing this chapter, and the FEC's
-weekly refresh will change the number.)* A few things to know:
+weekly refresh will change the number.) A few things to know:
 
 - `schedule_e` (~43 MB, independent expenditures 1975-present) and
   `committee_history` (~14 MB) are small enough to restore routinely.
@@ -296,25 +295,25 @@ weekly refresh will change the number.)* A few things to know:
   `XDG_CACHE_HOME`; override with `--cache-dir` or `HARDMONEY_CACHE_DIR`),
   written to a `.partial` file and renamed only on completion, so an
   interrupted download is never mistaken for a good one.
-- **The dump always lands in the `disclosure` schema**, whatever
-  `--schema` you pass, because the FEC's own DDL hard-codes it. It's
-  reference data shared by every namespace; what *is* per-namespace is
-  the friendly `independent_expenditures` view that hardmoney creates
-  over it (`db::ensure_views`, run after every `schema-init`, every
-  `serve` start, and every restore). The REST API's
-  `/independent-expenditures` route reads that view.
+- The dump always lands in the `disclosure` schema, whatever `--schema`
+  you pass, because the FEC's own DDL hard-codes it. It's reference data
+  shared by every namespace; what is per-namespace is the
+  `independent_expenditures` view that hardmoney creates over it
+  (`db::ensure_views`, run after every `schema-init`, every `serve`
+  start, and every restore). The REST API's `/independent-expenditures`
+  route reads that view.
 - Re-running a restore drops the table first, so it's a clean weekly
   refresh rather than a pile of "already exists" errors.
 - `pg_restore` itself exits non-zero for an expected, ignorable warning
   (the dump references a trigger function that exists only inside the
   FEC's own database), so hardmoney judges success by whether the target
-  table exists and has rows afterwards -- and exits 0 when it does. Any
+  table exists and has rows afterwards, and exits 0 when it does. Any
   messages `pg_restore` emitted are summarized on stderr
   (`pg_restore reported N non-fatal message(s); first: ...`).
 
 ## Ingesting a single filing directly, for precise Schedule E data
 
-The bulk `schedule_e` dump above is *aggregated* -- the FEC rolls up
+The bulk `schedule_e` dump above is aggregated: the FEC rolls up
 independent-expenditure filings into one big table on its own schedule.
 If you need today's just-filed independent expenditures before the next
 refresh, or you want to ingest one specific filing precisely (using the
@@ -331,10 +330,10 @@ ingested filing 2011832 (F24N): 2 Schedule E line(s), 0 skipped
 
 Three things are happening in that one line of output.
 
-**The filing id came from the filename.** The FEC's document store names
+The filing id came from the filename. The FEC's document store names
 downloads `<id>.fec`; this crate's fixtures are `<FORM>_<id>[_v<spec>].fec`.
-The id is the **last** run of four or more digits in the stem, so
-`F24N_2011832.fec` is 2011832 and `F3XA_27789_v3.fec` is 27789 -- the
+The id is the last run of four or more digits in the stem, so
+`F24N_2011832.fec` is 2011832 and `F3XA_27789_v3.fec` is 27789; the
 `24` in the form name and the `3` in the spec-version suffix are
 ignored. If the name has no such run, the command asks rather than
 guessing:
@@ -350,17 +349,17 @@ error: could not derive a filing id from '/tmp/notes.fec'; pass --filing-id
 `--filing-id N` overrides whatever the filename says. You can also pass
 a bare numeric id instead of a path, and the filing is downloaded live
 from `docquery.fec.gov` first (requires the `fetch` feature, on by
-default) -- the same mechanism as
-[Quick Start](./quick-start.md#fetching-a-filing-live-from-the-fec-optional):
+default), the same mechanism as
+[Quick start](./quick-start.md#fetching-a-filing-live-from-the-fec-optional):
 
 ```bash
 hardmoney bulk-load-filing --schema book_demo 2011831
 ```
 
-**Only genuine Schedule E lines were extracted.** The ingester uses
+Only Schedule E lines were extracted. The ingester uses
 `line.view::<ScheduleE>()` on the `Table::SchE` lines, so a filing with
 Schedule A and B lines but no independent expenditures stores zero
-Schedule E rows -- a Schedule A line can't be mistaken for an empty
+Schedule E rows. A Schedule A line can't be mistaken for an empty
 Schedule E record (see
 [Views check the table](./typed-views.md#views-check-the-table)):
 
@@ -375,12 +374,12 @@ ingested filing 767339 (F3A): 0 Schedule E line(s), 0 skipped
 That's an amended Form 3 with 641 body lines (576 Schedule A, 60
 Schedule B, 3 F3Z, 2 Schedule D) and, correctly, no Schedule E rows.
 
-**Parsing was lenient, and `0 skipped` says nothing was dropped.**
-`bulk-load-filing` uses `ParseOptions::LENIENT` by default -- an
+Parsing was lenient, and `0 skipped` says nothing was dropped.
+`bulk-load-filing` uses `ParseOptions::LENIENT` by default (an
 ingestion job shouldn't die because one line type in a 700,000-line
-filing is unknown -- and stores the skip count in `filings.skipped_lines`,
+filing is unknown) and stores the skip count in `filings.skipped_lines`,
 where `GET /filings/{id}` reports it. Using the junk file from
-[Strict vs. Lenient Parsing](./strict-vs-lenient.md):
+[Strict vs. lenient parsing](./strict-vs-lenient.md):
 
 ```bash
 $ cargo run --quiet --bin hardmoney -- bulk-load-filing --schema book_demo --filing-id 999 /tmp/with_junk.fec
@@ -420,8 +419,8 @@ $ psql "$DATABASE_URL" -c "SET search_path TO book_demo, public;" \
 (2 rows)
 ```
 
-`expenditure_amt` is a Postgres `NUMERIC` column, storing the exact same
-`Decimal` value the parser produced -- sqlx binds `rust_decimal::Decimal`
+`expenditure_amt` is a Postgres `NUMERIC` column, storing the same
+`Decimal` value the parser produced. sqlx binds `rust_decimal::Decimal`
 straight to the `NUMERIC` wire format, so there is no floating-point
 column and no precision lost between the parser and the database. This
 continues all the way to the REST API, covered after the next three
@@ -461,5 +460,6 @@ println!("{} Schedule E lines, {} skipped", ingest.schedule_e_lines, ingest.skip
 
 `bulk::load` returns a `LoadReport` (`rows_loaded`, `rows_replaced`,
 `dates_nulled`, `skipped_unchanged`, `load_id`); `ingest_filing_bytes`
-returns an `IngestReport` with the skipped lines themselves, not just a
-count. Both require the `bulk` feature and a Tokio runtime.
+returns an `IngestReport` that carries the skipped lines themselves, so
+you get each line's number and reason as well as the count. Both require
+the `bulk` feature and a Tokio runtime.

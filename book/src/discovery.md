@@ -1,18 +1,18 @@
-# Finding Filings: openFEC and the E-File Feed
+# Finding filings: openFEC and the e-file feed
 
 Everything else in this book starts from a `.fec` file you already have,
 or a filing id you already know. This chapter is about the step before
-that: **discovering** which filings exist -- for a committee, a cycle, a
-form type, or simply "since the last time I looked" -- and getting their
-raw bytes onto disk, where `parse`, `validate`, `reconcile`, `export`, and
+that: discovering which filings exist (for a committee, a cycle, a form
+type, or "since the last time I looked") and getting their raw bytes onto
+disk, where `parse`, `validate`, `reconcile`, `export`, and
 `bulk-load-filing` can work on them.
 
 There are two routes, and they answer different questions:
 
 | Route | Command | Source | What it knows | How fresh |
 |---|---|---|---|---|
-| **openFEC** | `hardmoney filings` | `api.open.fec.gov/v1/filings/` | The FEC's *processed* view: amendment chains, `most_recent`, cover-page totals, paper filings too. | Hours to days after receipt. |
-| **E-file feed** | `hardmoney efile watch` / `backfill` | `efilingapps.fec.gov` RSS and the daily zips at `fec.gov/files/bulk-downloads/electronic/` | Only what was e-filed, exactly as it arrived, including filings the FEC will later reject. | Minutes (feed); next day (zips). |
+| openFEC | `hardmoney filings` | `api.open.fec.gov/v1/filings/` | The FEC's processed view: amendment chains, `most_recent`, cover-page totals, paper filings too. | Hours to days after receipt. |
+| E-file feed | `hardmoney efile watch` / `backfill` | `efilingapps.fec.gov` RSS and the daily zips at `fec.gov/files/bulk-downloads/electronic/` | Only what was e-filed, exactly as it arrived, including filings the FEC will later reject. | Minutes (feed); next day (zips). |
 
 Both routes hand the filings they find to the same set of actions
 (`--fetch`/`--out`, `--validate`, `--reconcile`, `--ingest`), and both go
@@ -54,11 +54,11 @@ error: could not decode the JSON from https://api.open.fec.gov/v1/filings/?api_k
 Do not commit `fec_api_key.txt` to a repository; it lives in your home
 directory, not the project, for exactly that reason.
 
-The e-file feed and the daily zips need **no key**.
+The e-file feed and the daily zips need no key.
 
 ## Rate limits
 
-openFEC allows **1,000 requests per hour per key**. A `filings` query is
+openFEC allows 1,000 requests per hour per key. A `filings` query is
 one request per page of up to 100 records, so a typical committee is one
 or two requests; a cycle-wide `--form-type F24` query without `--limit` can
 be hundreds.
@@ -149,7 +149,7 @@ $ hardmoney filings --committee C00554709 --json --limit 1
 ### Paper filings have negative numbers
 
 openFEC's `/filings/` includes filings made on paper (`means_filed:
-"paper"`), and it numbers them **negatively**. A chain that began on paper
+"paper"`), and it numbers them negatively. A chain that began on paper
 carries the negative id; C00554709's Form 1 chain starts at `-6899830`.
 The table marks these, and there is nothing to download for them: a paper
 filing has an image, not a `.fec`. The action flags skip them with a note
@@ -220,7 +220,7 @@ $ psql hardmoney_fec_demo -c "select filing_id, form_type, amendment_version, mo
 
 A validation with errors, or a report that does not balance, is
 information, not a failure: the command exits 1 only when something could
-not be *done* (a download failed, the file would not parse, an ingest
+not be done (a download failed, the file would not parse, an ingest
 failed). With `--json`, each record gains an `actions` object holding the
 same results.
 
@@ -237,9 +237,9 @@ Every raw filing hardmoney downloads lands in
 
 (`$XDG_CACHE_HOME/hardmoney` if that variable is set; override the whole
 root with `HARDMONEY_CACHE_DIR` or `--cache-dir`. This is the same root
-`bulk-restore-dump` keeps its `dumps/` under.) Writes are atomic -- a
+`bulk-restore-dump` keeps its `dumps/` under.) Writes are atomic (a
 download interrupted by Ctrl-C never leaves a truncated file a later run
-would trust -- and a cached filing is never re-downloaded. Filings do not
+would trust), and a cached filing is never re-downloaded. Filings do not
 change once posted, so there is no expiry.
 
 ```text
@@ -259,13 +259,13 @@ running `watch` does not re-process a week of filings); `cache-clear
 ## `hardmoney efile watch`: following the feed
 
 The FEC's e-filing system publishes an RSS feed of every electronic
-filing received in the last seven days -- around a thousand to two
-thousand items -- within minutes of receipt, at
+filing received in the last seven days (around a thousand to two
+thousand items) within minutes of receipt, at
 `https://efilingapps.fec.gov/rss/generate?preDefinedFilingType=ALL`.
-Each item names the committee, the form type *as filed* (`F3XN`, `F3XA`,
+Each item names the committee, the form type as filed (`F3XN`, `F3XA`,
 `F24N`), the coverage period, and the raw-filing URL.
 
-`watch` polls that feed, remembers which ids it has handled in
+`watch` polls that feed, records which ids it has handled in
 `efile-seen.txt`, and processes only the new ones, oldest first (so an
 original is handled before its amendment when both arrive in one poll).
 The default is to poll every 300 seconds forever; `--once` polls a single
@@ -293,29 +293,29 @@ $ hardmoney efile watch --once --form-type F5 --validate
 
 The summary line goes to stderr; the filings to stdout. Things to know:
 
-* **Filters.** `--form-type F3X,F24` matches a base type and all its
+* Filters: `--form-type F3X,F24` matches a base type and all its
   amendment suffixes (`F3XN`, `F3XA`, `F3XT`); `--form-type F3XA` matches
   only amendments. `--committee C1,C2` restricts by filer. Filtered-out
   items are still recorded as seen, so changing the filter later does not
   replay a week of history.
-* **The first run sees everything.** With an empty seen list, every item
-  in the feed is new -- up to two thousand filings. If you only want what
-  arrives *from now on*, run `watch --mark-seen` once first.
-* **Actions** are the same as `filings`': `--out DIR`, `--validate`,
+* The first run sees everything. With an empty seen list, every item in
+  the feed is new, up to two thousand filings. If you only want what
+  arrives from now on, run `watch --mark-seen` once first.
+* Actions are the same as `filings`': `--out DIR`, `--validate`,
   `--reconcile`, `--ingest`. Plus `--exec PROGRAM`, which runs
   `PROGRAM <id> <path-to-cached-fec>` with `HARDMONEY_FILING_ID` and
-  `HARDMONEY_FILING_PATH` in its environment, after the other actions --
-  the hook for anything hardmoney does not do itself. A non-zero exit is
-  reported as a failure for that filing.
-* **`--json`** emits one object per new filing (JSON Lines), with the
-  feed's fields and an `actions` object:
+  `HARDMONEY_FILING_PATH` in its environment, after the other actions.
+  This is the hook for anything hardmoney does not do itself. A non-zero
+  exit is reported as a failure for that filing.
+* `--json` emits one object per new filing (JSON Lines), with the feed's
+  fields and an `actions` object:
 
 ```text
 $ hardmoney efile watch --once --json --form-type F5 --committee C90011156 --validate
 {"filing_id":2011649,"form_type":"F5N","committee_id":"C90011156","committee_name":"WORKING AMERICA","published":"2026-09-12T01:21:21Z","url":"https://docquery.fec.gov/dcdev/posted/2011649.fec","report_type":null,"coverage_start":"2026-07-10","coverage_end":"2026-09-10","actions":{"validation":{"form_type":"F5N","acceptable":true,"errors":0,"warnings":0}}}
 ```
 
-* **Failures do not stop a long-running watch.** A poll that fails (the
+* Failures do not stop a long-running watch. A poll that fails (the
   feed is down) is reported and retried after the interval; a filing that
   fails is reported and the rest continue. `--once` exits 1 if either
   happened, so a scheduler notices.
@@ -323,7 +323,7 @@ $ hardmoney efile watch --once --json --form-type F5 --committee C90011156 --val
 ## `hardmoney efile backfill`: the daily archives
 
 The feed covers seven days. For anything older, the FEC publishes one zip
-per day -- every e-filing received that day, as `<id>.fec` -- at
+per day (every e-filing received that day, as `<id>.fec`) at
 `https://www.fec.gov/files/bulk-downloads/electronic/YYYYMMDD.zip`, from
 2001-02-01 through yesterday. `backfill` walks a date range through them:
 
@@ -359,7 +359,7 @@ filings.
 The two routes look at the same filings from different sides of the
 FEC's processing pipeline, and it matters which one you ask.
 
-**openFEC's `/filings/` is processed metadata.** A filing appears there
+openFEC's `/filings/` is processed metadata. A filing appears there
 after the FEC has loaded it, which is hours for most e-filings and can be
 days around a deadline; paper filings appear after they are keyed. In
 exchange you get things only the FEC can tell you: `most_recent`, the
@@ -367,11 +367,11 @@ full `amendment_chain`, cover-page totals for every filing including
 paper ones, and the candidate a committee belongs to. Use it when the
 question is "what is the current state of this committee's reporting?"
 
-**The RSS feed, the daily zips, and openFEC's `/efile/filings/` are
-raw.** They show what the e-filing system received, within minutes, with
-no judgement attached: a filing the FEC will reject next week is there
+The RSS feed, the daily zips, and openFEC's `/efile/filings/` are raw.
+They show what the e-filing system received, within minutes, with no
+judgement attached: a filing the FEC will reject next week is there
 today; an amendment is there before anyone has decided it supersedes
-anything. There are no paper filings and no totals -- only the `.fec`
+anything. There are no paper filings and no totals, only the `.fec`
 itself. Use these when the question is "what just came in?" or "give me
 every e-filing from these dates", and let hardmoney's own parser,
 validator, reconciler, and amendment-chain resolver do the judging.

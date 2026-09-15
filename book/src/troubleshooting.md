@@ -7,7 +7,7 @@ $ hardmoney parse tests/fixtures/does_not_exist.fec
 error: No such file or directory (os error 2)
 ```
 
-This means exactly what it says -- the path given to `parse` doesn't
+This means exactly what it says: the path given to `parse` doesn't
 exist. Double-check the path is relative to your current working
 directory (or use an absolute path). If you're following along with this
 book's fixture examples, make sure you're running commands from the
@@ -20,10 +20,7 @@ repository root (`hardmoney/`), since the paths in this book (e.g.
 error: no format table for form type 'ZZZ' (spec version 8.5) at line 5
 ```
 
-(1.x worded this `couldn't find a line parser for form type ...`; it is
-the same `FecError::ParserMissing`.)
-
-A body line's form-type token (its first column) matched none of the
+This is `FecError::ParserMissing`. A body line's form-type token (its first column) matched none of the
 parser's dispatch patterns, and you're parsing strictly (the default), so
 the whole filing was refused. The line number is the physical line in
 the file. Your options:
@@ -33,13 +30,13 @@ the file. Your options:
   with the filing id. The dispatch list in `src/parser/form.rs` covers
   every token in the crate's real-filing fixtures, but the FEC adds record
   types over time.
-- If you'd rather keep the lines that *did* parse, use `--lenient` on the
+- If you'd rather keep the lines that did parse, use `--lenient` on the
   CLI or `Filing::parse_with(&content, &ParseOptions::LENIENT)` in code.
-  See [Strict vs. Lenient Parsing](./strict-vs-lenient.md).
+  See [Strict vs. lenient parsing](./strict-vs-lenient.md).
 
 The sibling message `no column layout for table X at spec version Y at
 line N` (`FecError::NoMatchingVersionBucket`) means the table is known
-but has no layout for that spec version -- usually a filing newer than
+but has no layout for that spec version, usually a filing newer than
 the bundled format tables. Same two options; `hardmoney spec tables`
 lists the versions each table has a layout for.
 
@@ -56,12 +53,12 @@ and retry.
 
 ### `schema-init` itself fails with `column "..." does not exist`
 
-The schema is *migrated*, not re-created: `schema-init` applies the
+The schema is migrated, not re-created: `schema-init` applies the
 numbered files in `migrations/` in order and records each one in the
 namespace's `_sqlx_migrations` table, and it never rewrites a table it
 finds already there. If the namespace already contains a table with one
-of hardmoney's names but a different layout -- created by hand, by
-another tool, or by a `pg_restore` of something else -- the first
+of hardmoney's names but a different layout (created by hand, by
+another tool, or by a `pg_restore` of something else), the first
 statement that touches the missing column fails, typically an index on a
 `*_date` column:
 
@@ -71,7 +68,7 @@ error: ... column "transaction_date" does not exist
 
 Nothing is dropped or altered on your behalf. Point `schema-init` at a
 fresh namespace (`--schema <new name>`), load into that, and drop the
-old one with `schema-drop` when you no longer need it. See
+old one with `schema-drop` when you are done with it. See
 [Namespaces](./namespaces.md).
 
 ## "error returned from database: database \"...\" does not exist"
@@ -84,8 +81,8 @@ error: error returned from database: database "nonexistent_db_xyz" does not exis
 `--database-url` (or `$DATABASE_URL`) points at a database name that
 doesn't exist yet on your Postgres server. (The `at line 1016` is
 Postgres's own error position and isn't meaningful here; the CLI also
-prints each error's cause chain on `caused by:` lines.) Postgres doesn't auto-create
-databases -- create it first:
+prints each error's cause chain on `caused by:` lines.) Postgres doesn't
+auto-create databases. Create it first:
 
 ```bash
 createdb -h 127.0.0.1 -U postgres fec_dev
@@ -98,7 +95,7 @@ CREATE DATABASE fec_dev;
 ```
 
 Then run `schema-init` before loading anything, as shown in
-[Loading Bulk Data into Postgres](./bulk-etl.md#step-1-apply-the-schema).
+[Loading bulk data into Postgres](./bulk-etl.md#step-1-apply-the-schema).
 
 ## "role \"anonymous\" does not exist"
 
@@ -126,8 +123,8 @@ trying to unzip it.
 `bulk-load`'s default `--mode replace` deletes the cycle's existing rows
 before loading the new file, and it refuses to delete more than a million
 of them without `--yes`. If you meant to refresh the table, add `--yes`.
-If you didn't -- you typed the wrong source name, or the wrong namespace
--- nothing has happened yet; the check runs before the download. See
+If you didn't (you typed the wrong source name, or the wrong namespace),
+nothing has happened yet; the check runs before the download. See
 [Reloading](./reloading.md#the---yes-guard).
 
 ## "duplicate key value violates unique constraint" from `bulk-load`
@@ -139,10 +136,10 @@ namespace if you want both copies. See [Reloading](./reloading.md#--mode-append)
 
 ## `bulk-load --if-changed` says "unchanged" but I know the file changed
 
-`--if-changed` compares against the most recent **full** load of that
-source and cycle in the **same namespace**. A `--limit` sample doesn't
+`--if-changed` compares against the most recent full load of that
+source and cycle in the same namespace. A `--limit` sample doesn't
 count as a baseline, and a load into a different `--schema` doesn't
-either. If you need to force it, just drop `--if-changed`.
+either. To force a reload, drop `--if-changed`.
 
 ## "could not derive a filing id from '...'; pass --filing-id"
 
@@ -159,7 +156,7 @@ references a trigger function that only exists inside the FEC's own
 database, and `pg_restore` reports it and moves on. hardmoney judges
 success by whether the target table exists and has rows, and the
 command exits 0 when it does. If it exits 1 with `disclosure.X does not
-exist after restore`, read the `pg_restore` output it prints -- the usual
+exist after restore`, read the `pg_restore` output it prints. The usual
 culprits are `pg_restore` not being on `PATH`, or a permissions problem
 creating the `disclosure` schema.
 
@@ -172,11 +169,11 @@ need the secret. See [Hardening the API](./api-hardening.md#the-api-key).
 
 ## The REST API rejects a filter value with a 400 error
 
-This is intentional, not a bug. Numeric filters like `min_amount` are
-typed as `Decimal`, date filters like `min_date` as ISO dates
-(`YYYY-MM-DD`, not the FEC's `MM/DD/YYYY`), and `cycle` as a validated
-even year -- so a bad value is rejected up front with a clear message
-rather than silently matching nothing or crashing later. See
+This is intentional. Numeric filters like `min_amount` are typed as
+`Decimal`, date filters like `min_date` as ISO dates (`YYYY-MM-DD`, not
+the FEC's `MM/DD/YYYY`), and `cycle` as a validated even year, so a bad
+value is rejected up front with a message that says what was expected,
+instead of matching nothing or failing later. See
 [Hardening the API](./api-hardening.md#errors-that-tell-the-client-the-right-amount).
 
 ## `/independent-expenditures` returns 503
@@ -193,16 +190,16 @@ in the API works without it.
 
 ## `/schedule-a` or `/disbursements` returns `[]`
 
-Check `GET /schema` (or `hardmoney schema-status`) -- it lists what's
-actually loaded in the namespace the server is serving. Two common
+Check `GET /schema` (or `hardmoney schema-status`); it lists what is
+loaded in the namespace the server is serving. Two common
 causes: the server is serving a different `--schema` than you loaded
 into, or the table only holds a `--limit` sample that doesn't include
 what you're filtering for.
 
 ## A bulk-data download is very slow or very large
 
-Some bulk sources -- `schedule_a` in particular, at over 2 GB per cycle --
-are big. If you just want to explore the data's shape, use `--limit` to
+Some bulk sources are big; `schedule_a` in particular is over 2 GB per
+cycle. If you just want to explore the data's shape, use `--limit` to
 cap how many rows are read; the download stops as soon as the loader has
 them, so `--limit 100` across all ten sources takes seconds:
 
@@ -212,9 +209,9 @@ hardmoney bulk-load-all --schema scratch --cycle 2026 --limit 100
 
 For the two dump-based sources that are tens of gigabytes
 (`schedule_a_full`, `schedule_b_full` via `bulk-restore-dump`), the tool
-requires `--allow-large` precisely so you don't start a huge download by
-accident. Make sure you actually have the disk space (and time) before
-passing it.
+requires `--allow-large` so you don't start a huge download by
+accident. Make sure you have the disk space (and time) before passing
+it.
 
 ## Why does `bulk-load-filing` only extract Schedule E lines?
 
@@ -222,7 +219,7 @@ It's a deliberate scope: `bulk-load-filing` is the precise,
 straight-from-the-filing counterpart to the FEC's aggregated Schedule E
 data, and it stores the whole header and summary too. The extraction uses
 `line.view::<ScheduleE>()` on `Table::SchE` lines only, so a filing with
-no independent expenditures stores zero Schedule E rows -- see
+no independent expenditures stores zero Schedule E rows. See
 [Views check the table](./typed-views.md#views-check-the-table) for why
 the table check matters. If you want every schedule of a filing in
 Postgres, the parser output (`filing.lines`) is `serde`-serializable;
@@ -230,12 +227,12 @@ storing it is a few lines of `sqlx`.
 
 ## My `match` on `Table` / `EntityType` / `FecError` won't compile without a `_` arm
 
-All of hardmoney's public enums -- `Table`, `EntityType`,
+All of hardmoney's public enums (`Table`, `EntityType`,
 `SupportOppose`, `FecError`, `TypedViewError`, `SkipReason`,
-`OnUnparseableLine`, `LoadMode` -- are `#[non_exhaustive]`. The FEC adds
+`OnUnparseableLine`, `LoadMode`) are `#[non_exhaustive]`. The FEC adds
 record types and codes over time, and the attribute lets a minor release
 add a variant without breaking downstream code. The cost is that a
-`match` in *your* crate needs a wildcard arm even if you list every
+`match` in your crate needs a wildcard arm even if you list every
 variant that exists today:
 
 ```rust
@@ -256,36 +253,33 @@ The same attribute is on the public structs (`Filing`, `ParsedLine`,
 views), which means you construct them through the provided constants,
 constructors, and builders (`ParseOptions::LENIENT`,
 `LoadOptions::new(cycle).limit(...)`) rather than struct literals, and
-you can't destructure them exhaustively -- read the fields you need by
+you can't destructure them exhaustively. Read the fields you need by
 name instead.
 
 ## Why `Decimal` instead of `f64`?
 
 Covered in depth in
-[Tables and Typed Views](./typed-views.md#exact-money-with-rust_decimaldecimal).
+[Tables and typed views](./typed-views.md#exact-money-with-rust_decimaldecimal).
 The short version: binary floating point cannot represent most decimal
 fractions exactly, so two real FEC amounts like `10170.37 + 237.93` come
 out as `10408.300000000001` in `f64` and as `10408.30` in `Decimal` (see
 [the Rust tutorial](./tutorial-rust-library.md#why-not-f64) for that
-exact run). For any *one* value the error is invisible after rounding;
+exact run). For any one value the error is invisible after rounding;
 across millions of rows it is not something you want to have to reason
-about. Using `rust_decimal::Decimal` throughout -- parser, database
-`NUMERIC` columns, JSON -- makes exact decimal arithmetic a property of
+about. Using `rust_decimal::Decimal` throughout (parser, database
+`NUMERIC` columns, JSON) makes exact decimal arithmetic a property of
 the types themselves, checked by the compiler, rather than something
-that happens to hold for the values seen so far. That is the right
-foundation for a crate whose whole job is handling other people's money
-data correctly.
+that happens to hold for the values seen so far.
 
 ## Where do I report a bug or ask a question?
 
 Open an issue on the
 [GitHub repository](https://github.com/cgorski/hardmoney/issues). If it's
 a parsing question about a specific real filing, include the filing ID
-(or the file itself, if you're able to share it) -- the maintainers have
-found that real-world filings surface edge cases synthetic test data
-never would, which is exactly how the
+(or the file itself, if you're able to share it). Real-world filings
+surface edge cases synthetic test data never would; the
 [field-name collision fix](./parsing-explained.md#a-real-bug-this-design-caught-the-field-name-collision-fix)
-was found in the first place. [What hardmoney Does With Messy FEC Data](./tutorial-fec-data-quality.md)
+was found that way. [What hardmoney does with messy FEC data](./tutorial-fec-data-quality.md)
 catalogues the known quirks and how each one is handled.
 
 ## Where does the underlying data come from?

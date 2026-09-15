@@ -1,12 +1,12 @@
-# Namespaces: Many Sessions, One Database
+# Namespaces: many sessions, one database
 
-Every hardmoney table name is unqualified -- `candidates`, not
-`public.candidates` -- so a table lives in whatever Postgres schema is
+Every hardmoney table name is unqualified (`candidates`, not
+`public.candidates`), so a table lives in whatever Postgres schema is
 first on the connection's `search_path`. That one fact is the whole
-mechanism behind **namespaces**: pass `--schema <name>` (or set
+mechanism behind namespaces: pass `--schema <name>` (or set
 `HARDMONEY_SCHEMA`) on any database command, and every table that
-command reads or writes lives inside that Postgres schema. Nothing else
-changes -- not the SQL, not the migrations, not the API.
+command reads or writes lives inside that Postgres schema. The SQL, the
+migrations, and the API are unchanged.
 
 The result is that one database can hold many fully independent sessions
 of FEC data:
@@ -45,15 +45,15 @@ $ cargo run --quiet --bin hardmoney -- schema-init --schema book_demo
 namespace 'book_demo': schema at version 2 (2 migration(s) applied now)
 ```
 
-Each namespace has its **own** `_sqlx_migrations` table, so different
-namespaces can sit at different schema versions -- an old snapshot stays
+Each namespace has its own `_sqlx_migrations` table, so different
+namespaces can sit at different schema versions; an old snapshot stays
 at the version it was loaded with until you `schema-init` it. (The
 status check is careful to look at the namespace's own migrations table
 rather than falling through `search_path` to `public`'s; otherwise a
 brand-new namespace could report `public`'s state and let a load `COPY`
 into the wrong schema.)
 
-`schema-list` shows every namespace in the database -- defined as every
+`schema-list` shows every namespace in the database, defined as every
 schema that contains a `_sqlx_migrations` table:
 
 ```bash
@@ -71,7 +71,7 @@ snap_b
 
 The book's database has three filings ingested into `public` and, after
 [the previous chapter](./bulk-etl.md), a different set in `book_demo`.
-Serving each namespace shows they don't see each other -- here's a
+Serving each namespace shows they don't see each other. Here is a
 filing that exists in `public` requested from a server running against
 `book_demo`:
 
@@ -115,23 +115,23 @@ response is shown in [The REST API](./rest-api.md#what-is-loaded-here-the-schema
 `independent_expenditures_available: true` in that response points at
 the exception. The FEC's own `pg_dump` archives, restored by
 `bulk-restore-dump`, hard-code the `disclosure` schema in their DDL, so
-they always land in `disclosure` -- shared across every namespace -- no
+they always land in `disclosure`, shared across every namespace, no
 matter which `--schema` you pass. That's the right behaviour for what it
 is: a ~550,000-row reference table you want restored once, not once per
 session.
 
-What *is* per-namespace is the `independent_expenditures` view over it.
+What is per-namespace is the `independent_expenditures` view over it.
 `db::ensure_views` creates that view inside the current namespace after
 every `schema-init`, every `serve` start, and every restore, if the
-`disclosure` table exists; if it doesn't, the view is simply absent and
-the API's `/independent-expenditures` route returns a 503 saying so.
+`disclosure` table exists; if it doesn't, the view is absent and the
+API's `/independent-expenditures` route returns a 503 saying so.
 That's also why `disclosure` is a reserved namespace name.
 
 ## Naming rules
 
 A namespace name must match `[a-z_][a-z0-9_]*`, be at most 63 bytes
 (Postgres's identifier limit), and not be `pg_*`, `information_schema`,
-or `disclosure`. Lowercase letters, digits, and underscores only -- no
+or `disclosure`. Lowercase letters, digits, and underscores only: no
 hyphens, no capitals, no spaces. That conservative grammar is what makes
 it safe to interpolate the name into `CREATE SCHEMA` and `search_path`
 without quoting. Bad names are rejected before anything connects:
@@ -160,8 +160,8 @@ For more information, try '--help'.
 
 ## Dropping one
 
-When a session is over, drop the whole namespace -- every table, every
-row, its migrations record, its view -- in one command. It refuses to run
+When a session is over, drop the whole namespace (every table, every
+row, its migrations record, its view) in one command. It refuses to run
 without `--yes`:
 
 ```bash

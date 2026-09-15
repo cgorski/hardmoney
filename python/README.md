@@ -3,8 +3,8 @@
 FEC electronic filings (`.fec`) in Python: parse any filing from spec 3.x
 (2001) through 8.5, read fields by their canonical names, edit and write
 the filing back, validate it against the FEC's acceptance rules, and
-reconcile a cover page against its schedules -- with every dollar amount
-an exact `decimal.Decimal`, never a `float`.
+reconcile a cover page against its schedules. Every dollar amount is an
+exact `decimal.Decimal`, never a `float`.
 
 This package is a thin [PyO3](https://pyo3.rs) wrapper over the Rust crate
 [`hardmoney`](https://crates.io/crates/hardmoney); the parser, writer,
@@ -76,7 +76,7 @@ except hardmoney.FecError as e:
 `hardmoney.parse(data, lenient=True)` records such lines in
 `filing.skipped` instead of raising.
 
-## What is in the box
+## What the package contains
 
 | | |
 |---|---|
@@ -95,8 +95,8 @@ Full documentation, with captured output, is in the
 Python is where FEC data users are, and a wheel is the only realistic way
 hardmoney's validator and reconciler reach the FEC's own Django codebase
 (FECfile+) and the analysts, journalists, and researchers who work in
-notebooks. The wheel is parser-only -- no database, no HTTP server -- so
-it stays small and has no runtime dependencies.
+notebooks. The wheel is parser-only (no database, no HTTP server), so it
+stays small and has no runtime dependencies.
 
 ## License
 

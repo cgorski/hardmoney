@@ -1,10 +1,10 @@
-# CLI Reference
+# CLI reference
 
 This is the full `--help` output for `hardmoney` 2.0.0 and every
 subcommand, captured directly from the built binary. Run
 `hardmoney <subcommand> --help` yourself at any time to see this same
-text -- it's the authoritative reference, since it's generated from the
-same argument definitions the program actually runs with. (`bulk-load`
+text; it is generated from the same argument definitions the program
+runs with. (`bulk-load`
 and `bulk-load-all` have long-form help; the others print the same text
 for `-h` and `--help`.)
 
@@ -88,8 +88,8 @@ Options:
 The JSON output has the keys `form_type`, `base_form_type`, `version`,
 `is_amendment`, `amends_filing`, `line_count`, `lines_by_table`,
 `skipped_count`, `skipped`, `header`, `summary`, and (with `--lines`)
-`lines`. See [Quick Start](./quick-start.md) for real examples and
-[Strict vs. Lenient Parsing](./strict-vs-lenient.md) for `--lenient`.
+`lines`. See [Quick start](./quick-start.md) for real examples and
+[Strict vs. lenient parsing](./strict-vs-lenient.md) for `--lenient`.
 Exits 1 on a parse error.
 
 ## `write`
@@ -131,7 +131,7 @@ OK: tests/fixtures/F3XA_2011827.fec round-trips (6 body lines, 1867 bytes in, 18
 A difference prints `MISMATCH: ...` lines on stderr (`header differs`,
 `cover line differs`, `line count differs: A vs B`, `line N differs`)
 and exits 1. Exits 1 on a parse error. See
-[Writing `.fec` Files](./writing-fec.md).
+[Writing `.fec` files](./writing-fec.md).
 
 ## `export`
 
@@ -154,8 +154,8 @@ Options:
 ```
 
 (`--help` additionally describes each `--format` value.) Streams the
-filing through `FilingReader` and writes one table per record type --
-`F3X` for the cover line, `SchA`, `SchB`, `TEXT`, ... -- named as
+filing through `FilingReader` and writes one table per record type
+(`F3X` for the cover line, `SchA`, `SchB`, `TEXT`, ...), named as
 `hardmoney spec tables` lists them. Every table has the columns
 `filing_id` (with `--include-filing-id`), `line_no`, then the layout's
 fields in FEC column order starting with `form_type`. `csv`, `jsonl`,
@@ -185,7 +185,7 @@ line(s) skipped (--lenient)` goes to stderr. `--only` takes table names
 (case-insensitive) or upper-case form-type tokens; anything else is a
 usage error (exit 2) naming the token. Exits 1 on a parse error, an
 unwritable output, or `--include-filing-id` on a file name with no
-4+-digit run. See [Exporting a Filing](./exporting.md).
+4+-digit run. See [Exporting a filing](./exporting.md).
 
 ## `reconcile`
 
@@ -210,7 +210,7 @@ Options:
 Recomputes every cover-page line of a Form 3X, 3, or 3P from the
 schedules (memo entries excluded) and from the other cover lines'
 reported values, with exact `Decimal` arithmetic. Prints one line per
-disagreeing check -- or every check with `--all` -- in the form
+disagreeing check (or every check with `--all`) in the form
 `STATUS col C line L reported R expected E delta D  RULE`, then a
 verdict:
 
@@ -232,7 +232,7 @@ delta, relation, lines_summed, reported_unparseable}]}` with amounts as
 strings. Exit 0 when every (selected) line agrees within the
 tolerance, 1 when any disagrees, on a parse error, or on a form with no
 rules (`no reconciliation rules for form F24; supported: F3X, F3, F3P`).
-See [Reconciling a Filing](./reconciling.md).
+See [Reconciling a filing](./reconciling.md).
 
 ## `validate`
 
@@ -283,9 +283,9 @@ all (bad header, no cover line) is also exit 1, reported on stderr.
 errors, warnings, findings_by_rule, findings: [{severity, rule,
 line_no, form_type, field, message}]}`. The full rule table, the
 deliberate deviations from the FEC's validator, and the library API are
-in [Validating a Filing](./validating.md); the `FieldSpec` data the
+in [Validating a filing](./validating.md); the `FieldSpec` data the
 per-field rules read is described in
-[The Schema](./library-schema.md#fieldspec-what-the-fec-says-about-a-field).
+[The schema](./library-schema.md#fieldspec-what-the-fec-says-about-a-field).
 
 ## `schema-init`
 
@@ -494,7 +494,7 @@ Options:
 
 The `--cache-dir` default shown is `$XDG_CACHE_HOME/hardmoney/dumps` if
 `XDG_CACHE_HOME` is set, else `~/.cache/hardmoney/dumps`, else the
-system temp directory -- it will read differently on your machine. Needs
+system temp directory; it will read differently on your machine. Needs
 `pg_restore` on `PATH`. The dump always restores into the shared
 `disclosure` schema; `--schema` controls where the
 `independent_expenditures` view is refreshed. See
@@ -566,7 +566,7 @@ Paper filings have negative file numbers and are marked `(paper)`; the
 action flags skip them. The `--cache-dir` default shown is
 `$XDG_CACHE_HOME/hardmoney` if that variable is set, else
 `~/.cache/hardmoney`. See
-[Finding Filings](./discovery.md).
+[Finding filings](./discovery.md).
 
 ## `efile`
 
@@ -587,7 +587,7 @@ Options:
   -h, --help  Print help
 ```
 
-None of these needs an API key. See [Finding Filings](./discovery.md).
+None of these needs an API key. See [Finding filings](./discovery.md).
 
 ### `efile watch`
 
@@ -743,11 +743,11 @@ Options:
   -h, --help                         Print help
 ```
 
-Every `query` subcommand builds the *same* request the REST API serves
+Every `query` subcommand builds the same request the REST API serves
 and runs it one of two ways. By default it constructs the API's router
 in-process against `--database-url`/`--schema` and dispatches the
-request to it directly -- no server needs to be running, and the results
-are the API's results because it *is* the API. With `--api-url` the
+request to it directly. No server needs to be running, and the results
+are the API's results because it is the API. With `--api-url` the
 request is sent over HTTP to a running `hardmoney serve` instead (with
 `--api-key` if that server requires one), for when the database isn't
 reachable from your machine but the API is. Output is a fixed-width
@@ -790,22 +790,22 @@ Options:
 | `query ...` | Route | Flag -> parameter |
 |---|---|---|
 | `candidates` | `GET /candidates` | `-q/--name` -> `q`, `--cycle`, `--state`, `--office` |
-| `candidate <CAND_ID>` | `GET /candidates/{cand_id}` | -- |
+| `candidate <CAND_ID>` | `GET /candidates/{cand_id}` | none |
 | `committees` | `GET /committees` | `-q/--name` -> `q`, `--cycle`, `--type` -> `cmte_tp` |
-| `committee <CMTE_ID>` | `GET /committees/{cmte_id}` | -- |
+| `committee <CMTE_ID>` | `GET /committees/{cmte_id}` | none |
 | `contributions` | `GET /schedule-a` | `--committee` -> `cmte_id`, `--cycle`, `-q/--name` -> `name`, `--employer`, `--occupation`, `--state`, `--zip` -> `zip_code`, `--min-amount`, `--max-amount`, `--since` -> `min_date`, `--until` -> `max_date` |
 | `disbursements` | `GET /disbursements` | `--committee` -> `cmte_id`, `--cycle`, `-q/--name` -> `name`, `--city`, `--state`, `--purpose`, `--min-amount`, `--max-amount`, `--since`, `--until` |
 | `ies` | `GET /independent-expenditures` | `--candidate` -> `candidate_id`, `--committee` -> `cmte_id`, `--support-oppose` -> `support_oppose_code` |
-| `filing <FILING_ID>` | `GET /filings/{filing_id}` | -- |
-| `filing-ies <FILING_ID>` | `GET /filings/{filing_id}/schedule-e` | -- |
-| `schema` | `GET /schema` | -- (always prints JSON) |
+| `filing <FILING_ID>` | `GET /filings/{filing_id}` | none |
+| `filing-ies <FILING_ID>` | `GET /filings/{filing_id}/schedule-e` | none |
+| `schema` | `GET /schema` | none (always prints JSON) |
 
 `--limit` is validated before anything runs: a value outside 1-500 is
 a usage error (exit 2), the same bounds the API enforces with a 400.
 When a page comes back full, a note on stderr gives the `--offset` for
 the next one. A non-2xx response from the API is exit 1 with the API's
 error message. Every `curl` in
-[Who Is Funding a Candidate?](./tutorial-journalist.md) is shown next to
+[Who is funding a candidate?](./tutorial-journalist.md) is shown next to
 its `query` equivalent.
 
 ## `spec`
@@ -829,7 +829,7 @@ Options:
 
 The FEC publishes its format only as an Excel workbook plus per-version
 column tables; hardmoney compiles both into the binary (see
-[The Schema](./library-schema.md)), and `spec` is that data on the
+[The schema](./library-schema.md)), and `spec` is that data on the
 command line. It needs no database and no filing. Table names are the
 ones `Table` uses (`SchA`, `F3X`, `TEXT`, ...), case-insensitive; an
 unknown name is a usage error listing every valid one, and if what you
@@ -865,8 +865,8 @@ TEXT    4        7       6          3.0     8.5     0
 
 (Trimmed.) `buckets` is the number of distinct column layouts, `fields`
 the canonical fields known across all versions, `spec_rows` how many
-rows the FEC's 8.5 workbook has for the table (0 for forms the current
-spec no longer documents), `oldest`/`newest` the electronic versions
+rows the FEC's 8.5 workbook has for the table (0 for forms absent from
+the current spec), `oldest`/`newest` the electronic versions
 with a layout, and `paper` the number of `P`-prefixed paper-conversion
 versions. `--json` emits the same as an array of objects with those
 keys (`version_buckets`, `fields`, `spec_rows`, `oldest_version`,
@@ -904,7 +904,7 @@ col  field                          kind           len  required     description
 ...
 ```
 
-(Trimmed.) Columns are **1-based** here, as in the FEC's workbook. The
+(Trimmed.) Columns are 1-based here, as in the FEC's workbook. The
 `required` column is `error`, `warning`, `conditional`, or blank for
 optional; `kind` is `alpha`, `alpha_numeric`, `numeric`, or `amount`.
 For a version other than 8.5, columns come from that version's layout
@@ -967,8 +967,8 @@ in one JSON document.
 ```
 
 (Real values; lists trimmed with `...`. The whole document is about
-900 KB.) It uses **0-based** columns throughout, matching the Rust
-`FieldDef::column` and `FieldSpec::column` -- it says so in
+900 KB.) It uses 0-based columns throughout, matching the Rust
+`FieldDef::column` and `FieldSpec::column`; it says so in
 `column_base`. It is the complete machine-readable version map for the
 format, suitable for generating bindings in another language or checking
 a vendor's own tables against.

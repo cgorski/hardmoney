@@ -1,16 +1,16 @@
-# What hardmoney Does With Messy FEC Data
+# What hardmoney does with messy FEC data
 
-**Who this is for:** an FEC data engineer or RAD analyst, a downstream
-data team, or anyone who has ever discovered a government dataset's
-undocumented quirk the hard way -- in production, at 2 a.m.
+Who this is for: an FEC data engineer or RAD analyst, a downstream data
+team, or anyone who has ever discovered a government dataset's
+undocumented quirk the hard way, in production, at 2 a.m.
 
-**What you'll have at the end:** a catalogue of nine specific things the
+What you'll have at the end: a catalogue of nine specific things the
 FEC's electronic filings and bulk files do that a naive parser or loader
-gets wrong, with -- for each one -- what the FEC actually ships, what
-hardmoney does about it, and a command you can run to see it yourself.
-None of this is opinion about the FEC's data. Every item is a documented,
-reproducible behaviour of real files, and every hardmoney behaviour
-described is pinned by a test in the repository.
+gets wrong, with, for each one, what the FEC ships, what hardmoney does
+about it, and a command you can run to see it yourself. None of this is
+opinion about the FEC's data. Every item is a documented, reproducible
+behaviour of real files, and every hardmoney behaviour described is
+pinned by a test in the repository.
 
 Some demonstrations use tiny synthetic files built from real fixtures,
 because the real-world triggers (a filer's stray byte, a truncated
@@ -25,12 +25,12 @@ hardmoney schema-init --schema tut_dq
 ## 1. Two columns with the same name (six format tables)
 
 **What the FEC ships.** The electronic filing spec defines each form's
-fields by *position*. Human-readable field names are added by the
+fields by position. Human-readable field names are added by the
 community-maintained column-position tables (`fech-sources`, descended
 from the NYT's Fech) that hardmoney and most other open-source parsers
-build on. Six of those tables -- F2, F3P, F3X, F4, SchC1, SchL --
-assigned the same name to two different positions within one
-spec-version bucket. On Form 3X, for example, line 16 "Refunds of
+build on. Six of those tables (F2, F3P, F3X, F4, SchC1, SchL) assigned
+the same name to two different positions within one spec-version
+bucket. On Form 3X, for example, line 16 "Refunds of
 Federal Contributions" (a receipt) and line 34 "Total Contribution
 Refunds" (a disbursement) both mapped to `col_a_total_contributions_refunds`.
 
@@ -57,19 +57,19 @@ hardmoney parse tests/fixtures/F3XN_2011834.fec | grep -E 'refunds_of_federal_co
 ```
 
 Background in
-[Parsing a Filing, Explained](./parsing-explained.md#a-real-bug-this-design-caught-the-field-name-collision-fix).
+[Parsing a filing, explained](./parsing-explained.md#a-real-bug-this-design-caught-the-field-name-collision-fix).
 
 ## 2. `oppexp` has one more column than its own header file
 
 **What the FEC ships.** The data dictionary for the operating-expenditures
 bulk file (`oppexp_header_file.csv`) lists 25 columns. Every row of the
-actual `oppexp26.zip` has 26 pipe-delimited fields -- a trailing empty
+actual `oppexp26.zip` has 26 pipe-delimited fields, a trailing empty
 one. This is publicly tracked as
 [fecgov/FEC#11052](https://github.com/fecgov/FEC/issues/11052).
 
 **What hardmoney does.** The `disbursements` source is declared with
 `allow_extra_trailing_fields: true`, so the extra field is dropped and
-the row loads. Every *other* source is declared strict, so a row with
+the row loads. Every other source is declared strict, so a row with
 too many or too few fields fails the load with the line number rather
 than shifting every column one place to the right.
 
@@ -118,8 +118,8 @@ Exit status 1, nothing loaded.
 **What hardmoney does.** The raw text is kept verbatim in the `*_dt`
 column. A parsed `DATE` twin (`*_date`) is added, accepting both formats.
 A blank raw value becomes `NULL` quietly; a non-blank value that isn't a
-calendar date becomes `NULL` and is *counted*, in the load's output, in
-`LoadReport::dates_nulled`, and in the `loads` table -- so a file with a
+calendar date becomes `NULL` and is counted, in the load's output, in
+`LoadReport::dates_nulled`, and in the `loads` table, so a file with a
 systematic date problem is visible, not a silently empty column. No date
 is ever invented.
 
@@ -173,7 +173,7 @@ schedule_a: loaded 4 rows for cycle 2026 (replace, 2 unparseable date(s) set NUL
 (1 row)
 ```
 
-Four rows, three `NULL`s, **two** counted: the blank is normal and isn't,
+Four rows, three `NULL`s, two counted: the blank is normal and isn't,
 the all-zeros and the 30th of February are. The raw column still shows
 exactly what was in the file. [Dates](./dates.md) has the full treatment.
 
@@ -182,7 +182,7 @@ exactly what was in the file. [Dates](./dates.md) has the full treatment.
 **What the FEC ships.** The FEC's description of the individual
 contributions file documents `TRANSACTION_AMT` as `NUMBER(14,2)` with the
 example `1000.00`. The file itself ships whole dollars: in a 200,000-row
-sample of `indiv26.zip` loaded for the journalist tutorial, **every row**
+sample of `indiv26.zip` loaded for the journalist tutorial, every row
 was an integer with no decimal point (`3500`, `104`), and a 1,000-row
 sample of `pas2` was the same. `oppexp`, by contrast, carries cents on
 most rows (`138.6`, `1562.98`, `-50`). And the FEC's own `pg_dump` of
@@ -233,8 +233,8 @@ FROM committee_to_candidate_transactions;
 ## 5. Windows-1252 bytes in a file that's supposed to be text
 
 **What the FEC ships.** Filings are produced by many vendors' software.
-Free-text fields -- a payee name with an accent, a memo pasted from a
-word processor -- occasionally contain single bytes that are valid
+Free-text fields (a payee name with an accent, a memo pasted from a
+word processor) occasionally contain single bytes that are valid
 Windows-1252 but invalid UTF-8. The bulk files inherit the same bytes.
 
 **What hardmoney does.** `Filing::parse_bytes` decodes as UTF-8 and, if
@@ -268,12 +268,12 @@ filings carry a free-text block between `[BEGINTEXT]` and `[ENDTEXT]`
 markers. A truncated upload, or filing software that forgets the closing
 marker, leaves the block open to end-of-file.
 
-**What hardmoney does.** That is a distinct, hard error --
-`FecError::UnterminatedTextBlock { line_no }` -- in *both* strict and
+**What hardmoney does.** That is a distinct, hard error,
+`FecError::UnterminatedTextBlock { line_no }`, in both strict and
 lenient mode, because it isn't a problem with one body line: the parser
 can't know where the text ends and the records resume, so nothing after
 that point can be trusted. Lenient mode only relaxes body-line problems
-([Strict vs. Lenient](./strict-vs-lenient.md#what-lenient-skips-and-what-still-fails)).
+([Strict vs. lenient](./strict-vs-lenient.md#what-lenient-skips-and-what-still-fails)).
 
 **See it yourself.** Cut a real Form 99 off before its `[ENDTEXT]`:
 
@@ -319,15 +319,15 @@ hardmoney parse tests/fixtures/F2A_2011896.fec | grep -A2 lines_by_table
 
 **What the FEC ships.** Schedule I (Levin-fund account summaries) was
 part of the electronic format from spec 3.x through 8.4 and was dropped
-in 8.5. A parser has to know it for old filings and *not* pretend to
-know it for new ones.
+in 8.5. A parser has to know it for old filings and not pretend to know
+it for new ones.
 
 **What hardmoney does.** The `SI` token dispatches to `Table::SchI`,
 whose column table has version buckets for `6`-`8.4` and `3`/`5` only.
 An `SI` line in an 8.5 filing therefore hits a table with no layout for
 that version: `FecError::NoMatchingVersionBucket` under strict parsing,
 or a `SkipReason::NoLayoutForVersion` skip under lenient. That is a
-different error from "unknown form type", on purpose -- it tells you the
+different error from "unknown form type", on purpose: it tells you the
 record type is real but shouldn't appear at this spec version.
 
 **See it yourself.** Append an `SI` line to a real 8.5 filing and to a
@@ -393,15 +393,14 @@ hardmoney parse --lines /tmp/f8.fec | grep -E '"(raw_form_type|table)"'
 
 ## Where the counts live
 
-Every one of these behaviours leaves a trace you can query rather than
-something you have to remember:
+Every one of these behaviours leaves a trace you can query:
 
 | Behaviour | Where to look |
 |---|---|
 | Body lines a lenient parse skipped, with line number and reason | `hardmoney parse --lenient` (stderr + `skipped` in the JSON); `Lenient::into_parts()` in code; `filings.skipped_lines` and `GET /filings/{id}` after `bulk-load-filing` |
 | Date cells nulled because they weren't calendar dates | the load's output line; `LoadReport::dates_nulled`; `loads.dates_nulled`; `schema-status`; `GET /schema` |
 | Which exact FEC file a table came from | `loads.source_url`, `loads.source_etag`, `loads.source_last_modified` |
-| Whether a row's amount had cents | the `NUMERIC` value itself -- `transaction_amt::text` |
+| Whether a row's amount had cents | the `NUMERIC` value itself: `transaction_amt::text` |
 | Rows that failed to load | there are none: a malformed row fails the whole load with its line number, and the transaction rolls back |
 
 ## Clean up
@@ -416,7 +415,7 @@ dropped namespace 'tut_dq'
 
 ## Where to go next
 
-- [Parsing a Filing, Explained](./parsing-explained.md) for the
+- [Parsing a filing, explained](./parsing-explained.md) for the
   spec-version and delimiter history that makes items 1, 7, 8, and 9
   necessary.
 - [Dates](./dates.md) and [Reloading](./reloading.md) for items 3 and 4

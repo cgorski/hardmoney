@@ -3,7 +3,7 @@
 Once you have a Postgres database loaded (via the previous chapters), you
 can serve it over HTTP instead of requiring every consumer to write SQL
 directly. This chapter runs the server and walks through every route with
-real request/response pairs -- all captured against a live local server
+real request/response pairs, all captured against a live local server
 during the writing of this book, serving the `book_demo` namespace built
 up in the bulk-ETL chapters.
 
@@ -19,9 +19,9 @@ $ cargo run --quiet --bin hardmoney -- serve --schema book_demo --bind 127.0.0.1
 ```
 
 (One housekeeping step first: the `bulk-load-all --limit 100` smoke test
-in the bulk-ETL chapter *replaced* the full `candidates` and `committees`
-loads in `book_demo` with 100-row samples -- that's what `--mode replace`
-means -- so both were reloaded in full with
+in the bulk-ETL chapter replaced the full `candidates` and `committees`
+loads in `book_demo` with 100-row samples (that's what `--mode replace`
+means), so both were reloaded in full with
 `bulk-load --schema book_demo candidates --cycle 2026` and the same for
 `committees` before starting the server.)
 
@@ -32,8 +32,8 @@ pending migrations, and on startup it (re)creates the
 `independent_expenditures` view if the FEC's Schedule E dump has been
 restored.
 
-`--api-key` is optional, and you'd normally leave it off on your laptop
--- but this chapter turns it on so you can see what it does, and the
+`--api-key` is optional, and you'd normally leave it off on your laptop.
+This chapter turns it on so you can see what it does, and the
 [next chapter](./api-hardening.md) covers it and the other hardening
 flags in full. Every request below sends the key as an `X-Api-Key`
 header. Leave the server running in a terminal (or behind a process
@@ -104,8 +104,8 @@ $ curl -s -H 'X-Api-Key: demo-key' "http://127.0.0.1:18090/committees?q=SENATE&l
 ```
 
 The key can also go in the query string, which is handy for a browser
-tab -- here's the committee that filed the Form 24 we've been following
-since [Quick Start](./quick-start.md):
+tab. Here's the committee that filed the Form 24 we've been following
+since [Quick start](./quick-start.md):
 
 ```bash
 $ curl -s "http://127.0.0.1:18090/committees/C00865444?api_key=demo-key"
@@ -120,7 +120,7 @@ $ curl -s "http://127.0.0.1:18090/committees/C00865444?api_key=demo-key"
 ## Looking up one filing
 
 This is the filing ingested with `bulk-load-filing` in
-[Loading Bulk Data](./bulk-etl.md#ingesting-a-single-filing-directly-for-precise-schedule-e-data):
+[Loading bulk data](./bulk-etl.md#ingesting-a-single-filing-directly-for-precise-schedule-e-data):
 
 ```bash
 $ curl -s -H 'X-Api-Key: demo-key' "http://127.0.0.1:18090/filings/2011832"
@@ -141,15 +141,15 @@ $ curl -s -H 'X-Api-Key: demo-key' "http://127.0.0.1:18090/filings/2011832"
 }
 ```
 
-(Since 2.1 the response also carries the amendment-chain fields --
+(The response also carries the amendment-chain fields
 `amendment_indicator`, `amendment_version`, `amendment_chain`,
-`most_recent`, `most_recent_file_number`, `previous_file_number` -- plus
-`report_type`, `coverage_start_date`, `coverage_end_date`, and `fec_url`;
-see [Amendments](./amendments.md).)
+`most_recent`, `most_recent_file_number`, and `previous_file_number`,
+plus `report_type`, `coverage_start_date`, `coverage_end_date`, and
+`fec_url`; see [Amendments](./amendments.md).)
 
 Two fields to notice: `skipped_lines` is how many body lines the
-(lenient, by default) ingest had to skip -- 0 here, so this record is
-complete -- and `ingested_at` is when the row was last written, which
+(lenient, by default) ingest had to skip (0 here, so this record is
+complete), and `ingested_at` is when the row was last written, which
 changes if you re-ingest the same filing id. An unknown id is a 404:
 
 ```bash
@@ -176,14 +176,14 @@ $ curl -s -H 'X-Api-Key: demo-key' "http://127.0.0.1:18090/filings/2011832/sched
 ]
 ```
 
-Note `"expenditure_amt":"11282.23"` -- a JSON **string**, not a bare
-number. This is `rust_decimal::Decimal`'s serialization: it serializes as
-a string specifically so that no JSON parser on the receiving end (many
-of which parse numbers as `f64` by default) can silently reintroduce the
-floating-point precision loss `hardmoney` avoided in the first place. If
-you're consuming this API from another Rust program, deserialize it back
-into a `Decimal` (which `serde` handles automatically) rather than an
-`f64` to preserve that guarantee end to end. The same applies to
+`"expenditure_amt":"11282.23"` is a JSON string, not a bare number.
+This is `rust_decimal::Decimal`'s serialization: it serializes as a
+string so that no JSON parser on the receiving end (many of which parse
+numbers as `f64` by default) can silently reintroduce the floating-point
+precision loss `hardmoney` avoided in the first place. If you're
+consuming this API from another Rust program, deserialize it back into a
+`Decimal` (which `serde` handles) rather than an `f64` to preserve that
+guarantee end to end. The same applies to
 `transaction_amt` on the two bulk-transaction routes below; there the
 string carries whatever scale the FEC's file had (`"725"`, `"1562.98"`),
 exactly as stored in the `NUMERIC` column.
@@ -270,13 +270,13 @@ $ curl -s -H 'X-Api-Key: demo-key' "http://127.0.0.1:18090/disbursements?min_amo
 ]
 ```
 
-Look at the two date fields. `transaction_dt` is the FEC's raw string --
-`"10222025"` in the Schedule A file, `"02/18/2026"` in the disbursements
-file, two different formats as described in [Dates](./dates.md) -- and
+Look at the two date fields. `transaction_dt` is the FEC's raw string
+(`"10222025"` in the Schedule A file, `"02/18/2026"` in the disbursements
+file, two different formats as described in [Dates](./dates.md)), and
 `transaction_date` is the parsed ISO date (or `null` if the raw value
-didn't parse). Both routes **order by `transaction_date` descending**
+didn't parse). Both routes order by `transaction_date` descending
 (nulls last, then `sub_id`), which is why the newest disbursement comes
-first -- ordering by the raw text would put December 2024 ahead of
+first. Ordering by the raw text would put December 2024 ahead of
 December 2025.
 
 The date filters take ISO dates and apply to the parsed column:
@@ -301,8 +301,8 @@ case-insensitive substring matches.
 
 `/independent-expenditures` reads the `independent_expenditures` view
 over the FEC's restored `schedule_e` `pg_dump`
-([Bulk ETL](./bulk-etl.md#an-alternative-restoring-the-fecs-own-database-dumps))
--- half a million rows going back to 1975 in the book's database:
+([Bulk ETL](./bulk-etl.md#an-alternative-restoring-the-fecs-own-database-dumps)),
+half a million rows going back to 1975 in the book's database:
 
 ```bash
 $ curl -s -H 'X-Api-Key: demo-key' "http://127.0.0.1:18090/independent-expenditures?candidate_id=S6OH00163&support_oppose_code=O&limit=1"
@@ -330,21 +330,21 @@ $ curl -s -H 'X-Api-Key: demo-key' "http://127.0.0.1:18090/independent-expenditu
 ```
 
 If the dump hasn't been restored into this database, the view doesn't
-exist and this route returns a **503**, not a bare 500, with the fix in
-the message:
+exist and this route returns a 503, not a bare 500, with the fix in the
+message:
 
 ```text
 HTTP/1.1 503 Service Unavailable
 {"error":"independent_expenditures is not available: run `hardmoney bulk-restore-dump schedule_e` to load the FEC's official Schedule E pg_dump archive, then `hardmoney schema-init`"}
 ```
 
-*(Illustrative: the book's database has the dump restored, so this
-couldn't be triggered; the message is the crate's.)*
+(Illustrative: the book's database has the dump restored, so this
+couldn't be triggered; the message is the crate's.)
 
 ## What is loaded here? The `/schema` route
 
-`GET /schema` answers "what is this server actually serving?" -- the
-namespace, the migration state, the most recent load of each
+`GET /schema` answers "what is this server serving?": the namespace,
+the migration state, the most recent load of each
 source and cycle (straight from the `loads` table described in
 [Reloading](./reloading.md#every-load-is-recorded)), and whether the
 independent-expenditures view exists:
@@ -409,14 +409,14 @@ means a full load; a number means a `--limit` sample. `source_etag` and
 `source_last_modified` are what `--if-changed` compares against. This is
 the route to poll from a dashboard or a deploy check: if
 `migrations_pending` is non-empty, `serve` wouldn't have started, so in
-practice it's always `[]` here -- but a *different* tool looking at the
+practice it's always `[]` here, but a different tool looking at the
 same namespace can use it to see that `schema-init` is due.
 
 ## All routes
 
 Every list/search route accepts `limit`/`offset` for pagination
 (`limit` defaults to 50 and must be 1-500; `offset` defaults to 0 and
-must be >= 0 -- anything else is a `400` with `{"error": "limit must be
+must be >= 0; anything else is a `400` with `{"error": "limit must be
 between 1 and 500"}` or `{"error": "offset must be >= 0"}`, never a
 silently adjusted page), in addition to the filters listed below.
 Substring filters are case-insensitive `ILIKE '%term%'` matches;
@@ -425,18 +425,18 @@ Substring filters are case-insensitive `ILIKE '%term%'` matches;
 
 | Route | Description | Query parameters |
 |---|---|---|
-| `GET /health` | liveness check; always open, even with `--api-key` | -- |
-| `GET /schema` | namespace, version, migrations, latest load per source/cycle, IE view availability | -- |
+| `GET /health` | liveness check; always open, even with `--api-key` | none |
+| `GET /schema` | namespace, version, migrations, latest load per source/cycle, IE view availability | none |
 | `GET /candidates` | search candidates | `cycle`, `state`, `office`, `q` (substring on name) |
-| `GET /candidates/{cand_id}` | one candidate, every cycle | -- |
+| `GET /candidates/{cand_id}` | one candidate, every cycle | none |
 | `GET /committees` | search committees | `cycle`, `cmte_tp`, `q` (substring on name) |
-| `GET /committees/{cmte_id}` | one committee, every cycle | -- |
+| `GET /committees/{cmte_id}` | one committee, every cycle | none |
 | `GET /schedule-a` | search Schedule A (individual contributions, from `indiv`) | `cmte_id`, `cycle`, `name`, `employer`, `occupation`, `state`, `zip_code` (prefix), `min_amount`, `max_amount`, `min_date`, `max_date` |
 | `GET /disbursements` | search Schedule B operating expenditures (from `oppexp`) | `cmte_id`, `cycle`, `name`, `city`, `state`, `purpose`, `min_amount`, `max_amount`, `min_date`, `max_date` |
 | `GET /independent-expenditures` | search the FEC's own Schedule E dump | `candidate_id`, `cmte_id`, `support_oppose_code` |
 | `GET /filings` | list ingested filings | `committee_id`, `most_recent` (`true`/`false`), `form_type` (base such as `F3X`, or exact such as `F3XA`) |
-| `GET /filings/{filing_id}` | one ingested filing's header/summary, its amendment chain (openFEC field names: `amendment_indicator`, `amendment_version`, `amendment_chain`, `most_recent`, `most_recent_file_number`, `previous_file_number`), `report_type`, coverage dates, `fec_url`, plus `skipped_lines` and `ingested_at` | -- |
-| `GET /filings/{filing_id}/schedule-e` | that filing's own Schedule E line items | -- |
+| `GET /filings/{filing_id}` | one ingested filing's header/summary, its amendment chain (openFEC field names: `amendment_indicator`, `amendment_version`, `amendment_chain`, `most_recent`, `most_recent_file_number`, `previous_file_number`), `report_type`, coverage dates, `fec_url`, plus `skipped_lines` and `ingested_at` | none |
+| `GET /filings/{filing_id}/schedule-e` | that filing's own Schedule E line items | none |
 
 Exact field lists for each route's JSON response live in
 `src/api/routes/*.rs` in the repository; the table above covers the
@@ -463,5 +463,5 @@ serve(pool, config).await?; // runs until SIGINT/SIGTERM
 
 `hardmoney::api::router(pool, &config)` gives you the bare `axum::Router`
 instead, if you want to mount it inside a larger application or drive it
-from tests with `tower::ServiceExt::oneshot` -- which is exactly what
+from tests with `tower::ServiceExt::oneshot`, which is what
 `tests/postgres_integration.rs` does.

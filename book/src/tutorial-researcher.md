@@ -1,11 +1,11 @@
-# Loading a Full Election Cycle into Postgres (and Keeping It Fresh)
+# Loading a full election cycle into Postgres (and keeping it fresh)
 
-**Who this is for:** an academic, a newsroom data team, or anyone who
-needs the FEC's bulk data for a whole election cycle in a database they
-control -- reproducibly, with a record of what was loaded when, refreshed
+Who this is for: an academic, a newsroom data team, or anyone who needs
+the FEC's bulk data for a whole election cycle in a database they
+control, reproducibly, with a record of what was loaded when, refreshed
 on a schedule, and archivable.
 
-**What you'll have at the end:** a namespace holding all ten bulk sources
+What you'll have at the end: a namespace holding all ten bulk sources
 for cycle 2026, a one-line weekly refresh that downloads nothing when the
 FEC hasn't changed anything, a `loads` table that answers "where did this
 row come from and when", a `pg_dump` archive of the namespace, and a
@@ -16,16 +16,16 @@ notes are at the end.
 
 ## Namespaces are snapshots
 
-hardmoney keeps every table in a Postgres *schema* you name with
-`--schema` -- a **namespace**. Nothing else changes: same tables, same
+hardmoney keeps every table in a Postgres schema you name with
+`--schema`, called a namespace. Nothing else changes: same tables, same
 commands, same API. That single mechanism is what makes a research
 database manageable, because you can have as many independent copies as
 you have questions:
 
-- `tut_cycle_2026` -- the live copy, refreshed weekly;
-- `tut_cycle_2026_w37` -- a frozen snapshot from week 37, for a paper
+- `tut_cycle_2026`: the live copy, refreshed weekly;
+- `tut_cycle_2026_w37`: a frozen snapshot from week 37, for a paper
   whose numbers must not move;
-- `tut_cycle_2024` -- the previous cycle, loaded once and never touched.
+- `tut_cycle_2024`: the previous cycle, loaded once and never touched.
 
 The tutorial namespaces are prefixed `tut_` so they can be dropped at the
 end; in your own database you'd call them `cycle_2026` and so on. Names
@@ -52,8 +52,8 @@ one cycle. Before running it, know what you're downloading. These are the
 | `candidates` | `cn26.zip` | 307 KB | every registered candidate |
 | `committees` | `cm26.zip` | 867 KB | every registered committee |
 | `candidate_committee_links` | `ccl26.zip` | 88 KB | which committee belongs to which candidate |
-| `schedule_a` | `indiv26.zip` | **2.19 GB** | every itemized individual contribution |
-| `committee_to_committee_transactions` | `oth26.zip` | **213 MB** | transfers between committees |
+| `schedule_a` | `indiv26.zip` | 2.19 GB | every itemized individual contribution |
+| `committee_to_committee_transactions` | `oth26.zip` | 213 MB | transfers between committees |
 | `committee_to_candidate_transactions` | `pas226.zip` | 8.1 MB | committee contributions and expenditures to candidates |
 | `disbursements` | `oppexp26.zip` | 45 MB | itemized operating expenditures |
 | `candidate_summary` | `weball26.zip` | 193 KB | one financial-summary row per candidate |
@@ -70,9 +70,9 @@ hardmoney bulk-load-all --schema tut_cycle_2026 --cycle 2026
 That is a real multi-gigabyte download and, on the loading side, tens of
 millions of rows through Postgres `COPY`. Plan for it to take a while the
 first time, and run it from a machine with the disk to hold it. For the
-purposes of this book -- which has to be re-runnable -- **the command was
-run with `--limit 1000`**, which reads the first thousand rows of each
-file and then stops the download:
+purposes of this book, which has to be re-runnable, the command was run
+with `--limit 1000`, which reads the first thousand rows of each file
+and then stops the download:
 
 ```bash
 hardmoney bulk-load-all --schema tut_cycle_2026 --cycle 2026 --limit 1000
@@ -102,7 +102,7 @@ pac_party_summary: loaded 1000 rows for cycle 2026 (replace)
 ```
 
 Nine seconds for the first thousand rows of all ten files, 2.19 GB one
-included. Every one of those loads is recorded as a *sample*, which
+included. Every one of those loads is recorded as a sample, which
 matters for the refresh logic below. Without `--limit`, the output is
 the same ten pairs of lines with real row counts.
 
@@ -125,36 +125,36 @@ committees: loaded 20674 rows for cycle 2026 (replace, replaced 1000 existing)
 candidate_committee_links: loaded 8085 rows for cycle 2026 (replace, replaced 1000 existing)
 ```
 
-Note `replaced 1000 existing`: each full load deleted the sample first.
+`replaced 1000 existing` means each full load deleted the sample first.
 That's the default mode, and the next section is about why.
 
 ## The weekly refresh: replace, not upsert
 
-The FEC re-publishes each cycle's files roughly weekly -- in the `loads`
+The FEC re-publishes each cycle's files roughly weekly. In the `loads`
 table further down, the four transaction files carry a `Last-Modified`
 of 2026-09-13 and the registries and summaries one from early on
-2026-09-14. The new file is **not** the old file plus new rows. Amended reports replace the
-original's line items; withdrawn filings and de-duplicated rows
-disappear. An upsert -- insert new keys, update existing ones -- cannot
-express a deletion: it has no way to know a row is gone, because the row
-simply isn't in the file anymore.
+2026-09-14. The new file is not the old file plus new rows. Amended
+reports replace the original's line items; withdrawn filings and
+de-duplicated rows disappear. An upsert (insert new keys, update
+existing ones) cannot express a deletion: it has no way to know a row is
+gone, because the row isn't in the file anymore.
 
 `bulk-load`'s default `--mode replace` handles this the only way that
-actually reproduces the FEC's file: inside one transaction, delete every
-row for this source *and this cycle*, `COPY` the new file in, commit. If
-anything fails, the transaction rolls back and last week's data is
-untouched. Other cycles in the same table are never affected. The
-mechanics are in [Reloading](./reloading.md).
+reproduces the FEC's file: inside one transaction, delete every row for
+this source and this cycle, `COPY` the new file in, commit. If anything
+fails, the transaction rolls back and last week's data is untouched.
+Other cycles in the same table are never affected. The mechanics are in
+[Reloading](./reloading.md).
 
 Two flags turn that into a refresh you can put in cron:
 
-- **`--if-changed`** sends one `HEAD` request per source, compares the
-  `ETag` (or `Last-Modified`) with the most recent *full* load of that
+- `--if-changed` sends one `HEAD` request per source, compares the
+  `ETag` (or `Last-Modified`) with the most recent full load of that
   source and cycle in this namespace, and skips the download entirely if
   they match.
-- **`--yes`** pre-confirms a replace that would delete more than a million
-  rows -- which a full `schedule_a` always does -- so the job doesn't
-  stop and ask.
+- `--yes` pre-confirms a replace that would delete more than a million
+  rows (which a full `schedule_a` always does), so the job doesn't stop
+  and ask.
 
 Here it is on one source, immediately after the full load above:
 
@@ -167,18 +167,18 @@ candidates: unchanged since last full load, skipped
 ```
 
 Four tenths of a second, exit status 0, nothing downloaded, nothing
-deleted. The whole-cycle version -- the line to schedule -- is:
+deleted. The whole-cycle version, the line to schedule, is:
 
 ```bash
 hardmoney bulk-load-all --schema tut_cycle_2026 --cycle 2026 --mode replace --if-changed --yes
 ```
 
-*(Not run for this book: in the tutorial namespace seven of the ten
+(Not run for this book: in the tutorial namespace seven of the ten
 sources hold only samples, and a sample is never a baseline for
-`--if-changed`, so that command would correctly proceed to download all
-2.4 GB. That is the right behaviour -- a sample must never suppress a
-real load -- but it's worth knowing before you paste the line into a
-namespace you've only ever sampled into.)*
+`--if-changed`, so that command would proceed to download all 2.4 GB.
+That is the right behaviour, since a sample must never suppress a real
+load, but check for it before you paste the line into a namespace
+you've only ever sampled into.)
 
 ## `loads`: every row's provenance
 
@@ -206,8 +206,8 @@ loads (latest per source/cycle):
   schedule_a                               cycle 2026          1000 rows  replace 2026-09-15 02:42:49Z (sample, limit 1000)
 ```
 
-The full table has the history, not just the latest, and the columns
-`--if-changed` uses:
+The full table has the whole history and the columns `--if-changed`
+uses:
 
 ```bash
 psql "$DATABASE_URL" -c "SET search_path TO tut_cycle_2026, public;" \
@@ -235,12 +235,11 @@ psql "$DATABASE_URL" -c "SET search_path TO tut_cycle_2026, public;" \
 ```
 
 Read it as a lab notebook. `row_limit IS NULL` marks a full load; the
-`--if-changed` run that was skipped left no row at all, correctly,
-because nothing happened.
-`source_etag` is the S3 ETag of the exact file that was loaded -- if the
-FEC ever asks "which version of `indiv26.zip` did you analyse?", that is
-the answer, and the `-261` suffix on the `indiv` ETag is S3's multipart
-marker for a file uploaded in 261 parts. `dates_nulled` is explained
+`--if-changed` run that was skipped left no row at all, because nothing
+happened. `source_etag` is the S3 ETag of the exact file that was
+loaded. If the FEC ever asks "which version of `indiv26.zip` did you
+analyse?", that is the answer, and the `-261` suffix on the `indiv` ETag
+is S3's multipart marker for a file uploaded in 261 parts. `dates_nulled` is explained
 next. The remaining columns (`loaded_at`, `mode`, `source_url`,
 `hardmoney_version`) are in [Reloading](./reloading.md#every-load-is-recorded),
 and the REST API's `GET /schema` returns the latest rows as JSON.
@@ -251,8 +250,8 @@ and the software that built it.
 
 ## Dates: two FEC formats, and the `*_date` twin columns
 
-The FEC writes dates as text and uses **two different formats across its
-own files**: `MMDDYYYY` in `indiv`, `oth`, and `pas2`, and `MM/DD/YYYY`
+The FEC writes dates as text and uses two different formats across its
+own files: `MMDDYYYY` in `indiv`, `oth`, and `pas2`, and `MM/DD/YYYY`
 in `oppexp` and the three summary files. Neither sorts correctly as text.
 hardmoney keeps the raw string exactly as shipped in the `*_dt` column
 and adds a parsed `DATE` twin with a `*_date` suffix:
@@ -286,8 +285,8 @@ psql "$DATABASE_URL" -c "SET search_path TO tut_cycle_2026, public;" \
 
 Use the `*_date` column for sorting, filtering, and arithmetic; it is
 indexed on every transaction table. A raw value that is blank becomes
-`NULL` silently (blank dates are normal); a raw value that is *present
-but not a calendar date* also becomes `NULL` and is **counted** in the
+`NULL` silently (blank dates are normal); a raw value that is present
+but not a calendar date also becomes `NULL` and is counted in the
 `dates_nulled` column of `loads`, so a file with a systematic date problem
 is visible in `schema-status` rather than producing a quietly empty
 column. Every load above shows `0`. The full story, including what
@@ -324,12 +323,12 @@ pg_restore -l tut_cycle_2026.dump | grep 'TABLE DATA'
 
 1.6 MB for the mostly-sampled tutorial namespace; a full cycle will be
 on the order of the compressed downloads themselves, i.e. gigabytes (an
-estimate -- not measured for this book). The archive carries `loads` and `_sqlx_migrations` with it, so
-a restored copy knows its own provenance and schema version. Restoring
-into a *different* database was tested while writing this, and two things
-need doing first on the target:
+estimate, not measured for this book). The archive carries `loads` and
+`_sqlx_migrations` with it, so a restored copy knows its own provenance
+and schema version. Restoring into a different database was tested while
+writing this, and two things need doing first on the target:
 
-1. `CREATE EXTENSION IF NOT EXISTS pg_trgm;` -- the trigram indexes in
+1. `CREATE EXTENSION IF NOT EXISTS pg_trgm;`. The trigram indexes in
    the dump reference it, and a schema-only dump does not carry the
    extension. Without it `pg_restore` skips those six indexes with
    errors, and because `_sqlx_migrations` already says migration 2 was
@@ -365,7 +364,7 @@ committees: loaded 20674 rows for cycle 2026 (replace)
 ```
 
 Since every namespace is a schema in the same database, comparing them is
-a schema-qualified join -- no export, no second connection:
+a schema-qualified join, with no export and no second connection:
 
 ```bash
 psql "$DATABASE_URL" -c "
@@ -400,12 +399,12 @@ SELECT 'in both, identical', count(*)
 (4 rows)
 ```
 
-Zero differences -- which is correct, and the `loads` table says why: both
-namespaces loaded the file with ETag `07fc62b79883e5b8341f37d60cc7f5d5`,
+Zero differences, and the `loads` table says why: both namespaces
+loaded the file with ETag `07fc62b79883e5b8341f37d60cc7f5d5`,
 thirty-four seconds apart. Run the same query after next Sunday's refresh
 of `tut_cycle_2026` and the first three rows are your changelog: new
 filers, withdrawn candidates, and changed records (a new principal
-committee, a party switch). Swap in `committees` or -- on a full load --
+committee, a party switch). Swap in `committees` or (on a full load)
 `schedule_a` keyed on `sub_id` for the same diff on any table.
 
 `row(a.*) IS DISTINCT FROM row(b.*)` compares every column at once and
@@ -417,13 +416,13 @@ change".
 hardmoney's schema is plain Postgres and runs unchanged on Aurora
 PostgreSQL 18. Two things to know:
 
-- **`pg_trgm` is a trusted extension** on Aurora (and on community
-  Postgres 13+), so `schema-init` can create it as the database owner
-  without superuser rights. If your host has locked it down anyway, the
+- `pg_trgm` is a trusted extension on Aurora (and on community Postgres
+  13+), so `schema-init` can create it as the database owner without
+  superuser rights. If your host has locked it down anyway, the
   migration raises a `WARNING`, skips the six trigram indexes, and
-  everything still works -- searches are just slower.
-- **Parallel query is off by default on Aurora**, so a `name ILIKE
-  '%term%'` search over a full `schedule_a` cannot fall back on a parallel
+  everything still works; searches are slower.
+- Parallel query is off by default on Aurora, so a `name ILIKE '%term%'`
+  search over a full `schedule_a` cannot fall back on a parallel
   sequential scan the way it can on a laptop. The trigram GIN indexes are
   what make the API's substring searches fast there; make sure the
   `WARNING` above didn't fire.
@@ -448,9 +447,9 @@ dropped namespace 'tut_cycle_2026_w37'
 
 - [Reloading](./reloading.md) has the `--mode append` case, the exact
   `--yes` refusal message, and the library equivalents (`LoadOptions`).
-- [Tracking Independent Expenditures](./tutorial-independent-expenditures.md)
-  adds the one dataset `bulk-load-all` doesn't cover -- the FEC's
-  Schedule E `pg_dump` -- and shows how it relates to the
+- [Tracking independent expenditures](./tutorial-independent-expenditures.md)
+  adds the one dataset `bulk-load-all` doesn't cover (the FEC's
+  Schedule E `pg_dump`) and shows how it relates to the
   `committee_to_candidate_transactions` table you just loaded.
 - [The REST API](./rest-api.md) serves any namespace with
   `hardmoney serve --schema <name>`.

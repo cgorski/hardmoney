@@ -1,11 +1,11 @@
-# Parsing Filings in Rust: From Bytes to Exact Dollars
+# Parsing filings in Rust: from bytes to exact dollars
 
-**Who this is for:** a Rust developer building their own pipeline --
-ingesting filings into a system that isn't Postgres, running analysis in
-a notebook-style binary, or embedding FEC parsing in a larger service --
-who wants the parser without the database and web-server dependencies.
+Who this is for: a Rust developer building their own pipeline (ingesting
+filings into a system that isn't Postgres, running analysis in a
+notebook-style binary, or embedding FEC parsing in a larger service) who
+wants the parser without the database and web-server dependencies.
 
-**What you'll have at the end:** a small crate with one `main.rs` that
+What you'll have at the end: a small crate with one `main.rs` that
 fetches any filing by ID, prints its cover-page totals, buckets every
 body line by table, sums Schedule A by who gave, reconciles that sum
 against the cover page to the cent, and handles every error path with a
@@ -27,13 +27,13 @@ rust_decimal = "1"
 
 Two things to notice:
 
-- **`default-features = false, features = ["fetch"]`** gives you the
-  parser and `Filing::fetch`, and nothing else -- no `sqlx`, no `axum`, no
+- `default-features = false, features = ["fetch"]` gives you the parser
+  and `Filing::fetch`, and nothing else: no `sqlx`, no `axum`, no
   `tokio`. (Drop `fetch` too if you only parse local files.) The default
   feature set pulls in the Postgres ETL and the REST server, which you
   don't want in a parser-only crate. The full table is in
   [Installation](./installation.md#feature-flags-reference).
-- **`rust_decimal`** is listed directly because you'll name its `Decimal`
+- `rust_decimal` is listed directly because you'll name its `Decimal`
   type in your own code (`Decimal::ZERO`, type annotations). hardmoney
   re-exports nothing from it; depending on it yourself is the normal Rust
   arrangement and keeps the version you see identical to the one
@@ -41,8 +41,8 @@ Two things to notice:
 
 The scratch crate that verified this chapter used
 `hardmoney = { path = "/path/to/hardmoney", default-features = false, features = ["fetch"] }`
-against the 2.0.0 source tree; the `version = "2"` form is what you'd
-publish with.
+against the source tree; the `version = "2"` form is what you'd publish
+with.
 
 ## The program
 
@@ -126,7 +126,7 @@ fn run(filing_id: u64) -> Result<(), FecError> {
     for a in filing.views::<ScheduleA>() {
         let amount = a.contribution_amount.unwrap_or_default();
         // Memo lines (memo_code "X") itemize money already counted on
-        // another line -- earmarks, joint-fundraising attributions -- so
+        // another line (earmarks, joint-fundraising attributions), so
         // they are excluded from the committee's own totals.
         if a.memo_code.as_deref() == Some("X") {
             memo_total += amount;
@@ -182,7 +182,7 @@ fn report(e: &FecError) {
 }
 ```
 
-Run it against the default filing -- 2011834, a monthly Form 3X from a
+Run it against the default filing, 2011834, a monthly Form 3X from a
 PAC called Republican Majority Fund, chosen because its nine Schedule A
 lines span five different entity types:
 
@@ -241,7 +241,7 @@ is doing.
 `Filing::fetch_bytes(id)` downloads
 `http://docquery.fec.gov/dcdev/posted/<id>.fec` (following the FEC's
 redirect to HTTPS) and returns the raw bytes. There's also
-`Filing::fetch(id)`, which fetches *and* parses strictly in one call --
+`Filing::fetch(id)`, which fetches and parses strictly in one call,
 convenient when you don't need lenient parsing or the bytes themselves.
 Both need the `fetch` feature. A bad ID is an `FecError::Fetch`:
 
@@ -263,8 +263,8 @@ things before parsing: decodes the bytes as UTF-8, falling back to
 Windows-1252 if that fails (older filings contain such bytes in
 free-text fields), and picks the delimiter and column layout from the
 spec version in the header line. Then it parses every body line, and any
-line it can't parse -- an unknown form-type token, or a table with no
-layout for this spec version -- is *recorded* rather than fatal.
+line it can't parse (an unknown form-type token, or a table with no
+layout for this spec version) is recorded rather than fatal.
 
 It returns a `Lenient<Filing>`, not a `Filing`. The only ways to get the
 filing out are `into_parts()`, which hands you `(Filing,
@@ -275,14 +275,15 @@ skipped)` above is the idiomatic shape. Each `SkippedLine` has
 `line_no`, `raw_form_type`, and a `reason`, and implements `Display`
 (`line 5: 'ZZZ' skipped (unknown form type)`).
 
-If you'd rather a bad line fail the whole filing, use `Filing::parse_bytes(&bytes)`
--- that's strict, and returns `Result<Filing, FecError>` directly. Which
-to pick is the subject of [Strict vs. Lenient Parsing](./strict-vs-lenient.md);
-for an ingestion job, lenient-and-record is usually right.
+If you'd rather a bad line fail the whole filing, use
+`Filing::parse_bytes(&bytes)`. That's strict, and returns
+`Result<Filing, FecError>` directly. Which to pick is the subject of
+[Strict vs. lenient parsing](./strict-vs-lenient.md); for an ingestion
+job, lenient-and-record is usually right.
 
 ## Step 3: cover totals with `Form3XSummary`
 
-`filing.summary` is the form's cover line -- a `ParsedLine` like every
+`filing.summary` is the form's cover line, a `ParsedLine` like every
 body line, so it has a `table` and a `view()` method. `Form3XSummary` is
 the typed view for a Form 3X cover: committee name, coverage dates as
 `Option<NaiveDate>`, and the headline totals as `Option<Decimal>`. The
@@ -291,7 +292,7 @@ form it applies to; on any other form you still have every raw field via
 `filing.summary.get("field_name")`.
 
 `view()` returns `Result<Form3XSummary, TypedViewError>`, and
-`TypedViewError` doesn't convert into `FecError` with `?` -- they're
+`TypedViewError` doesn't convert into `FecError` with `?`. They're
 different failure domains (a filing that parsed fine but whose cover line
 lacks a required field, versus a filing that didn't parse). The `match`
 handles it inline; in a crate with its own error enum you'd add a
@@ -299,13 +300,13 @@ handles it inline; in a crate with its own error enum you'd add a
 
 ## Step 4: bucketing lines by `Table`
 
-Every `ParsedLine` carries a `Table` -- an enum, not a string -- saying
+Every `ParsedLine` carries a `Table` (an enum, not a string) saying
 which format table parsed it. Counting into a `BTreeMap<Table, usize>`
 works because `Table` is `Ord`, and the `match` that labels each bucket
 needs a `_` arm because `Table` is `#[non_exhaustive]`: the FEC adds
 record types, and the crate reserves the right to add variants in a minor
-release. Notice `SchD` (debts) fell into `"other"` in the second run;
-that's what the wildcard is for. `Table` implements `Display` as its
+release. `SchD` (debts) fell into `"other"` in the second run; that's
+what the wildcard is for. `Table` implements `Display` as its
 name (`SchA`, `TEXT`), which is what the `{table:>6}` printed.
 
 If you want the raw lines of one table rather than a count,
@@ -321,14 +322,14 @@ as an exact `Option<Decimal>`, `contribution_date` as
 `Option<NaiveDate>`, and `entity_type` as `Option<EntityType>`. The enum
 has a variant per documented FEC code (`Individual` for `IND`, `Pac`,
 `Committee`, `CandidateCommittee`, `Organization`, `Candidate`, `Party`)
-and `Other(String)` preserving anything undocumented verbatim -- real
+and `Other(String)` preserving anything undocumented verbatim. Real
 filings contain typos and vendor extensions, and the view keeps the line
 rather than rejecting it. Like `Table`, it's `#[non_exhaustive]`, hence
 the `Some(_)` arm.
 
 The `memo_code` check is FEC accounting, not a hardmoney concept, but
 it's the difference between the totals matching and not: a Schedule A
-line with memo code `X` itemizes money that is *also* reported on another
+line with memo code `X` itemizes money that is also reported on another
 line. In 2011834, a $10,170.37 net transfer from a joint fundraising
 committee is one line, and three memo lines attribute the gross
 $10,553.13 that donors gave through that JFC to the individuals (the
@@ -368,13 +369,13 @@ Decimal: 10408.30
 amounts. It builds the `Decimal` straight from the digit string with no
 `f64` step, tolerates a bare integer (`"1000"`) or one decimal place, and
 returns `None` for blank input, more than two decimal places (almost
-always an upstream column-alignment bug), or anything that would overflow
--- it never panics. Details in
-[Tables and Typed Views](./typed-views.md#exact-money-with-rust_decimaldecimal).
+always an upstream column-alignment bug), or anything that would
+overflow. It never panics. Details in
+[Tables and typed views](./typed-views.md#exact-money-with-rust_decimaldecimal).
 
 ## The error handler
 
-`report` matches on `FecError`, which is `#[non_exhaustive]` -- the
+`report` matches on `FecError`, which is `#[non_exhaustive]`. The
 `other` arm is required, and it's also where `FecError::line_no()` earns
 its place. Three variants carry a physical 1-based line number
 (`ParserMissing`, `NoMatchingVersionBucket`, `UnterminatedTextBlock`);
@@ -384,7 +385,7 @@ the fallback arm can print a useful location without enumerating
 variants.
 
 To exercise the line-number path you need a broken filing. This second
-binary parses a local file both ways -- it's also where the
+binary parses a local file both ways. It's also where the
 `ScheduleE`/`SupportOppose` types from the
 [independent-expenditures tutorial](./tutorial-independent-expenditures.md)
 show up in library form:
@@ -454,28 +455,28 @@ the one real independent expenditure with its exact amount.
 
 ## Where to go next
 
-- The rest of the typed layer -- `ScheduleB`, name resolution across
-  spec versions, `TypedViewError`, writing your own `TypedView` -- is in
-  [Tables and Typed Views](./typed-views.md).
+- The rest of the typed layer (`ScheduleB`, name resolution across
+  spec versions, `TypedViewError`, writing your own `TypedView`) is in
+  [Tables and typed views](./typed-views.md).
 - The raw layer (`ParsedLine`, `Header`, spec-version handling) is in
-  [Parsing a Filing, Explained](./parsing-explained.md); the schema
-  behind it -- `SpecVersion`, `Layout`, and the compile-time-checked
-  `Typed<T>` field access -- is in [The Schema](./library-schema.md).
-- What the parser does and does not change about a field value (2.0
-  preserves values verbatim; 1.x upper-cased and stripped characters) is
-  in [Fidelity](./fidelity.md).
+  [Parsing a filing, explained](./parsing-explained.md); the schema
+  behind it (`SpecVersion`, `Layout`, and the compile-time-checked
+  `Typed<T>` field access) is in [The schema](./library-schema.md).
+- What the parser does and does not change about a field value (values
+  are preserved verbatim, apart from trimming and one pair of wrapping
+  quotes) is in [Fidelity](./fidelity.md).
 - The three things you can do with a parsed filing besides read it:
   check it against the FEC's acceptance rules
-  ([Validating a Filing](./validating.md)), check its cover page against
-  its schedules ([Reconciling a Filing](./reconciling.md)), and write it
-  back out ([Writing `.fec` Files](./writing-fec.md)).
+  ([Validating a filing](./validating.md)), check its cover page against
+  its schedules ([Reconciling a filing](./reconciling.md)), and write it
+  back out ([Writing `.fec` files](./writing-fec.md)).
 - If the filing is a 135 MB presidential report, `Filing::parse_bytes`
-  needs 1.3 GB; [Streaming Large Filings](./streaming.md) shows the same
+  needs 1.3 GB; [Streaming large filings](./streaming.md) shows the same
   Schedule A total in 10 MB with `FilingReader`.
-- If your pipeline's destination *is* Postgres after all, enable the
+- If your pipeline's destination is Postgres after all, enable the
   `bulk` feature and see the library section of
-  [Loading Bulk Data](./bulk-etl.md#doing-this-from-rust-instead-of-the-cli)
-  -- `ingest_filing_bytes` stores a parsed filing in two lines.
+  [Loading bulk data](./bulk-etl.md#doing-this-from-rust-instead-of-the-cli);
+  `ingest_filing_bytes` stores a parsed filing in two lines.
 - The bundled `examples/` directory (`parse_filing`, `fetch_live_filing`,
   `typed_schedule_a_totals`, `handle_parse_errors`) all build under the
   same minimal feature set used here.

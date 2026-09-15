@@ -1,7 +1,7 @@
-# Amendments: Which Version of a Report Is Current?
+# Amendments: which version of a report is current?
 
 Committees re-file reports. A treasurer finds a mis-keyed contribution, a
-refund posts late, an auditor asks a question -- and the committee files
+refund posts late, an auditor asks a question, and the committee files
 the same report again, corrected. Each re-filing is a new `.fec` with a
 new filing id, and the FEC keeps every version. A committee's third-quarter
 report may exist as three filings; only the last one is what the committee
@@ -16,18 +16,18 @@ that you don't have to.
 
 Two things in the file mark it, and they live in different places:
 
-1. The **cover form type ends in `A`**: `F3XA`, `F3A`, `F3PA`, `F1A`,
+1. The cover form type ends in `A`: `F3XA`, `F3A`, `F3PA`, `F1A`,
    `F24A`. (`N` is a new report, `T` a termination report.) The parser
    exposes this as `filing.is_amendment`.
-2. The **header's `report_id` is `FEC-<n>`**, where `n` is the filing id of
+2. The header's `report_id` is `FEC-<n>`, where `n` is the filing id of
    the report being amended, and the header's `report_number` is the
    sequential amendment number (`1`, `2`, ...). The parser exposes these as
    `filing.amends_filing` (`Option<u64>`) and
    `filing.header.amendment_number()` (`Option<u32>`).
 
 The rule that makes the whole thing tractable is in the FEC's spec and
-enforced by its validator: **the header must name the *original* filing,
-never a prior amendment**. The second amendment of report 1118027 says
+enforced by its validator: the header must name the original filing,
+never a prior amendment. The second amendment of report 1118027 says
 `FEC-1118027`, not `FEC-<first amendment>`. So every version of a report
 points at the same id, and that id is the chain's key.
 
@@ -36,7 +36,7 @@ pre-general (`12G`) report:
 
 | filing id | form | header `report_id` | `report_number` | openFEC `amendment_version` |
 |---|---|---|---|---|
-| 1118027 | `F3N` | *(blank)* | *(blank)* | 0 |
+| 1118027 | `F3N` | (blank) | (blank) | 0 |
 | 1131084 | `F3A` | `FEC-1118027` | `1` | 1 |
 | 1151343 | `F3A` | `FEC-1118027` | `2` | 2 |
 
@@ -44,7 +44,7 @@ pre-general (`12G`) report:
 
 Migration `0003_amendment_chains.sql` adds these columns to `filings`.
 The first group is copied straight from the filing at ingest time; the
-second is computed by the **resolver** over the whole chain, in the same
+second is computed by the resolver over the whole chain, in the same
 transaction as the insert (so the columns are never observably stale):
 
 | Column | Type | From | Meaning |
@@ -77,27 +77,27 @@ holds:
 ### Ordering within a chain
 
 Members are ordered: the original first, then by `amendment_number`, then
-by `filing_id` ascending. Two consequences worth knowing:
+by `filing_id` ascending. Three consequences:
 
-* **Same amendment number twice** (it happens): the later filing id wins,
+* Same amendment number twice (it happens): the later filing id wins,
   because the FEC assigns ids chronologically.
-* **A blank amendment number** on an amendment (the FEC's validator
-  rejects this; the parser does not) sorts *before* the numbered ones, so
-  a malformed re-filing can never silently supersede a well-formed one.
+* A blank amendment number on an amendment (the FEC's validator rejects
+  this; the parser does not) sorts before the numbered ones, so a
+  malformed re-filing can never silently supersede a well-formed one.
 * An original that carries a `report_number` (`F3XN_2011831.fec` in the
   fixtures says `0`) is still version 0: the head of the chain sorts first
   by construction, not because its number is blank.
 
 ### Forms that never chain, forms that do
 
-* **Form 99** (miscellaneous text) and **RFAI responses** (`FRQ`) never
-  carry the `A` designator, so they are never amendments: each is a
-  one-filing chain with `most_recent = true`. That holds even when an F99's
-  header cites another filing's id (some do, to say which report the text
-  is about).
-* **Registrations** (F1, F1M, F2) and **24/48-hour notices** (F24, F6,
-  F5) amend by exactly the same header rule and are treated the same way
-  as periodic reports.
+* Form 99 (miscellaneous text) and RFAI responses (`FRQ`) never carry
+  the `A` designator, so they are never amendments: each is a one-filing
+  chain with `most_recent = true`. That holds even when an F99's header
+  cites another filing's id (some do, to say which report the text is
+  about).
+* Registrations (F1, F1M, F2) and 24/48-hour notices (F24, F6, F5)
+  amend by exactly the same header rule and are treated the same way as
+  periodic reports.
 
 ## `filings_current`
 
@@ -107,7 +107,7 @@ The migration also creates a view:
 CREATE VIEW filings_current AS SELECT * FROM filings WHERE most_recent;
 ```
 
-One row per report -- the version the committee currently stands behind.
+One row per report: the version the committee currently stands behind.
 Join `schedule_e_lines` to it instead of to `filings` and superseded
 versions drop out:
 
@@ -126,20 +126,20 @@ namespace it was created in (see [Namespaces](./namespaces.md)).
 You will not always see the original first. A nightly job that pulls
 "filings received today" sees the amendment on Tuesday and, if it is
 back-filling, the original on Thursday. The resolver is re-run for the
-affected chain after **every** ingest, so the end state is the same
+affected chain after every ingest, so the end state is the same
 whichever order the files arrive in:
 
 1. Ingest `1151343` (amendment 2) alone. Its original is not in the
    table, so it stands alone: `amendment_chain = {1151343}`,
-   `most_recent = true`, and **`chain_unresolved = true`**.
+   `most_recent = true`, and `chain_unresolved = true`.
 2. Ingest `1131084` (amendment 1). Same: alone, flagged.
 3. Ingest `1118027` (the original). Both amendments are pulled into its
    chain and the table now reads exactly as above, flags cleared.
 
 Re-ingesting a filing id (say, after a parser upgrade) recomputes its
-chain too -- and if the re-ingest changed which chain it belongs to (a
-corrected header), the chain it *left* is recomputed as well, so nothing
-is left claiming to be `most_recent` when it no longer is.
+chain too, and if the re-ingest changed which chain it belongs to (a
+corrected header), the chain it left is recomputed as well, so nothing
+is left claiming to be `most_recent` once it has been superseded.
 
 ## `chain_unresolved`
 
@@ -149,12 +149,12 @@ when:
 
 * its header has no usable `FEC-<n>` (blank, or not of that form);
 * the `n` it names is not in the `filings` table (not ingested yet, or
-  ever -- `F3A_2011812.fec` in the fixtures amends `FEC-1997089`, which is
+  ever; `F3A_2011812.fec` in the fixtures amends `FEC-1997089`, which is
   not among the fixtures);
-* the `n` it names *is* in the table but is itself an amendment (a header
+* the `n` it names is in the table but is itself an amendment (a header
   that violates the "name the original" rule).
 
-Such a row is `most_recent` -- it is the newest version we know of -- but
+Such a row is `most_recent` (it is the newest version we know of), but
 its `amendment_version` is 0 and its chain is just itself, which would be
 indistinguishable from a real original without the flag. So query for it:
 
@@ -168,8 +168,8 @@ id). The flag clears itself when they land.
 
 ## Batch loads: `--no-resolve` and `resolve_all_amendment_chains`
 
-Resolving after every insert is one indexed `UPDATE` over the chain -- a
-handful of rows -- so it is the right default. For a scripted load of many
+Resolving after every insert is one indexed `UPDATE` over the chain (a
+handful of rows), so it is the right default. For a scripted load of many
 thousands of filings you can skip it and resolve the whole table once at
 the end:
 
@@ -235,10 +235,10 @@ $ curl -s -H 'X-Api-Key: demo-key' "http://127.0.0.1:18090/filings/1151343"
 
 `amendment_indicator` is `"A"` or `"N"` (openFEC's code). The original,
 `GET /filings/1118027`, answers `"amendment_version": 0`,
-`"most_recent": false`, `"most_recent_file_number": 1151343`, and --
-matching openFEC -- `"previous_file_number": 1118027`, itself.
+`"most_recent": false`, `"most_recent_file_number": 1151343`, and,
+matching openFEC, `"previous_file_number": 1118027`, itself.
 
-The new list route, `GET /filings`, is how you ask "what is current for
+The list route, `GET /filings`, is how you ask "what is current for
 this committee?":
 
 ```bash
@@ -252,7 +252,7 @@ returns just `1151343`. Filters, all optional:
 |---|---|
 | `committee_id` | the cover line's filer id, exactly |
 | `most_recent` | `true`: the latest version of each report (the `filings_current` view); `false`: superseded versions only. Unresolved rows (NULL) match neither. |
-| `form_type` | a base form -- `F3X` matches `F3XN`, `F3XA`, `F3XT` -- or an exact as-filed token such as `F3XA`; case-insensitive |
+| `form_type` | a base form (`F3X` matches `F3XN`, `F3XA`, `F3XT`) or an exact as-filed token such as `F3XA`; case-insensitive |
 | `limit`, `offset` | as on every list route: default 50, max 500, out-of-range is a 400 |
 
 Results are newest filing id first.

@@ -1,11 +1,11 @@
-# Exporting a Filing
+# Exporting a filing
 
-A `.fec` file is a stack of records of different shapes -- one cover
-line, then Schedule A lines, Schedule B lines, `TEXT` records -- each
+A `.fec` file is a stack of records of different shapes (one cover
+line, then Schedule A lines, Schedule B lines, `TEXT` records), each
 with its own columns. Nothing you would analyse it with wants that shape.
-`hardmoney export` turns a filing into **one table per record type**,
-in whichever of four formats your tool reads, and it does so by
-streaming (see [Streaming Large Filings](./streaming.md)), so the 135 MB
+`hardmoney export` turns a filing into one table per record type, in
+whichever of four formats your tool reads, and it does so by streaming
+(see [Streaming large filings](./streaming.md)), so the 135 MB
 presidential filing exports in the same footprint as a 3 KB one.
 
 ```text
@@ -25,8 +25,8 @@ F3X.parquet   SchA.parquet  SchB.parquet  SchD.parquet  SchE.parquet  TEXT.parqu
 ```
 
 Each file is named after the `Table` its rows belong to (the names
-`hardmoney spec tables` lists). The cover line -- the Form 3X summary
-here -- is the single row of its own table, `F3X`. The Parquet files are
+`hardmoney spec tables` lists). The cover line (the Form 3X summary
+here) is the single row of its own table, `F3X`. The Parquet files are
 large for 27 rows because each carries its schema and per-column
 metadata; on a real filing the ratio inverts (below).
 
@@ -36,7 +36,7 @@ metadata; on a real filing the ratio inverts (below).
 |---|---|---|
 | `csv` | You want a spreadsheet, `COPY` into Postgres, or the format every tool reads. One `<Table>.csv` per table with a header row, RFC 4180 quoting. | text, exactly as filed (`15.00`) |
 | `jsonl` | You are piping into `jq`, a JavaScript/Python script, or a document store. One JSON object per row, keys in column order. | a JSON string (`"15.00"`) |
-| `parquet` | You want DuckDB, Polars, pandas, Spark, or an S3 data lake. Columnar, zstd-compressed, and **typed**: amounts are decimals, dates are dates. | `DECIMAL(38, 2)` -- exact |
+| `parquet` | You want DuckDB, Polars, pandas, Spark, or an S3 data lake. Columnar, zstd-compressed, and typed: amounts are decimals, dates are dates. | `DECIMAL(38, 2)`, exact |
 | `sqlite` | You want to query one or many filings with SQL right now, with nothing to install. One database, one table per `Table`, plus a `filings` table. | text, exactly as filed |
 
 Money is never a float, in any of them. CSV, JSON Lines, and SQLite carry
@@ -49,8 +49,8 @@ exactly. `hardmoney export` never gives you `3697.4999999`.
 
 Every output table has the same column set, in this order:
 
-1. `filing_id` -- only with `--include-filing-id`.
-2. `line_no` -- the 1-based physical line in the `.fec` file. Any row
+1. `filing_id`, only with `--include-filing-id`.
+2. `line_no`, the 1-based physical line in the `.fec` file. Any row
    traces back to the raw bytes; the cover line is always line 2.
 3. The table's canonical fields in FEC column order, starting with
    `form_type`. These are the same `lower_snake_case` names
@@ -75,9 +75,9 @@ columns from the FEC's own field specifications (the `kind` column of
 | FEC type | Arrow / Parquet type | Blank or unparseable |
 |---|---|---|
 | `AMT-n` (`kind = amount`) | `Decimal128(38, 2)`, parsed with `parse_money` | `NULL` |
-| `NUM-8` (`kind = numeric`, length 8 -- every such field in the spec is a `YYYYMMDD` date) | `Date32` (days since 1970-01-01), parsed with `parse_fec_date` | `NULL` |
+| `NUM-8` (`kind = numeric`, length 8; every such field in the spec is a `YYYYMMDD` date) | `Date32` (days since 1970-01-01), parsed with `parse_fec_date` | `NULL` |
 | everything else, including other `NUM-n` | `Utf8` | `""` |
-| `line_no`, `filing_id` | `Int64` | -- |
+| `line_no`, `filing_id` | `Int64` | n/a |
 
 Other numerics stay text on purpose: they include ZIP codes and
 committee ids with leading zeros, and the spec's `NUM` columns are not
@@ -170,7 +170,7 @@ $ sqlite3 /tmp/x.sqlite "SELECT decimal_sum(expenditure_amount) FROM SchB"
 look, but it is a double: `SUM(CAST(... AS REAL))` prints `27247.5`
 here and will not be cent-exact on a large schedule. If your application
 needs exact arithmetic in SQLite without the shell, read the text and
-parse it with a decimal type on your side -- which is what `parse_money`
+parse it with a decimal type on your side, which is what `parse_money`
 does in Rust.
 
 The `filings` table records one row per export: `filing_id`,
@@ -188,7 +188,7 @@ database is left as it was.
 
 `--only SA,SB` (or `--only SchA,SchB`) exports just those tables. A token
 is either a table name as `hardmoney spec tables` lists it
-(case-insensitive) or an **upper-case** form-type token as it appears in
+(case-insensitive) or an upper-case form-type token as it appears in
 column 0 of a line (`SA`, `SB21B`, `SE`, `F3XN`), resolved through the
 same dispatch the parser uses. Upper case is required for tokens so that
 a mistyped table name is an error rather than a silent wrong table
@@ -212,12 +212,12 @@ an error; from the library you pass the id explicitly.
 `--lenient` skips body lines that cannot be parsed (an unknown form-type
 token, or no column layout for the filing's spec version) and reports
 the count on stderr, exactly as `hardmoney parse --lenient` does. See
-[Strict vs. Lenient Parsing](./strict-vs-lenient.md) for why strict is
+[Strict vs. lenient parsing](./strict-vs-lenient.md) for why strict is
 the default.
 
 `--out` is a directory for `csv`/`jsonl`/`parquet` (created if missing;
 existing `<Table>.<ext>` files of the same names are replaced) and a
-database file for `sqlite`. The default is `./<file-stem>.<format>` --
+database file for `sqlite`. The default is `./<file-stem>.<format>`:
 `F3XA_2011821.parquet/` or `F3XA_2011821.sqlite`.
 
 ## Memory and speed
@@ -264,7 +264,7 @@ println!("{} rows, {} bytes, {} skipped", report.rows(), report.bytes, report.sk
 ```
 
 `export_reader` takes any `FilingReader<impl BufRead>` instead of a path
--- a network body, a decompressor -- and follows that reader's
+(a network body, a decompressor) and follows that reader's
 `ParseOptions`. Errors are one `ExportError` enum: the parser's
 `FecError` (with its line number), I/O errors naming the path, the
 `csv`/`serde_json`/`arrow`/`parquet`/`rusqlite` errors, `UnknownTable`

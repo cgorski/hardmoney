@@ -1,9 +1,9 @@
-# Reconciling a Filing
+# Reconciling a filing
 
-A periodic report has two halves that are supposed to agree. The **cover
-page** -- line 2 of the file, `filing.summary` -- states totals:
-"Line 11(a)(i), itemized contributions from individuals, this period:
-$13,736.02." The **schedules** that follow itemize them, one line per
+A periodic report has two halves that are supposed to agree. The cover
+page (line 2 of the file, `filing.summary`) states totals: "Line
+11(a)(i), itemized contributions from individuals, this period:
+$13,736.02." The schedules that follow itemize them, one line per
 transaction. Every cover-page total is defined either as the sum of
 particular schedule lines or as arithmetic over other cover-page lines,
 and checking that those definitions hold is the first pass a Reports
@@ -11,7 +11,7 @@ Analysis Division analyst makes on every report the FEC receives.
 
 `Filing::reconcile` and `hardmoney reconcile` do that pass: recompute
 every line with exact `Decimal` arithmetic, and report `reported`,
-`expected`, and `delta` for each. The FEC's own validator only *warns*
+`expected`, and `delta` for each. The FEC's own validator only warns
 about a summary that does not match its schedules ("Subtotal ... not
 supported by Schedule"), and the FEC's new filing tool computes several
 lines as zero, so this is a check filers and analysts have mostly done
@@ -84,7 +84,7 @@ exact schedule sum), `>= sum of ...` (a floor), and `= 11(a)(i) +
 
 Line 11(a)(i) above is the sum of `contribution_amount` over the body
 lines whose form-type token is `SA11AI` (or `SA11A1`, the spelling
-spec 3.x-5.x used) -- **excluding memo entries**. A Schedule A line with
+spec 3.x-5.x used), excluding memo entries. A Schedule A line with
 `memo_code = X` is informational: the earmark behind a conduit
 contribution, the individual behind a partnership's gift, a
 reattribution. Its amount is already counted on another line, so
@@ -95,18 +95,18 @@ reconciler uses.
 
 ## `Relation`: `=` and `>=`, and the $200 threshold
 
-Federal law requires a committee to *itemize* a receipt or disbursement
+Federal law requires a committee to itemize a receipt or disbursement
 only once the aggregate from that contributor (or to that payee) exceeds
 $200 in the election cycle (11 CFR 104.3). Anything smaller is included
 in the cover-page total but need not appear on the schedule at all. So
-for those lines the schedule sum is a **floor**, not an identity: a
-cover total *below* its itemized sum is a discrepancy (money on the
-schedule that is not in the total), a cover total *above* it is normal.
+for those lines the schedule sum is a floor, not an identity: a cover
+total below its itemized sum is a discrepancy (money on the schedule
+that is not in the total), a cover total above it is normal.
 
-Lines that must be fully itemized regardless of size -- contributions
+Lines that must be fully itemized regardless of size (contributions
 from committees, transfers, loans and repayments, independent and
-coordinated expenditures, refunds to committees, debts -- must match
-**exactly**. `Relation` is that distinction:
+coordinated expenditures, refunds to committees, debts) must match
+exactly. `Relation` is that distinction:
 
 | `Relation` | Check | Written as | Form 3X lines |
 |---|---|---|---|
@@ -118,23 +118,23 @@ Form 3 has five floors (14, 15, 17, 20(a), 21) and Form 3P nine (20(a),
 
 `LineCheck::violation()` folds the relation in: it is `|delta|` for an
 `Equal` line and `max(0, -delta)` for an `AtLeast` line, so `matches()`
-is simply `violation() == 0` and `--tolerance` compares against it.
+is `violation() == 0` and `--tolerance` compares against it.
 
-Unitemized individual contributions -- 11(a)(ii) on Form 3X, 17(a)(ii)
-on Form 3P -- have no schedule by definition; they are the contributions
-too small to itemize. They are *inputs*: no check of their own, but
-they appear in formulas (`11(a)(iii) = 11(a)(i) + 11(a)(ii)`), which is
-how they get checked.
+Unitemized individual contributions (11(a)(ii) on Form 3X, 17(a)(ii)
+on Form 3P) have no schedule by definition; they are the contributions
+too small to itemize. They are inputs: no check of their own, but they
+appear in formulas (`11(a)(iii) = 11(a)(i) + 11(a)(ii)`), which is how
+they get checked.
 
 ## Formulas are evaluated over reported values
 
-A formula line -- `11(d) = 11(a)(iii) + 11(b) + 11(c)`, `8 = 6(d) - 7`
--- is computed from the *reported* values of the lines it names, not
-from their recomputed values. That is deliberate, and it is what makes a
+A formula line (`11(d) = 11(a)(iii) + 11(b) + 11(c)`, `8 = 6(d) - 7`)
+is computed from the reported values of the lines it names, not from
+their recomputed values. That is deliberate, and it is what makes a
 reconciliation report readable: if 11(a)(i) disagrees with Schedule A
 but `11(a)(iii) = 11(a)(i) + 11(a)(ii)` holds, the cover page is
 internally consistent and the discrepancy is between the cover and the
-schedule. If the formula *also* failed, the filer's arithmetic on the
+schedule. If the formula also failed, the filer's arithmetic on the
 cover is wrong too. One `DIFF` line means one problem, not a cascade.
 
 The formulas come from the FEC's own format specification, whose `RULE
@@ -151,9 +151,9 @@ $ hardmoney spec fields F3X --version 8.5 | grep -E "col_a_total_receipts |col_a
 
 ## Column A and Column B
 
-Every periodic report has two columns: **A**, this reporting period, and
-**B**, the calendar year to date (Form 3X) or election cycle to date
-(Forms 3 and 3P). Column A is checked completely -- schedule sums and
+Every periodic report has two columns: A, this reporting period, and
+B, the calendar year to date (Form 3X) or election cycle to date
+(Forms 3 and 3P). Column A is checked completely, schedule sums and
 formulas. Column B is checked by formula only: its sums span every
 prior report in the year or cycle, which one file cannot see, so its
 schedule-sum lines are inputs and only the arithmetic among them is
@@ -167,7 +167,7 @@ there is no check for it.
 
 ## A filing that does not balance
 
-Here is a real one -- an amended Form 3X filed at spec 8.5 by a state
+Here is a real one: an amended Form 3X filed at spec 8.5 by a state
 party committee, 1,232 body lines. (`--lenient` is a habit worth having
 on unfamiliar files; nothing was skipped here.)
 
@@ -179,16 +179,15 @@ error: 1 line(s) disagree
 ```
 
 Exit status 1. Line 11(c) is contributions from other political
-committees -- fully itemizable, so an `=` line -- and the cover page
-says $2,045.00 while the five `SA11C` lines in the file (four candidate
+committees (fully itemizable, so an `=` line), and the cover page says
+$2,045.00 while the five `SA11C` lines in the file (four candidate
 committees, amounts $300 to $500) sum to $1,845.00. The gap is exactly
 $200.00: one contribution is on the cover and not on the schedule, or
-the cover is over by one. Meanwhile every formula that *includes* 11(c)
--- `11(d)`, `19`, `20`, `33`, `6(c)`, `6(d)`, `8` -- is `ok`, so the
-cover page is arithmetically consistent with itself; the $2,045.00 was
-carried faithfully into every total. That is the shape of a genuine
-filer discrepancy, and it is what an analyst would write to the
-committee about.
+the cover is over by one. Meanwhile every formula that includes 11(c)
+(`11(d)`, `19`, `20`, `33`, `6(c)`, `6(d)`, `8`) is `ok`, so the cover
+page is arithmetically consistent with itself; the $2,045.00 was carried
+into every total. That is the shape of a filer discrepancy, and it is
+what an analyst would write to the committee about.
 
 `--json` gives the same checks as data:
 
@@ -223,12 +222,12 @@ they are `Decimal`s and JSON numbers are floats.
 
 ## Tolerance
 
-Comparisons are exact by default -- to the cent, because the data is.
+Comparisons are exact by default, to the cent, because the data is.
 Some filers round each cover line independently, which leaves
 one-cent disagreements that are noise; `--tolerance 0.01` (or
 `Reconciliation::mismatches_over(dec)`) treats any violation up to that
 amount as agreement. It is a threshold on `violation()`, so a floor line
-that is *over* its itemized sum is never a violation whatever the
+that is over its itemized sum is never a violation whatever the
 tolerance.
 
 ```text
@@ -236,15 +235,14 @@ $ hardmoney reconcile --tolerance 200 --lenient tmp/agent-misc/filings/2011912.f
 F3X C00001313: 0 of 69 line(s) disagree (tolerance 200)
 ```
 
-That silences the $200 gap above -- which is exactly why a tolerance
-larger than a rounding error should be a conscious choice, not a
-default.
+That silences the $200 gap above, which is why a tolerance larger than
+a rounding error should be a conscious choice, not a default.
 
 ## Which forms, and where the rules come from
 
-Rules exist for **Form 3X** (PACs and party committees), **Form 3**
-(House and Senate candidates), and **Form 3P** (presidential
-candidates). Any other cover form is `ReconcileError::UnsupportedForm`:
+Rules exist for Form 3X (PACs and party committees), Form 3 (House and
+Senate candidates), and Form 3P (presidential candidates). Any other
+cover form is `ReconcileError::UnsupportedForm`:
 
 ```text
 $ hardmoney reconcile tests/fixtures/F24N_2011832.fec
@@ -275,42 +273,40 @@ Each entry is the FEC line label, the canonical cover-page field that
 holds it, and a source: `<-` an exact schedule sum (`Relation::Equal`),
 `>=` a floor (`Relation::AtLeast`), `=` a formula over other lines, or
 `{ input }` for a line with no rule of its own. A source may name
-several schedules -- debts (lines 9 and 10) are a Schedule C loan
-balance *plus* a Schedule D debt balance.
+several schedules: debts (lines 9 and 10) are a Schedule C loan balance
+plus a Schedule D debt balance.
 
-Two sources fed those tables:
+Two sources fed those tables. The first is the FEC's format
+specification. The `RULE REFERENCE` column of each form's sheet is the
+formula text shown by `hardmoney spec fields` above, and the
+schedule-sum lines say `= Total on Sch A`. Form 3 and Form 3P are taken
+from their sheets.
 
-- **The FEC's format specification.** The `RULE REFERENCE` column of
-  each form's sheet is the formula text shown by `hardmoney spec fields`
-  above, and the schedule-sum lines say `= Total on Sch A`. Form 3 and
-  Form 3P are taken from their sheets.
-- **FECfile+**, the FEC's own open-source filing tool
-  (`fecfile-web-api`), whose `reports/form_3x/summary.py` computes Form
-  3X Column A. Its test suite asserts the totals its calculator
-  produces for a fixed set of transactions, and hardmoney encodes that
-  as an **oracle test**: the same transactions, parsed as a filing, must
-  reconcile to the same values on every Column A line. They do. Where
-  FECfile+ stubs a line to zero -- 18(c), 21(a)(i), 21(a)(ii), 30(a)(i),
-  30(a)(ii), the shared federal/non-federal allocation lines fed by
-  Schedules H3-H6 -- hardmoney implements the spec's rule text instead;
-  FECfile+ computes Form 3 as all zeros, so those rules come from the
-  spec alone.
+The second is FECfile+, the FEC's own open-source filing tool
+(`fecfile-web-api`), whose `reports/form_3x/summary.py` computes Form
+3X Column A. Its test suite asserts the totals its calculator produces
+for a fixed set of transactions, and hardmoney encodes that as an oracle
+test: the same transactions, parsed as a filing, must reconcile to the
+same values on every Column A line. They do. Where FECfile+ stubs a line
+to zero (18(c), 21(a)(i), 21(a)(ii), 30(a)(i), 30(a)(ii), the shared
+federal/non-federal allocation lines fed by Schedules H3-H6), hardmoney
+implements the spec's rule text instead. FECfile+ computes Form 3 as all
+zeros, so those rules come from the spec alone.
 
 ## How real filings fare
 
-Every Form 3X, 3, and 3P fixture in `tests/fixtures/` -- all accepted by
-the FEC, spec 3.00 through 8.5 -- satisfies every Column A rule and
-every Column B formula (`tests/reconcile_fixtures.rs`). Across the wider
-local corpus of 109 real periodic reports, **95 satisfy every rule**.
-The other 14 are either truncated third-party samples (a filing cut off
-mid-schedule cannot balance) or genuine filer discrepancies of the kind
-shown above -- which is the point: the rule set is tight enough that
-when it flags a line, the line is worth a look.
+Every Form 3X, 3, and 3P fixture in `tests/fixtures/` (all accepted by
+the FEC, spec 3.00 through 8.5) satisfies every Column A rule and every
+Column B formula (`tests/reconcile_fixtures.rs`). Across the wider local
+corpus of 109 real periodic reports, 95 satisfy every rule. The other 14
+are either truncated third-party samples (a filing cut off mid-schedule
+cannot balance) or filer discrepancies of the kind shown above. The rule
+set is tight enough that when it flags a line, the line is worth a look.
 
 ## From Rust
 
-`Filing::reconcile` returns a `Reconciliation` -- the `form` and a `Vec`
-of `LineCheck`s -- or `ReconcileError::UnsupportedForm`:
+`Filing::reconcile` returns a `Reconciliation` (the `form` and a `Vec`
+of `LineCheck`s) or `ReconcileError::UnsupportedForm`:
 
 ```rust
 use hardmoney::Filing;
@@ -348,12 +344,12 @@ println!("8: {}", cash.rule);
 ```
 
 A `LineCheck` carries `line`, `field`, `column`, `rule` (the text shown
-above), `reported: Option<Decimal>` (`None` if the cover field is blank
--- counted as zero in `delta`), `expected`, `delta`, `relation`,
+above), `reported: Option<Decimal>` (`None` if the cover field is blank,
+counted as zero in `delta`), `expected`, `delta`, `relation`,
 `lines_summed` (how many body lines contributed to a schedule sum), and
 `reported_unparseable` (true if the cover field held something that is
 not an amount). `matches()` and `violation()` apply the relation.
-`Reconciliation` offers `mismatches()`, `mismatches_over(tolerance)`,
+`Reconciliation` has `mismatches()`, `mismatches_over(tolerance)`,
 `balances()`, `column(Column)`, and `line(Column, label)`; both types
 implement `Display` (the CLI's text output) and, with the `serde`
 feature, `Serialize` (its JSON).
@@ -425,8 +421,8 @@ F3X: 51 Column A rules, 49 Column B rules
 Column A checks reported above; `Source` is `#[non_exhaustive]`, hence
 the wildcard arm.)
 
-Reconciliation is about whether the filing agrees *with itself*. Whether
-it would be *accepted* -- field lengths, dates, IDs, required fields --
-is the next chapter, [Validating a Filing](./validating.md); the FEC's
-validator and this reconciler are complementary, and a filing can pass
-either while failing the other.
+Reconciliation is about whether the filing agrees with itself. Whether
+it would be accepted (field lengths, dates, IDs, required fields) is the
+next chapter, [Validating a filing](./validating.md). The FEC's
+validator and this reconciler check different things, and a filing can
+pass either while failing the other.

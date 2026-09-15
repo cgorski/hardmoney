@@ -14,15 +14,15 @@ assert filing.validate().is_acceptable
 assert filing.reconcile().balances
 ```
 
-## Why
+## Why a Python package
 
-Python is where FEC data users are. The Rust competitor `feco3` has ten
-times the downloads of any Rust FEC crate -- through its PyPI wheel, not
-its crate -- and a wheel is the only realistic way hardmoney's validator
-and reconciler reach the FEC's own Django codebase (FECfile+) or the
-analysts, journalists, and researchers who work in notebooks and
+Python is where FEC data users are. The Rust crate `feco3` has ten times
+the downloads of any other Rust FEC crate, through its PyPI wheel rather
+than its crate, and a wheel is the only realistic way hardmoney's
+validator and reconciler reach the FEC's own Django codebase (FECfile+)
+or the analysts, journalists, and researchers who work in notebooks and
 `pandas`. So the `hardmoney` Python package is a thin
-[PyO3](https://pyo3.rs) layer over the Rust crate's *parser-only* build:
+[PyO3](https://pyo3.rs) layer over the Rust crate's parser-only build:
 no `tokio`, `sqlx`, or `axum` in the wheel, no runtime dependencies, and
 one `abi3` wheel per platform that works on every CPython from 3.9 on.
 
@@ -95,7 +95,7 @@ file order; `filing.lines_for("SchA")` is one table's worth; and
 `filing.iter_lines(["SchA", "SchB"])` iterates a selection. A `Line`
 behaves like a read-mostly mapping from canonical field name (the
 `lower_snake_case` names from `data/fec-csv-sources/`) to the value as
-filed -- trimmed, otherwise verbatim, as [Fidelity](./fidelity.md)
+filed: trimmed, otherwise verbatim, as [Fidelity](./fidelity.md)
 describes.
 
 ```python
@@ -132,8 +132,8 @@ The mapping protocol, precisely:
   when the field is not in this filing's layout for the table (a typo, or
   a field that did not exist in that spec version).
 - `name in line`, `line.get(name, default=None)`, `line.keys()`,
-  `line.items()`, `line.to_dict()` -- all in layout order, blanks
-  included. `get` returns the default only for a *missing* field; a blank
+  `line.items()`, `line.to_dict()`, all in layout order, blanks
+  included. `get` returns the default only for a missing field; a blank
   one is `""`.
 - `line.amount(name)` is a `decimal.Decimal` with scale 2, or `None` when
   the field is blank or not a valid FEC amount (`$5,500.00` is `None`;
@@ -141,7 +141,7 @@ The mapping protocol, precisely:
   `datetime.date`, or `None` when blank, zero-filled, or not a real date.
   Both raise `KeyError` for an unknown field, like `line[name]`.
 - `line.table`, `line.form_type` (the token upper-cased; the `form_type`
-  *field* is as filed), `line.line_no`, `line.is_memo`.
+  field is as filed), `line.line_no`, `line.is_memo`.
 
 ```python
 line = filing.lines[0]
@@ -164,8 +164,8 @@ KeyError: 'no_such_field'
 `line.set(name, value)` puts a value in the right column for the filing's
 spec version (trimmed like the parser; `KeyError` for an unknown field),
 and `filing.to_fec()` / `filing.to_fec_string()` write the canonical
-`.fec` form described in [Writing `.fec` Files](./writing-fec.md). A
-`Line` is a *handle* into its `Filing`, not a copy, so an edit through
+`.fec` form described in [Writing `.fec` files](./writing-fec.md). A
+`Line` is a handle into its `Filing`, not a copy, so an edit through
 any handle is what the writer emits:
 
 ```python
@@ -205,7 +205,7 @@ otherwise; `to_fec_string()` is the text before encoding.
 ## Validating
 
 `filing.validate()` runs the FEC's acceptance rules from
-[Validating a Filing](./validating.md) and never raises. The result is
+[Validating a filing](./validating.md) and never raises. The result is
 iterable, sized, and prints one finding per line exactly as `hardmoney
 validate` does.
 
@@ -248,7 +248,7 @@ CLI.
 
 ## Reconciling
 
-`filing.reconcile()` is [Reconciling a Filing](./reconciling.md): every
+`filing.reconcile()` is [Reconciling a filing](./reconciling.md): every
 cover-page line recomputed from the schedules and the other cover lines,
 exactly. It raises `hardmoney.UnsupportedForm` (a `FecError`) unless the
 cover is F3X, F3, or F3P.
@@ -270,9 +270,9 @@ ok   col A line 11(a)(i)   reported        13736.02 expected        13736.02 del
 F3X: every line agrees with its rule
 ```
 
-Now overstate 11(a)(i) by $100 and look again. The schedule sum no longer
-matches, and because formulas are evaluated over the *reported* values
-of their inputs, 11(a)(iii) = 11(a)(i) + 11(a)(ii) breaks too -- which is
+Now overstate 11(a)(i) by $100 and look again. The schedule sum does
+not match, and because formulas are evaluated over the reported values
+of their inputs, 11(a)(iii) = 11(a)(i) + 11(a)(ii) breaks too. That is
 what isolates the bad line:
 
 ```python
@@ -314,7 +314,7 @@ answer.
 | `KeyError` | `line[name]`, `line.set`, `line.amount`, `line.date` with a field not in the layout |
 | `ValueError` | an unknown table name, a malformed spec version, a reconciliation column other than `"A"`/`"B"` |
 | `TypeError` | `parse()` given something other than `bytes`/`str` |
-| `OSError` (`FileNotFoundError`, ...) | `parse_file()` cannot open or read the path -- deliberately *not* a `FecError`, because that is what Python code expects to catch |
+| `OSError` (`FileNotFoundError`, ...) | `parse_file()` cannot open or read the path (deliberately not a `FecError`, because that is what Python code expects to catch) |
 
 ```python
 try:
@@ -338,7 +338,7 @@ FecError: filing has no cover/summary line (line_no=None)
 ["WARN  line 3 ZZZ form_type: Unrecognized Form Type / Record Ignored ('ZZZ': unknown form type)"]
 ```
 
-`lenient=True` is [Strict vs. Lenient Parsing](./strict-vs-lenient.md):
+`lenient=True` is [Strict vs. lenient parsing](./strict-vs-lenient.md):
 unparseable body lines are recorded in `filing.skipped` (each a dict
 with `line_no`, `form_type`, `reason`) instead of failing the parse.
 
@@ -368,33 +368,35 @@ None
 ```
 
 `layout(table, version)` is the column layout (`(field, 0-based
-column)` pairs, in table order) the parser uses for that spec version --
-note `contribution_amount` moving from column 15 in 5.3 to 20 in 8.x.
+column)` pairs, in table order) the parser uses for that spec version.
+`contribution_amount` moves from column 15 in 5.3 to 20 in 8.x.
 `field_spec(table, name)` is the FEC's own specification of the field at
 `BUNDLED_SPEC_VERSION` (type, maximum length, required level, rule text,
 allowed values, pattern), or `None` if the current spec does not document
-it. See [The Schema](./library-schema.md) for what these mean.
+it. See [The schema](./library-schema.md) for what these mean.
 
 ## Design notes
 
-- **Every class is frozen.** `Filing`, `Line`, `Validation`, `Finding`,
-  `Reconciliation`, and `LineCheck` cannot be constructed or have
-  attributes assigned from Python. The one mutation, `Line.set`, goes
-  through a lock inside the shared `Filing`, which is why an edit through
-  any `Line` handle is visible to `to_fec()`.
-- **No panics.** The extension follows the crate's rule: every failure is
-  a Python exception, never an aborted interpreter.
-- **Exact money.** `Decimal` values cross the boundary as their string
-  form (`"13736.02"`), so `line.amount(name) == Decimal(line[name])`
-  holds for every valid amount and the scale is always 2.
-- **One wheel per platform.** The extension uses the CPython stable ABI
-  (`abi3`, minimum 3.9); the same wheel loads on 3.9 through 3.14.
-- **Not in v1.** `iter_lines` materialises its selection rather than
-  streaming from disk (the interface is the streaming one, so this can
-  change without breaking callers); there is no Arrow/`pandas` interop
-  yet (build a `DataFrame` from `[l.to_dict() for l in
-  filing.lines_for("SchA")]` in the meantime); and the bulk-data ETL and
-  REST API are Rust-only by design.
+Every class is frozen. `Filing`, `Line`, `Validation`, `Finding`,
+`Reconciliation`, and `LineCheck` cannot be constructed or have
+attributes assigned from Python. The one mutation, `Line.set`, goes
+through a lock inside the shared `Filing`, which is why an edit through
+any `Line` handle is visible to `to_fec()`.
+
+The extension does not panic. It follows the crate's rule: every failure
+is a Python exception, never an aborted interpreter.
+
+`Decimal` values cross the boundary as their string form (`"13736.02"`),
+so `line.amount(name) == Decimal(line[name])` holds for every valid
+amount and the scale is always 2.
+
+There is one wheel per platform. The extension uses the CPython stable
+ABI (`abi3`, minimum 3.9); the same wheel loads on 3.9 through 3.14.
+
+`iter_lines` materialises its selection in memory rather than streaming
+from disk. There is no Arrow/`pandas` interop; build a `DataFrame` from
+`[l.to_dict() for l in filing.lines_for("SchA")]`. The bulk-data ETL and
+REST API are Rust-only.
 
 ## Tests and CI
 

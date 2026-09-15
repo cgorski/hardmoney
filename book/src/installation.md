@@ -6,12 +6,12 @@ Add `hardmoney` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-hardmoney = "1"
+hardmoney = "2"
 ```
 
 That pulls in every feature: the parser, the Postgres bulk-ETL module, and
 the Axum REST API server. If your program only needs to parse `.fec`
-files -- no Postgres, no HTTP server -- you can depend on a much smaller
+files (no Postgres, no HTTP server), you can depend on a much smaller
 feature set instead:
 
 ```toml
@@ -23,7 +23,7 @@ hardmoney = { version = "2", default-features = false, features = ["fetch"] }
 from `docquery.fec.gov` by filing ID instead of requiring you to have the
 file on disk already. Drop it too if you only ever parse local files.
 
-The minimum supported Rust version is **1.94** (the crate uses the 2024
+The minimum supported Rust version is 1.94 (the crate uses the 2024
 edition). See [Feature flags](#feature-flags-reference) at the end of this
 chapter for the full list.
 
@@ -84,8 +84,8 @@ Not every chapter of this book needs every dependency:
 
 | If you want to... | You need |
 |---|---|
-| Parse `.fec` files ([Quick Start](./quick-start.md), [Parsing a Filing](./parsing-explained.md), [Tables and Typed Views](./typed-views.md)) | Just Rust and Cargo. Nothing else. |
-| Download a filing live from the FEC ([Quick Start](./quick-start.md)'s live-fetch example) | Network access. No database. |
+| Parse `.fec` files ([Quick start](./quick-start.md), [Parsing a filing](./parsing-explained.md), [Tables and typed views](./typed-views.md)) | Just Rust and Cargo. Nothing else. |
+| Download a filing live from the FEC ([Quick start](./quick-start.md)'s live-fetch example) | Network access. No database. |
 | Load bulk data into Postgres ([Bulk ETL](./bulk-etl.md)) | A running Postgres server and a database URL. |
 | Restore the FEC's own `pg_dump` archives ([Bulk ETL](./bulk-etl.md#an-alternative-restoring-the-fecs-own-database-dumps)) | The same, plus `pg_restore` on your `PATH`. |
 | Run the REST API ([The REST API](./rest-api.md)) | The same Postgres database, already loaded with data. |
@@ -104,24 +104,22 @@ Then set:
 export DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/postgres"
 ```
 
-Two things about that URL:
-
-- **Include a username.** If the URL has no user (`postgres://localhost/fec`),
-  `sqlx` falls back to your operating-system username, which is only
-  right when your Postgres role happens to share it. An explicit `user@`
-  is the form every example in this book uses, and the form the CLI's own
-  help text recommends.
-- **The database name doesn't matter.** This book's database examples
-  were run against a local Postgres 18 database named
-  `hardmoney_v1_test`; yours can be called anything, as long as
-  `DATABASE_URL` points at it and it already exists (Postgres doesn't
-  auto-create databases -- see [Troubleshooting](./troubleshooting.md)).
+Two things about that URL. Include a username: if the URL has no user
+(`postgres://localhost/fec`), `sqlx` falls back to your operating-system
+username, which is only right when your Postgres role happens to share
+it. An explicit `user@` is the form every example in this book uses, and
+the form the CLI's own help text recommends. The database name doesn't
+matter: this book's database examples were run against a local Postgres
+18 database named `hardmoney_v1_test`; yours can be called anything, as
+long as `DATABASE_URL` points at it and it already exists (Postgres
+doesn't auto-create databases; see
+[Troubleshooting](./troubleshooting.md)).
 
 Every database command also accepts `--schema <name>` (or the
 `HARDMONEY_SCHEMA` environment variable) to work inside an isolated
-**namespace** within that database. You don't need one to get started --
-the default is Postgres's `public` schema -- but they're worth knowing
-about early and get their own chapter: [Namespaces](./namespaces.md).
+namespace within that database. You don't need one to get started (the
+default is Postgres's `public` schema). They get their own chapter:
+[Namespaces](./namespaces.md).
 
 ## Feature flags reference
 
