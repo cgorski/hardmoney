@@ -1,0 +1,59 @@
+# Detects drift between hardmoney's bundled FEC field specification and the
+# FEC's own sources.
+#
+# `data/fec-spec/spec-8.5.json` is distilled from two public-domain FEC
+# artifacts: the Electronic Filing Specification workbook (vendored) and the
+# JSON Schemas in fecgov/fecfile-validate (develop branch, which the FEC
+# updates when it changes a rule). This job re-runs the distillation against
+# the *current* upstream schemas and fails if the result differs from what is
+# checked in -- so an FEC rule change shows up here as a red build instead of
+# as a stale validator. (The FEC's own spreadsheet-vs-schema checker is
+# abandoned: fecfile-validate#302.)
+#
+# On failure: run the command below locally, review the diff, commit the
+# regenerated JSON.
+
+name: FEC spec drift
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "data/fec-spec/**"
+      - "scripts/distill_fec_spec.py"
+      - ".github/workflows/spec-drift.yml"
+
+jobs:
+  drift:
+    name: distill against fecgov/fecfile-validate develop
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: fecgov/fecfile-validate
+          ref: develop
+          path: upstream/fecfile-validate
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --quiet openpyxl
+      - name: Re-distil the spec against upstream schemas
+        run: |
+          python scripts/distill_fec_spec.py \
+            --schemas upstream/fecfile-validate/schema \
+            --out /tmp/spec-regenerated.json
+      - name: Compare with the checked-in spec
+        run: |
+          if ! diff -u data/fec-spec/spec-8.5.json /tmp/spec-regenerated.json > /tmp/spec.diff; then
+            echo "::error::data/fec-spec/spec-8.5.json is out of date with fecgov/fecfile-validate develop"
+            head -200 /tmp/spec.diff
+            exit 1
+          fi
+          echo "spec is current"
+      - name: Upstream schema inventory (informational)
+        run: |
+          echo "fecfile-validate schemas: $(ls upstream/fecfile-validate/schema/*.json | wc -l)"
+          git -C upstream/fecfile-validate log -1 --format='%h %ad %s' --date=short
