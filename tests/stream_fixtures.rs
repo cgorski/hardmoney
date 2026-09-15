@@ -109,7 +109,7 @@ fn preamble_is_complete_before_the_first_body_line() {
     }
 }
 
-/// The two F99 fixtures carry `[BEGINTEXT]` blocks; the streaming reader
+/// Every F99 fixture carries a `[BEGINTEXT]` block; the streaming reader
 /// must have spliced them into the cover line.
 #[test]
 fn f99_text_blocks_are_spliced_into_the_cover_line() {
@@ -126,7 +126,7 @@ fn f99_text_blocks_are_spliced_into_the_cover_line() {
         assert!(!text.is_empty(), "{}: empty F99 text", path.display());
         seen += 1;
     }
-    assert_eq!(seen, 2, "expected two F99 fixtures");
+    assert!(seen >= 2, "expected at least two F99 fixtures, saw {seen}");
 }
 
 /// Lenient streaming agrees with lenient eager parsing: same lines, same

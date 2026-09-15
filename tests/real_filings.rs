@@ -86,16 +86,23 @@ fn every_fixture_parses_and_dispatches_cleanly() {
 #[test]
 fn all_fixtures_are_spec_8_5() {
     for name in fixture_names() {
-        if name.contains("_v3")
-            || name.contains("_v5")
-            || name.contains("_v6")
-            || name.contains("_v8.0")
-            || name.contains("27789")
-        {
-            continue;
-        }
+        // A `_v<major>.<minor>` marker in the name pins that fixture's
+        // version; everything else is a live-feed 8.5 filing.
+        let expected = name
+            .split("_v")
+            .nth(1)
+            .and_then(|rest| {
+                let end = rest
+                    .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+                    .unwrap_or(rest.len());
+                rest.get(..end)?
+                    .trim_end_matches('.')
+                    .parse::<SpecVersion>()
+                    .ok()
+            })
+            .unwrap_or_else(|| v("8.5"));
         let filing = fixture(&name);
-        assert_eq!(filing.version, v("8.5"), "{name}: expected spec 8.5");
+        assert_eq!(filing.version, expected, "{name}: expected spec {expected}");
     }
 }
 

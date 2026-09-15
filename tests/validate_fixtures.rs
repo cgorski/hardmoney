@@ -124,6 +124,23 @@ fn accepted_filings_warnings_are_pinned() {
             "F3XA_2011814.fec",
             vec![(Rule::ConditionallyRequiredFieldEmpty, 4)],
         ),
+        // Republican Party of Iowa, spec 8.0, Windows-1252 bytes (a `\u{a7}`
+        // section sign in a memo): payee addresses left blank on Schedule
+        // B, and PAC/offset lines without donor ids.
+        (
+            "F3XN_771694_v8.0_cp1252.fec",
+            vec![
+                (Rule::CurrentFormat, 1),
+                (Rule::RecommendedFieldEmpty, 5),
+                (Rule::ConditionallyRequiredFieldEmpty, 6),
+            ],
+        ),
+        // NEA Fund, spec 8.2, UTF-8 letter to RAD whose text carries a
+        // U+FFFD replacement character (accepted by the FEC as filed).
+        (
+            "F99_1236235_v8.2_utf8.fec",
+            vec![(Rule::CurrentFormat, 1), (Rule::F99IllegalCharacter, 1)],
+        ),
     ]);
 
     let dir = fixtures_dir();
@@ -137,7 +154,7 @@ fn accepted_filings_warnings_are_pinned() {
         want.sort_by_key(|(r, _)| r.to_string());
         assert_eq!(counts, want, "{name}:\n{v}");
     }
-    assert_eq!(total_warnings, 127);
+    assert_eq!(total_warnings, 141);
 }
 
 /// The party-committee fixtures carry Schedules H2-H4 and 100%-federal

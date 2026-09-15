@@ -15,8 +15,12 @@ every CPython from 3.9 on (stable ABI).
 ## Install
 
 ```bash
-pip install hardmoney            # once published to PyPI
+pip install hardmoney
 ```
+
+Wheels for Linux (x86_64, aarch64) and macOS (x86_64, Apple silicon),
+CPython 3.9 and newer; no Python dependencies. Other platforms build from
+the source distribution with a Rust toolchain.
 
 From a checkout of the repository (needs Rust and
 [maturin](https://www.maturin.rs)):

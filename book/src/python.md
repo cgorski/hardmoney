@@ -41,11 +41,17 @@ with a `line_no`.
 ## Install
 
 ```bash
-pip install hardmoney            # once published to PyPI
+pip install hardmoney
 ```
 
-From a checkout, with Rust and [maturin](https://www.maturin.rs)
-installed:
+The package on [PyPI](https://pypi.org/project/hardmoney/) ships `abi3`
+wheels for Linux (x86_64 and aarch64, manylinux2014) and macOS (x86_64
+and Apple silicon) for CPython 3.9 and newer, plus a source distribution
+that pip builds with a local Rust toolchain on any other platform. It has
+no Python dependencies.
+
+To work on it from a checkout, with Rust and
+[maturin](https://www.maturin.rs) installed:
 
 ```bash
 cd python
@@ -415,5 +421,7 @@ type stubs with `ast` and checks that every class member they declare
 exists on the compiled module and vice versa, so the stubs cannot drift.
 `.github/workflows/python.yml` runs `cargo fmt`/`clippy`/`doc` on the
 extension, `maturin develop` + pytest on Linux and macOS with Python 3.9
-and 3.13, and builds `abi3` wheels (and an sdist) as artifacts. Nothing
-is published to PyPI from CI.
+and 3.13, and builds `abi3` wheels (and an sdist) as artifacts. Releases
+are uploaded to PyPI from a maintainer's machine after the crate is
+published to crates.io; the Linux wheels are cross-compiled with
+`maturin build --zig`.

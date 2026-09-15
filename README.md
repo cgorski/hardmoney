@@ -68,12 +68,14 @@ have.
 ## Python
 
 Most people who work with FEC data work in Python, so the whole parser,
-writer, validator, and reconciler are packaged as a wheel with typed
-stubs. Until the package is on PyPI, build it from the repository:
+writer, validator, and reconciler are on PyPI as `hardmoney`, with typed
+stubs and no Python dependencies. Wheels are published for Linux
+(x86_64, aarch64) and macOS (Intel, Apple silicon), Python 3.9 and newer;
+other platforms build from the source distribution, which needs a Rust
+toolchain.
 
 ```bash
-pip install maturin
-cd python && maturin develop --release       # or: maturin build --release && pip install target/wheels/*.whl
+pip install hardmoney
 ```
 
 ```python
@@ -187,7 +189,7 @@ routes from the terminal without a server.
 
 ```bash
 cargo install hardmoney            # CLI
-cd python && maturin develop       # Python package, from a checkout (see above)
+pip install hardmoney              # Python package (https://pypi.org/project/hardmoney/)
 ```
 
 ```toml

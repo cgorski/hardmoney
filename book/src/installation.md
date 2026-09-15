@@ -1,5 +1,14 @@
 # Installation
 
+## Python
+
+```bash
+pip install hardmoney
+```
+
+Wheels are published for Linux (x86_64, aarch64) and macOS (Intel and
+Apple silicon), CPython 3.9 and newer. See [Python](./python.md).
+
 ## As a Rust library
 
 Add `hardmoney` to your `Cargo.toml`:
