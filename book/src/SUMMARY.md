@@ -29,5 +29,6 @@
   - [Amendments: which version of a report is current?](./amendments.md)
 - [The REST API](./rest-api.md)
   - [Hardening the API](./api-hardening.md)
+  - [The browser UI](./web-ui.md)
 - [CLI reference](./cli-reference.md)
 - [Troubleshooting & FAQ](./troubleshooting.md)

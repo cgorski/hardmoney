@@ -1,0 +1,657 @@
+//! Filing tools over HTTP: parse, validate, reconcile, and write a `.fec`
+//! filing without touching the database. They back the browser UI
+//! (`hardmoney serve --ui`) and are usable from scripts.
+//!
+//! | Route | Body | Response |
+//! |---|---|---|
+//! | `POST /tools/parse` | raw `.fec` bytes | [`ParsedDocument`] |
+//! | `GET /tools/fetch/{filing_id}` | none | [`ParsedDocument`] for the filing downloaded from the FEC (needs the `fetch` feature; 501 otherwise) |
+//! | `POST /tools/validate` | a [`Document`] | [`Validation`] |
+//! | `POST /tools/reconcile` | a [`Document`] | [`Reconciliation`], or 400 for a form without rules |
+//! | `POST /tools/write` | a [`Document`] | the `.fec` bytes, `Content-Disposition: attachment`, `X-Hardmoney-Validation-Errors: N` |
+//! | `GET /tools/spec/{table}?version=8.5` | none | [`TableSpec`]: the layout at that version with the FEC's field specs |
+//!
+//! Errors are `{"error": "..."}` like the rest of the API: 400 for a
+//! malformed body or an unparseable filing (the message names the line),
+//! 404 for an unknown table, 413 when the body exceeds the server's cap,
+//! 415 for a JSON route called without `Content-Type: application/json`,
+//! 501 when `fetch` is not compiled in, 502 when the FEC download fails.
+//!
+//! The router is state-free ([`router`] returns a `Router<S>` for any `S`)
+//! so it can be mounted without a database, which is how `tests/ui_routes.rs`
+//! exercises it.
+
+use std::collections::BTreeMap;
+
+use axum::Json;
+use axum::Router;
+use axum::body::Bytes;
+use axum::extract::rejection::{BytesRejection, JsonRejection};
+use axum::extract::{DefaultBodyLimit, Extension, Path, Query};
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use tower_http::limit::RequestBodyLimitLayer;
+
+use crate::parser::{
+    BUNDLED_SPEC_VERSION, FieldSpec, Filing, Header, ParseOptions, ParsedLine, Reconciliation,
+    SkippedLine, SpecVersion, Table, Validation,
+};
+
+/// Server limits the tools routes enforce, shared with the rest of the API
+/// through [`ApiConfig`](crate::api::ApiConfig).
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// Largest request body (and largest fetched filing) in bytes.
+    pub max_body_bytes: usize,
+}
+
+/// Builds the `/tools/*` routes. State-free: mount it into any router.
+/// The body cap in `limits` is enforced here as well as by the API's outer
+/// layer, so a standalone mount is bounded too. Axum's own 2 MiB
+/// extractor default is raised to the same cap; without that a 3 MB
+/// document would be refused regardless of the configured limit.
+pub fn router<S: Clone + Send + Sync + 'static>(limits: Limits) -> Router<S> {
+    Router::new()
+        .route("/tools/parse", post(parse))
+        .route("/tools/fetch/{filing_id}", get(fetch))
+        .route("/tools/validate", post(validate))
+        .route("/tools/reconcile", post(reconcile))
+        .route("/tools/write", post(write))
+        .route("/tools/spec/{table}", get(spec))
+        .layer(DefaultBodyLimit::max(limits.max_body_bytes))
+        .layer(RequestBodyLimitLayer::new(limits.max_body_bytes))
+        .layer(Extension(limits))
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/// Errors from the tools routes, rendered as `{"error": "..."}`.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ToolsError {
+    /// Malformed JSON, an unknown table or field, an inconsistent document,
+    /// or bytes that do not parse as a filing.
+    #[error("{0}")]
+    BadRequest(String),
+    #[error("{0}")]
+    NotFound(String),
+    /// The body (or the fetched filing) exceeds [`Limits::max_body_bytes`].
+    #[error("{0}")]
+    PayloadTooLarge(String),
+    /// A JSON route was called without `Content-Type: application/json`.
+    #[error("{0}")]
+    UnsupportedMediaType(String),
+    /// The build lacks the feature the route needs.
+    #[error("{0}")]
+    NotImplemented(String),
+    /// The FEC's document store could not be reached or refused the id.
+    #[error("{0}")]
+    UpstreamFailed(String),
+}
+
+impl IntoResponse for ToolsError {
+    fn into_response(self) -> Response {
+        let status = match &self {
+            ToolsError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            ToolsError::NotFound(_) => StatusCode::NOT_FOUND,
+            ToolsError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            ToolsError::UnsupportedMediaType(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            ToolsError::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
+            ToolsError::UpstreamFailed(_) => StatusCode::BAD_GATEWAY,
+        };
+        (status, Json(json!({ "error": self.to_string() }))).into_response()
+    }
+}
+
+fn too_large(limits: Limits) -> ToolsError {
+    ToolsError::PayloadTooLarge(format!(
+        "the request body is larger than this server's {} byte limit; use the `hardmoney` CLI for large filings",
+        limits.max_body_bytes
+    ))
+}
+
+fn bytes_rejection(rej: BytesRejection, limits: Limits) -> ToolsError {
+    if rej.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        too_large(limits)
+    } else {
+        ToolsError::BadRequest(rej.body_text())
+    }
+}
+
+fn json_rejection(rej: JsonRejection, limits: Limits) -> ToolsError {
+    match rej.status() {
+        StatusCode::PAYLOAD_TOO_LARGE => too_large(limits),
+        StatusCode::UNSUPPORTED_MEDIA_TYPE => ToolsError::UnsupportedMediaType(format!(
+            "{}; send the document with Content-Type: application/json",
+            rej.body_text()
+        )),
+        _ => ToolsError::BadRequest(rej.body_text()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parse
+// ---------------------------------------------------------------------------
+
+/// A parsed filing with everything the workbench shows about it.
+///
+/// `summary` and each entry of `lines` serialise as
+/// `{raw_form_type, table, line_no, fields: {name: value}}` with every
+/// field of the layout present (blank as `""`), in layout order. Field
+/// values are always strings. `reconciliation` is `null` for forms without
+/// reconciliation rules, with the reason in `reconcile_error`.
+#[derive(Debug, Serialize)]
+#[non_exhaustive]
+pub struct ParsedDocument {
+    pub header: Header,
+    pub version: SpecVersion,
+    /// The cover line's form-type token as filed, upper-cased (`F3XA`).
+    pub form_type: String,
+    pub base_form_type: String,
+    pub is_amendment: bool,
+    pub amends_filing: Option<u64>,
+    pub summary: ParsedLine,
+    pub lines: Vec<ParsedLine>,
+    /// Body lines the lenient parse could not interpret; also reported as
+    /// `unrecognized_form_type` warnings in `validation`.
+    pub skipped: Vec<SkippedLine>,
+    pub line_count: usize,
+    /// Body lines per table, keyed by the table's serialised name.
+    pub tables: BTreeMap<Table, usize>,
+    pub validation: Validation,
+    pub reconciliation: Option<Reconciliation>,
+    pub reconcile_error: Option<String>,
+}
+
+fn parse_document(bytes: &[u8]) -> Result<ParsedDocument, ToolsError> {
+    let lenient = Filing::parse_bytes_with(bytes, &ParseOptions::LENIENT)
+        .map_err(|e| ToolsError::BadRequest(format!("could not parse filing: {e}")))?;
+    let validation = lenient.validate();
+    let (filing, skipped) = lenient.into_parts();
+    Ok(describe(filing, skipped, validation))
+}
+
+fn describe(filing: Filing, skipped: Vec<SkippedLine>, validation: Validation) -> ParsedDocument {
+    let (reconciliation, reconcile_error) = match filing.reconcile() {
+        Ok(r) => (Some(r), None),
+        Err(e) => (None, Some(e.to_string())),
+    };
+    let mut tables = BTreeMap::new();
+    for line in &filing.lines {
+        *tables.entry(line.table()).or_insert(0usize) += 1;
+    }
+    let Filing {
+        header,
+        version,
+        raw_form_type,
+        base_form_type,
+        is_amendment,
+        amends_filing,
+        summary,
+        lines,
+    } = filing;
+    ParsedDocument {
+        header,
+        version,
+        form_type: raw_form_type,
+        base_form_type,
+        is_amendment,
+        amends_filing,
+        line_count: lines.len(),
+        summary,
+        lines,
+        skipped,
+        tables,
+        validation,
+        reconciliation,
+        reconcile_error,
+    }
+}
+
+/// `POST /tools/parse`: the body is the raw `.fec` file
+/// (`Content-Type: application/octet-stream` or `text/plain`; the body is
+/// decoded as UTF-8 with a Windows-1252 fallback, like the CLI).
+pub async fn parse(
+    Extension(limits): Extension<Limits>,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Json<ParsedDocument>, ToolsError> {
+    let bytes = body.map_err(|rej| bytes_rejection(rej, limits))?;
+    parse_document(&bytes).map(Json)
+}
+
+/// `GET /tools/fetch/{filing_id}`: downloads the filing from the FEC's
+/// document store and returns the same document `POST /tools/parse` would.
+/// A filing larger than the body cap is refused with 413.
+#[cfg(feature = "fetch")]
+pub async fn fetch(
+    Extension(limits): Extension<Limits>,
+    Path(filing_id): Path<u64>,
+) -> Result<Json<ParsedDocument>, ToolsError> {
+    let bytes = tokio::task::spawn_blocking(move || Filing::fetch_bytes(filing_id))
+        .await
+        .map_err(|e| ToolsError::UpstreamFailed(format!("download task failed: {e}")))?
+        .map_err(|e| {
+            ToolsError::UpstreamFailed(format!(
+                "could not download filing {filing_id} from the FEC: {e}"
+            ))
+        })?;
+    if bytes.len() > limits.max_body_bytes {
+        return Err(ToolsError::PayloadTooLarge(format!(
+            "filing {filing_id} is {} bytes, larger than this server's {} byte limit; use `hardmoney parse {filing_id}` instead",
+            bytes.len(),
+            limits.max_body_bytes
+        )));
+    }
+    parse_document(&bytes).map(Json)
+}
+
+/// `GET /tools/fetch/{filing_id}` in a build without the `fetch` feature:
+/// always 501.
+#[cfg(not(feature = "fetch"))]
+pub async fn fetch(Path(filing_id): Path<u64>) -> ToolsError {
+    ToolsError::NotImplemented(format!(
+        "cannot fetch filing {filing_id}: this build of hardmoney has no `fetch` feature"
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Document (the editable form of a filing)
+// ---------------------------------------------------------------------------
+
+/// A filing as JSON, the input to `validate`, `reconcile`, and `write`.
+///
+/// `version` is the spec version every line is laid out with (`"8.5"`).
+/// `summary.fields.form_type` must be the cover line's token as filed
+/// (`F3XN`, not `F3X`). A body line's `form_type`, if blank, defaults to
+/// its table's name. `line_no` is optional; when absent the cover is line
+/// 2 and body lines are numbered from 3, matching a written file. Unknown
+/// keys are ignored, so the output of `POST /tools/parse` can be sent
+/// back unchanged.
+#[derive(Debug, Deserialize)]
+pub struct Document {
+    pub version: String,
+    #[serde(default)]
+    pub header: HeaderInput,
+    pub summary: LineInput,
+    #[serde(default)]
+    pub lines: Vec<LineInput>,
+}
+
+/// The `HDR` record's columns. Blank `record_type`/`ef_type` default to
+/// `HDR`/`FEC`; a blank `fec_version_raw` defaults to the document's
+/// `version`. `name_delim` is only written for spec 3.x-5.x.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct HeaderInput {
+    pub record_type: String,
+    pub ef_type: String,
+    pub fec_version_raw: String,
+    pub soft_name: String,
+    pub soft_ver: String,
+    pub name_delim: Option<String>,
+    pub report_id: String,
+    pub report_number: String,
+    pub comment: String,
+}
+
+/// One record: its table (`"SchA"`, `"F3X"`; case-insensitive) and its
+/// fields by canonical name. Values must be strings (`null` is blank);
+/// fields not listed are blank.
+#[derive(Debug, Deserialize)]
+pub struct LineInput {
+    pub table: String,
+    #[serde(default)]
+    pub line_no: Option<u64>,
+    #[serde(default)]
+    pub fields: serde_json::Map<String, Value>,
+}
+
+fn build_line(
+    input: &LineInput,
+    version: SpecVersion,
+    default_line_no: u64,
+) -> Result<ParsedLine, ToolsError> {
+    let line_no = input.line_no.unwrap_or(default_line_no);
+    let table: Table = input.table.trim().parse().map_err(|_| {
+        ToolsError::BadRequest(format!(
+            "line {line_no}: unknown table '{}' (expected a name like SchA or F3X)",
+            input.table
+        ))
+    })?;
+    let mut pairs = Vec::with_capacity(input.fields.len());
+    for (name, value) in &input.fields {
+        let v = match value {
+            Value::String(s) => s.as_str(),
+            Value::Null => "",
+            other => {
+                return Err(ToolsError::BadRequest(format!(
+                    "line {line_no}: field '{name}' must be a string, not {other}"
+                )));
+            }
+        };
+        pairs.push((name.as_str(), v));
+    }
+    ParsedLine::from_pairs(table, version, line_no, pairs)
+        .map_err(|e| ToolsError::BadRequest(format!("line {line_no}: {e}")))
+}
+
+/// Rebuilds a [`Filing`] from a [`Document`], reporting the first
+/// inconsistency as a 400 that names the line.
+fn build_filing(doc: &Document) -> Result<Filing, ToolsError> {
+    let version: SpecVersion = doc
+        .version
+        .parse()
+        .map_err(|e: crate::parser::InvalidSpecVersion| ToolsError::BadRequest(e.to_string()))?;
+
+    let h = &doc.header;
+    let fec_version_raw = if h.fec_version_raw.trim().is_empty() {
+        version.to_string()
+    } else {
+        h.fec_version_raw.clone()
+    };
+    let or_default = |value: &str, default: &'static str| -> String {
+        if value.trim().is_empty() {
+            default.to_string()
+        } else {
+            value.to_string()
+        }
+    };
+    let record_type = or_default(&h.record_type, "HDR");
+    let ef_type = or_default(&h.ef_type, "FEC");
+    // Wire order, as `Header::to_fields` emits it.
+    let mut fields: Vec<&str> = vec![
+        &record_type,
+        &ef_type,
+        &fec_version_raw,
+        &h.soft_name,
+        &h.soft_ver,
+    ];
+    if version.has_name_delim_header() {
+        fields.push(h.name_delim.as_deref().unwrap_or(""));
+    }
+    fields.extend([h.report_id.as_str(), &h.report_number, &h.comment]);
+    let header =
+        Header::from_fields(&fields).map_err(|e| ToolsError::BadRequest(format!("header: {e}")))?;
+    if header.version != version {
+        return Err(ToolsError::BadRequest(format!(
+            "header.fec_version_raw '{}' is spec version {}, but the document's version is {version}",
+            header.fec_version_raw, header.version
+        )));
+    }
+
+    let cover_token = doc
+        .summary
+        .fields
+        .get("form_type")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if cover_token.is_empty() {
+        return Err(ToolsError::BadRequest(
+            "summary.fields.form_type must be the cover line's form-type token as filed (for example F3XN)"
+                .to_string(),
+        ));
+    }
+    let summary = build_line(&doc.summary, version, 2)?;
+    let lines = doc
+        .lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| build_line(l, version, (i as u64).saturating_add(3)))
+        .collect::<Result<Vec<_>, _>>()?;
+    Filing::from_parts(header, summary, lines).map_err(|e| ToolsError::BadRequest(e.to_string()))
+}
+
+fn take_document(
+    body: Result<Json<Document>, JsonRejection>,
+    limits: Limits,
+) -> Result<Document, ToolsError> {
+    body.map(|Json(d)| d)
+        .map_err(|rej| json_rejection(rej, limits))
+}
+
+/// `POST /tools/validate`: [`Filing::validate`] on a [`Document`].
+pub async fn validate(
+    Extension(limits): Extension<Limits>,
+    body: Result<Json<Document>, JsonRejection>,
+) -> Result<Json<Validation>, ToolsError> {
+    let filing = build_filing(&take_document(body, limits)?)?;
+    Ok(Json(filing.validate()))
+}
+
+/// `POST /tools/reconcile`: [`Filing::reconcile`] on a [`Document`]; 400
+/// with the reason for a cover form that has no rules.
+pub async fn reconcile(
+    Extension(limits): Extension<Limits>,
+    body: Result<Json<Document>, JsonRejection>,
+) -> Result<Json<Reconciliation>, ToolsError> {
+    let filing = build_filing(&take_document(body, limits)?)?;
+    filing
+        .reconcile()
+        .map(Json)
+        .map_err(|e| ToolsError::BadRequest(e.to_string()))
+}
+
+/// Keeps ASCII letters, digits, `-`, and `_` for a download filename.
+fn filename_token(raw: &str, fallback: &str) -> String {
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if cleaned.is_empty() {
+        fallback.to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// `POST /tools/write`: [`Filing::to_fec`] on a [`Document`]. The response
+/// is the `.fec` bytes with `Content-Disposition: attachment;
+/// filename="<form>-<committee>.fec"` and `X-Hardmoney-Validation-Errors`
+/// set to the number of error-severity findings (the file is written even
+/// when that is non-zero; the FEC would reject it).
+pub async fn write(
+    Extension(limits): Extension<Limits>,
+    body: Result<Json<Document>, JsonRejection>,
+) -> Result<Response, ToolsError> {
+    let filing = build_filing(&take_document(body, limits)?)?;
+    let errors = filing.validate().error_count();
+    let committee = filing
+        .summary
+        .get_non_empty("filer_committee_id_number")
+        .or_else(|| filing.summary.get_non_empty("candidate_id_number"))
+        .unwrap_or("filing");
+    let filename = format!(
+        "{}-{}.fec",
+        filename_token(&filing.raw_form_type, "filing"),
+        filename_token(committee, "filing")
+    );
+    let bytes = filing.to_fec();
+
+    let mut response = (StatusCode::OK, bytes).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{filename}\"")) {
+        headers.insert(header::CONTENT_DISPOSITION, v);
+    }
+    if let Ok(v) = HeaderValue::from_str(&errors.to_string()) {
+        headers.insert("x-hardmoney-validation-errors", v);
+    }
+    Ok(response)
+}
+
+// ---------------------------------------------------------------------------
+// Spec
+// ---------------------------------------------------------------------------
+
+/// `GET /tools/spec/{table}` query: `version` defaults to the bundled spec
+/// version.
+#[derive(Debug, Deserialize)]
+pub struct SpecParams {
+    pub version: Option<String>,
+}
+
+/// One column of a layout with the FEC's specification for it, when the
+/// bundled spec still documents the field.
+#[derive(Debug, Serialize)]
+pub struct FieldInfo {
+    pub name: &'static str,
+    pub column: u16,
+    pub spec: Option<&'static FieldSpec>,
+}
+
+/// A table's layout at one spec version, with field specs.
+#[derive(Debug, Serialize)]
+#[non_exhaustive]
+pub struct TableSpec {
+    pub table: Table,
+    pub version: SpecVersion,
+    /// The version the `spec` entries describe (`FieldSpec` is bundled for
+    /// one version only).
+    pub bundled_spec_version: &'static str,
+    /// Every version this layout applies to.
+    pub versions: &'static [SpecVersion],
+    /// Delimited cells a writer emits for this table.
+    pub width: u16,
+    pub fields: Vec<FieldInfo>,
+}
+
+/// `GET /tools/spec/{table}?version=`: 404 for an unknown table or a
+/// version the bundled data has no layout for.
+pub async fn spec(
+    Path(table): Path<String>,
+    Query(params): Query<SpecParams>,
+) -> Result<Json<TableSpec>, ToolsError> {
+    let table: Table = table
+        .trim()
+        .parse()
+        .map_err(|_| ToolsError::NotFound(format!("no table named '{table}'")))?;
+    let version: SpecVersion = params
+        .version
+        .as_deref()
+        .unwrap_or(BUNDLED_SPEC_VERSION)
+        .parse()
+        .map_err(|e: crate::parser::InvalidSpecVersion| ToolsError::BadRequest(e.to_string()))?;
+    let layout = table.layout(version).ok_or_else(|| {
+        ToolsError::NotFound(format!(
+            "table {table} has no column layout at spec version {version}"
+        ))
+    })?;
+    let fields = layout
+        .fields
+        .iter()
+        .map(|f| FieldInfo {
+            name: f.name,
+            column: f.column,
+            spec: table.spec(f.name),
+        })
+        .collect();
+    Ok(Json(TableSpec {
+        table,
+        version,
+        bundled_spec_version: BUNDLED_SPEC_VERSION,
+        versions: layout.versions,
+        width: layout.width,
+        fields,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn doc(json: Value) -> Document {
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn build_filing_defaults_header_columns_and_numbers_lines() {
+        let d = doc(json!({
+            "version": "8.5",
+            "summary": { "table": "F3X", "fields": { "form_type": "F3XN", "filer_committee_id_number": "C00123456" } },
+            "lines": [ { "table": "SchA", "fields": { "form_type": "SA11AI", "contribution_amount": "10.00" } } ]
+        }));
+        let f = build_filing(&d).unwrap();
+        assert_eq!(f.header.record_type, "HDR");
+        assert_eq!(f.header.ef_type, "FEC");
+        assert_eq!(f.header.fec_version_raw, "8.5");
+        assert_eq!(f.summary.line_no, 2);
+        assert_eq!(f.lines[0].line_no, 3);
+        assert_eq!(f.base_form_type, "F3X");
+        assert!(f.to_fec_string().starts_with("HDR\u{1c}FEC\u{1c}8.5\u{1c}"));
+    }
+
+    #[test]
+    fn build_filing_rejects_each_inconsistency_with_a_message() {
+        let cases: [(Value, &str); 7] = [
+            (
+                json!({ "version": "abc", "summary": { "table": "F3X", "fields": { "form_type": "F3XN" } } }),
+                "not an FEC spec version",
+            ),
+            (
+                json!({ "version": "9.9", "summary": { "table": "F3X", "fields": { "form_type": "F3XN" } } }),
+                "unsupported or malformed FEC version",
+            ),
+            (
+                json!({ "version": "8.5", "header": { "fec_version_raw": "8.4" },
+                        "summary": { "table": "F3X", "fields": { "form_type": "F3XN" } } }),
+                "document's version is 8.5",
+            ),
+            (
+                json!({ "version": "8.5", "summary": { "table": "F3X", "fields": {} } }),
+                "summary.fields.form_type",
+            ),
+            (
+                json!({ "version": "8.5", "summary": { "table": "Nope", "fields": { "form_type": "F3XN" } } }),
+                "unknown table 'Nope'",
+            ),
+            (
+                json!({ "version": "8.5", "summary": { "table": "F3X", "fields": { "form_type": "F3XN", "bogus": "1" } } }),
+                "no field named 'bogus'",
+            ),
+            (
+                json!({ "version": "8.5", "summary": { "table": "F3X", "fields": { "form_type": "F3XN" } },
+                        "lines": [ { "table": "SchA", "line_no": 12, "fields": { "contribution_amount": 10 } } ] }),
+                "line 12: field 'contribution_amount' must be a string",
+            ),
+        ];
+        for (input, expected) in cases {
+            match build_filing(&doc(input)) {
+                Err(ToolsError::BadRequest(msg)) => {
+                    assert!(
+                        msg.contains(expected),
+                        "{msg:?} should mention {expected:?}"
+                    )
+                }
+                other => panic!("expected BadRequest mentioning {expected:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn old_versions_carry_the_name_delim_header_column() {
+        let d = doc(json!({
+            "version": "5.3",
+            "header": { "soft_name": "X", "soft_ver": "1", "name_delim": "^" },
+            "summary": { "table": "F3X", "fields": { "form_type": "F3XN" } }
+        }));
+        let f = build_filing(&d).unwrap();
+        assert_eq!(f.header.name_delim.as_deref(), Some("^"));
+        assert_eq!(f.header.to_fields().len(), 9);
+    }
+
+    #[test]
+    fn filename_token_strips_unsafe_characters() {
+        assert_eq!(filename_token("F3XA", "x"), "F3XA");
+        assert_eq!(filename_token("../C00\"1", "x"), "C001");
+        assert_eq!(filename_token("///", "filing"), "filing");
+    }
+}

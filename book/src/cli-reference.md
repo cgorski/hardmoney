@@ -704,12 +704,20 @@ Options:
           Require this key in `X-Api-Key` (or `?api_key=`) on every route except /health [env: HARDMONEY_API_KEY]
       --max-connections <MAX_CONNECTIONS>
           Maximum database connections in the pool [default: 10]
+      --ui
+          Also serve the browser UI at /ui and the filing tools at /tools/* (parse, validate, reconcile, write). Raises the request body cap from 64 KiB to 32 MiB so a filing can be uploaded
   -h, --help
           Print help
 ```
 
 Runs until `SIGINT`/`SIGTERM`. See [The REST API](./rest-api.md) and
 [Hardening the API](./api-hardening.md).
+
+`--ui` adds the filing workbench and data browser at `/ui` and the
+database-free `/tools/*` routes behind them; both are embedded in the
+binary. The `/ui` pages load without the API key (they are static files);
+every `/tools/*` call needs it like any other route. See
+[The browser UI](./web-ui.md).
 
 ## `query`
 

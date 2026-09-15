@@ -29,6 +29,11 @@ pub struct ServeArgs {
     /// Maximum database connections in the pool.
     #[arg(long, default_value_t = 10)]
     pub max_connections: u32,
+    /// Also serve the browser UI at /ui and the filing tools at /tools/*
+    /// (parse, validate, reconcile, write). Raises the request body cap
+    /// from 64 KiB to 32 MiB so a filing can be uploaded.
+    #[arg(long)]
+    pub ui: bool,
 }
 
 pub async fn run(args: ServeArgs) -> super::CliResult {
@@ -59,7 +64,8 @@ pub async fn run(args: ServeArgs) -> super::CliResult {
     let api = ApiConfig::new(args.bind)
         .request_timeout(timeout)
         .cors_origins(args.cors_origins)
-        .api_key(args.api_key);
+        .api_key(args.api_key)
+        .ui(args.ui);
     hardmoney::api::serve(pool, api).await?;
     Ok(())
 }

@@ -29,6 +29,10 @@
 //!
 //! All list routes accept `limit` (default 50, max 500) and `offset`.
 //!
+//! With [`ApiConfig::ui`] set (`hardmoney serve --ui`) the server also
+//! mounts the browser UI at `/ui` ([`crate::ui`]) and the database-free
+//! filing tools at `/tools/*` ([`routes::tools`]).
+//!
 //! # Hardening
 //!
 //! [`ApiConfig`] controls request timeouts, CORS origins, an optional
@@ -70,19 +74,33 @@ pub struct ApiConfig {
     /// If set, every request must carry this value in `X-Api-Key` or
     /// `?api_key=`. `/health` is always open.
     pub api_key: Option<String>,
-    /// Maximum request body size in bytes (the API is read-only, so this
-    /// only bounds abuse).
+    /// Maximum request body size in bytes. Without the UI the API is
+    /// read-only, so [`ApiConfig::DEFAULT_MAX_BODY_BYTES`] only bounds
+    /// abuse; with it, this is also the largest filing `POST /tools/parse`
+    /// accepts, and [`ApiConfig::ui`] raises it to
+    /// [`ApiConfig::UI_MAX_BODY_BYTES`] unless it was set explicitly.
     pub max_body_bytes: usize,
+    /// Serve the browser UI at `/ui` and the filing tools at `/tools/*`.
+    /// Off by default.
+    pub ui: bool,
 }
 
 impl ApiConfig {
+    /// The body cap without the UI: 64 KiB.
+    pub const DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024;
+    /// The body cap [`ApiConfig::ui`] applies: 32 MiB, enough for every
+    /// periodic report short of the largest presidential filings, which
+    /// belong in the CLI anyway.
+    pub const UI_MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
+
     pub fn new(bind: SocketAddr) -> Self {
         Self {
             bind,
             request_timeout: Duration::from_secs(30),
             cors_origins: Vec::new(),
             api_key: None,
-            max_body_bytes: 64 * 1024,
+            max_body_bytes: Self::DEFAULT_MAX_BODY_BYTES,
+            ui: false,
         }
     }
 
@@ -100,6 +118,19 @@ impl ApiConfig {
         self.api_key = key.filter(|k| !k.is_empty());
         self
     }
+
+    /// Enables the browser UI and the `/tools/*` routes. Because those
+    /// routes accept whole filings, `max_body_bytes` is raised from
+    /// [`ApiConfig::DEFAULT_MAX_BODY_BYTES`] to
+    /// [`ApiConfig::UI_MAX_BODY_BYTES`] if it is still at the default; a
+    /// value set explicitly is kept.
+    pub fn ui(mut self, on: bool) -> Self {
+        self.ui = on;
+        if on && self.max_body_bytes == Self::DEFAULT_MAX_BODY_BYTES {
+            self.max_body_bytes = Self::UI_MAX_BODY_BYTES;
+        }
+        self
+    }
 }
 
 /// Builds the full [`Router`], with `pool` as shared state.
@@ -112,12 +143,16 @@ pub fn router(pool: PgPool, config: &ApiConfig) -> Router {
             .iter()
             .filter_map(|o| HeaderValue::from_str(o).ok())
             .collect();
+        let mut methods = vec![axum::http::Method::GET, axum::http::Method::HEAD];
+        if config.ui {
+            methods.push(axum::http::Method::POST);
+        }
         CorsLayer::new()
             .allow_origin(AllowOrigin::list(origins))
-            .allow_methods([axum::http::Method::GET, axum::http::Method::HEAD])
+            .allow_methods(methods)
     };
 
-    let protected = Router::new()
+    let mut protected = Router::new()
         .route("/schema", get(routes::status::schema))
         .route("/candidates", get(routes::candidates::list))
         .route("/candidates/{cand_id}", get(routes::candidates::get))
@@ -134,23 +169,33 @@ pub fn router(pool: PgPool, config: &ApiConfig) -> Router {
         .route(
             "/filings/{filing_id}/schedule-e",
             get(routes::filings::schedule_e),
-        )
-        .layer(middleware::from_fn_with_state(
-            config.api_key.clone(),
-            require_api_key,
-        ));
+        );
+    if config.ui {
+        protected = protected.merge(routes::tools::router(routes::tools::Limits {
+            max_body_bytes: config.max_body_bytes,
+        }));
+    }
+    let protected = protected.layer(middleware::from_fn_with_state(
+        config.api_key.clone(),
+        require_api_key,
+    ));
 
-    Router::new()
+    let mut app = Router::new()
         .route("/health", get(routes::status::health))
-        .merge(protected)
-        .layer(TimeoutLayer::with_status_code(
-            StatusCode::REQUEST_TIMEOUT,
-            config.request_timeout,
-        ))
-        .layer(RequestBodyLimitLayer::new(config.max_body_bytes))
-        .layer(TraceLayer::new_for_http())
-        .layer(cors)
-        .with_state(pool)
+        .merge(protected);
+    if config.ui {
+        // The shell and its assets must load before the user can enter a
+        // key, so they sit outside the key middleware.
+        app = app.merge(crate::ui::router());
+    }
+    app.layer(TimeoutLayer::with_status_code(
+        StatusCode::REQUEST_TIMEOUT,
+        config.request_timeout,
+    ))
+    .layer(RequestBodyLimitLayer::new(config.max_body_bytes))
+    .layer(TraceLayer::new_for_http())
+    .layer(cors)
+    .with_state(pool)
 }
 
 /// Rejects requests lacking the configured key. No-op when no key is set.
@@ -202,6 +247,7 @@ pub async fn serve(pool: PgPool, config: ApiConfig) -> std::io::Result<()> {
         bind = %config.bind,
         cors = if config.cors_origins.is_empty() { "permissive" } else { "allow-list" },
         api_key = config.api_key.is_some(),
+        ui = config.ui,
         "hardmoney API listening"
     );
     axum::serve(listener, app)
@@ -246,5 +292,24 @@ mod tests {
     fn api_key_empty_string_means_none() {
         let c = ApiConfig::new("127.0.0.1:0".parse().unwrap()).api_key(Some(String::new()));
         assert!(c.api_key.is_none());
+    }
+
+    #[test]
+    fn ui_raises_the_default_body_cap_but_keeps_an_explicit_one() {
+        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let off = ApiConfig::new(bind);
+        assert!(!off.ui);
+        assert_eq!(off.max_body_bytes, ApiConfig::DEFAULT_MAX_BODY_BYTES);
+
+        let on = ApiConfig::new(bind).ui(true);
+        assert!(on.ui);
+        assert_eq!(on.max_body_bytes, ApiConfig::UI_MAX_BODY_BYTES);
+
+        let mut explicit = ApiConfig::new(bind);
+        explicit.max_body_bytes = 1_000;
+        let explicit = explicit.ui(true);
+        assert_eq!(explicit.max_body_bytes, 1_000);
+
+        assert!(!ApiConfig::new(bind).ui(false).ui);
     }
 }

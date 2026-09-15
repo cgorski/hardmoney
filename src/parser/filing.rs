@@ -688,6 +688,60 @@ impl Filing {
         Ok(acc.finish(parsed))
     }
 
+    /// Assembles a filing from a header, a cover line, and body lines --
+    /// for editors and for callers that build filings rather than parse
+    /// them (`Filing` is `#[non_exhaustive]`, so this is the only way to
+    /// construct one outside the crate).
+    ///
+    /// `version`, `raw_form_type`, `base_form_type`, `is_amendment`, and
+    /// `amends_filing` are derived exactly as parsing derives them: from
+    /// `header.version`, `summary.raw_form_type`, and
+    /// [`Header::original_filing_id`].
+    ///
+    /// Fails with [`FecError::MissingFormLine`] if the cover line's
+    /// form-type token is blank, with [`FecError::ParserMissing`] if any
+    /// line's token does not dispatch to the table that line was built
+    /// with (a `SchA` line whose `form_type` is `SB21B` would be written
+    /// with the wrong columns), and with
+    /// [`FecError::NoMatchingVersionBucket`] if any line's layout is not
+    /// the one for `header.version`. Each error names the line.
+    pub fn from_parts(header: Header, summary: ParsedLine, lines: Vec<ParsedLine>) -> Result<Self> {
+        let version = header.version;
+        let raw_form_type = summary.raw_form_type.clone();
+        if raw_form_type.is_empty() {
+            return Err(FecError::MissingFormLine);
+        }
+        for line in std::iter::once(&summary).chain(&lines) {
+            if form::table_for_form_type(&line.raw_form_type) != Some(line.table()) {
+                return Err(FecError::ParserMissing {
+                    form_type: line.raw_form_type.clone(),
+                    version,
+                    line_no: Some(line.line_no),
+                });
+            }
+            if !line.layout().supports(version) {
+                return Err(FecError::NoMatchingVersionBucket {
+                    table: line.table(),
+                    version,
+                    line_no: Some(line.line_no),
+                });
+            }
+        }
+        let base_form_type = strip_ant_suffix(&raw_form_type);
+        let is_amendment = raw_form_type.ends_with('A');
+        let amends_filing = header.original_filing_id();
+        Ok(Filing {
+            header,
+            version,
+            raw_form_type,
+            base_form_type,
+            is_amendment,
+            amends_filing,
+            summary,
+            lines,
+        })
+    }
+
     /// Shared header + cover-line parsing, common to both delimiter
     /// styles. Returns a `Filing` with an empty `lines` vec -- callers fill
     /// that in afterward.
@@ -699,10 +753,6 @@ impl Filing {
         if raw_form_type.is_empty() {
             return Err(FecError::MissingFormLine);
         }
-        let base_form_type = strip_ant_suffix(&raw_form_type);
-        let is_amendment = raw_form_type.ends_with('A');
-        let amends_filing = header.original_filing_id();
-
         let table =
             form::table_for_form_type(&raw_form_type).ok_or_else(|| FecError::ParserMissing {
                 form_type: raw_form_type.clone(),
@@ -710,17 +760,7 @@ impl Filing {
                 line_no: Some(2),
             })?;
         let summary = ParsedLine::from_cells(table, version, 2, summary_fields)?;
-
-        Ok(Filing {
-            header,
-            version,
-            raw_form_type,
-            base_form_type,
-            is_amendment,
-            amends_filing,
-            summary,
-            lines: Vec::new(),
-        })
+        Self::from_parts(header, summary, Vec::new())
     }
 }
 
@@ -910,6 +950,95 @@ mod tests {
         assert_eq!(filing.lines[0].table(), Table::SchA);
         assert_eq!(filing.lines[0].raw_form_type, "SA11AI");
         assert_eq!(filing.lines[0].line_no, 3);
+    }
+
+    #[test]
+    fn from_parts_derives_the_same_fields_as_parsing() {
+        let parsed = Filing::parse(&new_delim_sample()).unwrap();
+        let rebuilt = Filing::from_parts(
+            parsed.header.clone(),
+            parsed.summary.clone(),
+            parsed.lines.clone(),
+        )
+        .unwrap();
+        assert_eq!(rebuilt.version, parsed.version);
+        assert_eq!(rebuilt.raw_form_type, parsed.raw_form_type);
+        assert_eq!(rebuilt.base_form_type, parsed.base_form_type);
+        assert_eq!(rebuilt.is_amendment, parsed.is_amendment);
+        assert_eq!(rebuilt.amends_filing, parsed.amends_filing);
+        assert_eq!(rebuilt.summary, parsed.summary);
+        assert_eq!(rebuilt.lines, parsed.lines);
+        assert_eq!(rebuilt.to_fec_string(), parsed.to_fec_string());
+
+        let v85 = SpecVersion::electronic(8, 5);
+        let header = Header::from_fields(&["HDR", "FEC", "8.5", "X", "1", "FEC-42", "1"]).unwrap();
+        let cover = ParsedLine::from_pairs(
+            Table::F3X,
+            v85,
+            2,
+            [
+                ("form_type", "F3XA"),
+                ("filer_committee_id_number", "C00123456"),
+            ],
+        )
+        .unwrap();
+        let f = Filing::from_parts(header, cover, Vec::new()).unwrap();
+        assert_eq!(f.base_form_type, "F3X");
+        assert!(f.is_amendment);
+        assert_eq!(f.amends_filing, Some(42));
+    }
+
+    #[test]
+    fn from_parts_rejects_inconsistent_parts_naming_the_line() {
+        let v85 = SpecVersion::electronic(8, 5);
+        let header = Header::from_fields(&["HDR", "FEC", "8.5", "X", "1"]).unwrap();
+        let cover = ParsedLine::from_pairs(Table::F3X, v85, 2, [("form_type", "F3XN")]).unwrap();
+
+        // A cover token that dispatches to no table (the `from_pairs`
+        // default of the bare table name is not a valid cover token).
+        let bare = ParsedLine::from_pairs(Table::F3X, v85, 2, []).unwrap();
+        assert!(matches!(
+            Filing::from_parts(header.clone(), bare, Vec::new()),
+            Err(FecError::ParserMissing {
+                line_no: Some(2),
+                ..
+            })
+        ));
+
+        // A body line whose token belongs to a different table.
+        let wrong = ParsedLine::from_pairs(Table::SchA, v85, 7, [("form_type", "SB21B")]).unwrap();
+        assert!(matches!(
+            Filing::from_parts(header.clone(), cover.clone(), vec![wrong]),
+            Err(FecError::ParserMissing {
+                line_no: Some(7),
+                ..
+            })
+        ));
+
+        // A body line built with another version's layout.
+        let old = ParsedLine::from_pairs(
+            Table::SchA,
+            SpecVersion::electronic(5, 3),
+            9,
+            [("form_type", "SA11AI")],
+        )
+        .unwrap();
+        assert!(matches!(
+            Filing::from_parts(header.clone(), cover.clone(), vec![old]),
+            Err(FecError::NoMatchingVersionBucket {
+                table: Table::SchA,
+                line_no: Some(9),
+                ..
+            })
+        ));
+
+        // A blank cover token.
+        let mut blank = cover.clone();
+        blank.set("form_type", "").unwrap();
+        assert!(matches!(
+            Filing::from_parts(header, blank, Vec::new()),
+            Err(FecError::MissingFormLine)
+        ));
     }
 
     #[test]

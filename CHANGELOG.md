@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+- **Browser UI** (`hardmoney serve --ui`, roadmap §5). A filing
+  workbench at `/ui`: drop a `.fec` or fetch one by filing id, read the
+  header and cover page, see validation findings grouped by severity with
+  links to the offending line, see the cover-page reconciliation with
+  mismatching lines highlighted, edit any field (records table, cover
+  card, header) with debounced re-validation and re-reconciliation, review
+  the edits as a before/after list, and download the written `.fec`. The
+  records table renders only the rows in view, so 100k-line filings
+  scroll without stalling; column headers show the FEC's field spec. A
+  data browser at `/ui/data` over the JSON API: candidate and committee
+  search, committee pages (ingested filings with amendment chain,
+  Schedule A, Schedule B, independent expenditures), candidate pages with
+  support/oppose totals added exactly from decimal strings, and a
+  `/schema` dashboard. Light and dark themes (system preference plus a
+  persisted toggle), WCAG AA contrast, keyboard-navigable grid, no CDN
+  dependencies; assets are embedded in the binary with `rust-embed` and
+  served with `ETag` revalidation and a same-origin CSP. New
+  database-free routes, on with `--ui` and behind the API key like every
+  other route: `POST /tools/parse`, `GET /tools/fetch/{id}`, `POST
+  /tools/validate`, `POST /tools/reconcile`, `POST /tools/write` (with
+  `Content-Disposition` and `X-Hardmoney-Validation-Errors`), and `GET
+  /tools/spec/{table}?version=`. `ApiConfig` gains `ui: bool` and
+  `ApiConfig::ui(bool)`, which raises `max_body_bytes` from 64 KiB
+  (`DEFAULT_MAX_BODY_BYTES`) to 32 MiB (`UI_MAX_BODY_BYTES`) unless set
+  explicitly; in CORS allow-list mode `POST` is allowed when the UI is
+  on. New `Filing::from_parts(header, summary, lines)` constructor, the
+  only way to build a `Filing` outside the crate; it derives the form
+  fields exactly as parsing does and rejects a line whose token does not
+  dispatch to its table or whose layout is not the header's version. New
+  module `hardmoney::ui`, new `api::routes::tools`, new test
+  `tests/ui_routes.rs` (no database needed). Book: *The browser UI*.
+
 ## 2.1.0 — 2026-09-15
 
 - **Python bindings** (`python/`, PyPI package `hardmoney`, PyO3 0.29 +

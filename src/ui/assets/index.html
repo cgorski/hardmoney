@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>hardmoney</title>
+<link rel="icon" href="/ui/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/ui/assets/app.css">
+<script type="module" src="/ui/assets/app.js"></script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="topbar">
+  <a class="brand" href="/ui/">hardmoney</a>
+  <nav aria-label="Main">
+    <a href="/ui/" data-nav="workbench">Filing workbench</a>
+    <a href="/ui/data" data-nav="data">Data browser</a>
+  </nav>
+  <div class="topbar-actions">
+    <button id="api-key-button" type="button" class="btn btn-quiet">API key</button>
+    <button id="theme-toggle" type="button" class="btn btn-quiet" aria-pressed="false">Dark theme</button>
+  </div>
+</header>
+<main id="main" tabindex="-1">
+  <noscript><p class="banner banner-error">This page needs JavaScript.</p></noscript>
+</main>
+<div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
+<dialog id="api-key-dialog" aria-labelledby="api-key-title">
+  <form method="dialog" id="api-key-form">
+    <h2 id="api-key-title">API key</h2>
+    <p>This server requires a key. It is kept in this tab's session storage and sent as <code>X-Api-Key</code> on every request.</p>
+    <label for="api-key-input">Key</label>
+    <input id="api-key-input" name="key" type="password" autocomplete="off" spellcheck="false">
+    <div class="dialog-actions">
+      <button type="button" class="btn" data-action="cancel">Cancel</button>
+      <button type="submit" class="btn btn-primary">Save</button>
+    </div>
+  </form>
+</dialog>
+<div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+</body>
+</html>

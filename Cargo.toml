@@ -75,6 +75,10 @@ tower = { version = "0.5", features = ["timeout", "util"], optional = true }
 tower-http = { version = "0.7", features = ["trace", "cors", "timeout", "validate-request", "limit"], optional = true }
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+# The browser UI (`hardmoney serve --ui`) is embedded in the binary so a
+# deployment is one file. `debug-embed` embeds in debug builds too, so tests
+# and `cargo run` exercise the same bytes a release binary ships.
+rust-embed = { version = "8", default-features = false, features = ["debug-embed"], optional = true }
 
 # export (optional): `hardmoney export` and the `export` module. Parquet
 # needs the Arrow columnar model; `zstd` is the only codec we write.
@@ -100,7 +104,7 @@ fetch = ["dep:ureq", "dep:zip"]
 serde = ["dep:serde", "dep:serde_json", "rust_decimal/serde", "compact_str/serde"]
 export = ["dep:arrow", "dep:parquet", "dep:rusqlite", "serde"]
 bulk = ["dep:sqlx", "dep:whoami", "dep:zip", "dep:tokio", "dep:ureq", "dep:indicatif", "serde"]
-api = ["dep:axum", "dep:tower", "dep:tower-http", "dep:tracing", "dep:tracing-subscriber", "dep:tokio", "bulk", "serde"]
+api = ["dep:axum", "dep:tower", "dep:tower-http", "dep:tracing", "dep:tracing-subscriber", "dep:tokio", "dep:rust-embed", "bulk", "serde"]
 cli = ["dep:clap", "dep:dotenvy", "bulk", "api", "fetch", "export"]
 
 [dev-dependencies]

@@ -61,6 +61,9 @@ pub mod db;
 #[cfg(feature = "api")]
 pub mod api;
 
+#[cfg(feature = "api")]
+pub mod ui;
+
 #[cfg(feature = "export")]
 pub mod export;
 
