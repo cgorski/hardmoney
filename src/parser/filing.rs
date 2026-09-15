@@ -1,14 +1,19 @@
-//! Whole-filing parsing: header, top-level summary line, and every detail
-//! ("body") line in between, dispatched to the right format table via
+//! Whole-filing parsing: header, cover (summary) line, and every body line
+//! in between, dispatched to the right format table via
 //! [`crate::parser::form`].
 //!
-//! This intentionally goes further than nyt-pyfec's `filing.py`, which only
-//! extracts the header + summary-line financial totals and leaves
-//! schedule-level parsing (Schedule A contributions, Schedule B
-//! disbursements, etc.) to external code that calls `get_body_row` in a
-//! loop. Real consumers of FEC data (an ingestion pipeline, an API, ad-hoc
+//! Real consumers of FEC data (an ingestion pipeline, an API, ad-hoc
 //! analysis) almost always want every line parsed up front, so
 //! [`Filing::parse`] returns them all in [`Filing::lines`].
+//!
+//! # Fidelity
+//!
+//! Field values are preserved **verbatim** apart from surrounding ASCII
+//! whitespace (see [`crate::parser::utils`]); nothing is upper-cased or
+//! stripped. Interpretation of codes (form-type tokens, entity types, memo
+//! flags) is case-insensitive at the point of use. Every [`ParsedLine`]
+//! remembers the [`Layout`] it was parsed with, which is what makes the
+//! writer (`Filing::to_fec`) an exact inverse of parsing.
 //!
 //! # Strict vs. lenient parsing
 //!
@@ -24,122 +29,324 @@
 //!
 //! # Free-text blocks
 //!
-//! Two on-the-wire quirks are handled here that pyfec never implemented:
-//!
-//! * The `[BEGINTEXT]` / `[ENDTEXT]` free-text block convention, used by
-//!   Form 99 (and documented in the FEC's own `FecFileManual`, validation
-//!   errors #43-44) to carry a multi-line, non-delimited text block. Real
-//!   samples confirm the `text` column of the F99 record itself is left
-//!   blank and the actual content lives in this block instead, so we
-//!   splice the slurped text back into the `text` field of whichever
-//!   record precedes the block. An unterminated block is an error.
+//! * The `[BEGINTEXT]` / `[ENDTEXT]` convention, used by Form 99 (and
+//!   documented in the FEC's `FecFileManual`, validation errors #43-44),
+//!   carries a multi-line, non-delimited text block. Real samples confirm
+//!   the `text` column of the F99 record itself is left blank and the
+//!   content lives in this block, so the block is spliced into the `text`
+//!   field of whichever record precedes it. An unterminated block is an
+//!   error.
 //! * `TEXT` records (a normal delimited line type, distinct from
-//!   `[BEGINTEXT]`) that carry a `back_reference_tran_id_number` pointing
-//!   at an earlier transaction -- these parse through the ordinary
-//!   dispatch path and need no special handling.
+//!   `[BEGINTEXT]`) carry their text in-line and parse through ordinary
+//!   dispatch.
 
-use std::sync::LazyLock;
+use std::fmt;
 
-use regex::Regex;
+use compact_str::CompactString;
 
 use crate::parser::error::{FecError, Result};
 use crate::parser::form;
-use crate::parser::format_data::Table;
-use crate::parser::header::{self, HeaderMap};
-use crate::parser::typed::TypedView;
-use crate::parser::utils::{clean_entry, utf8_clean};
+use crate::parser::header::Header;
+use crate::parser::schema::{Layout, SpecVersion, TableMarker, Typed};
+use crate::parser::tables::Table;
+use crate::parser::typed::{TypedView, TypedViewError};
+use crate::parser::utils::{is_memo_code, normalize_field, normalize_form_type};
 
 /// FEC electronic filings (spec version 6.0 onward) delimit fields with
 /// ASCII 28 (File Separator). Versions before that used a comma, requiring
 /// full CSV quoting rules -- see [`Filing::parse`].
 pub const NEW_DELIMITER: char = '\u{1c}';
 
-/// Port of pyfec's `re.search('^FEC\s*-\s*(\d+)', report_id)`, used to
-/// recover the original filing number an amendment refers to.
-static AMENDS_RE: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(r"^FEC\s*-\s*(\d+)").ok());
+// ---------------------------------------------------------------------------
+// ParsedLine
+// ---------------------------------------------------------------------------
 
-/// One parsed detail/schedule/summary line from the body of a filing, e.g.
-/// a Schedule A contribution, a Schedule B disbursement, or a Schedule E
-/// independent expenditure.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[non_exhaustive]
+/// One parsed record: the cover line, or a schedule / sub-form / `TEXT`
+/// line from the body of a filing.
+///
+/// A line stores its values as a flat slice parallel to the fields of the
+/// [`Layout`] that parsed it, so field *names* are shared `&'static str`s
+/// rather than per-line allocations, and the line can always be written
+/// back at the right columns.
+#[derive(Clone)]
 pub struct ParsedLine {
-    /// The raw form-type string exactly as it appeared in column 0 of the
-    /// line before dispatch, e.g. `"SA11AI"` or `"SC/10"`.
+    /// The form-type token from column 0, upper-cased (the spec defines
+    /// these tokens as case-insensitive and real filings contain e.g.
+    /// `SB21b`), e.g. `"SA11AI"` or `"SC/10"`. The `form_type` *field*
+    /// keeps the token exactly as filed.
     pub raw_form_type: String,
-    /// Which format table this line was parsed with, e.g. [`Table::SchA`].
-    pub table: Table,
-    /// 1-based physical line number in the source file.
+    /// 1-based physical line number in the source file (0 if synthetic).
     pub line_no: u64,
-    /// Canonical field name -> cleaned value, per the fec-csv-sources
-    /// column-position table for this filing's spec version.
-    pub fields: indexmap::IndexMap<String, String>,
+    layout: &'static Layout,
+    values: Box<[CompactString]>,
 }
 
 impl ParsedLine {
-    /// Constructs a line directly. Mostly useful in tests; parsing code
-    /// produces these via [`Filing::parse`].
-    pub fn new(
-        raw_form_type: impl Into<String>,
+    /// Parses one already-split record with the layout for `table` at
+    /// `version`. Fails only if no layout covers that version.
+    pub fn from_cells(
         table: Table,
+        version: SpecVersion,
         line_no: u64,
-        fields: indexmap::IndexMap<String, String>,
-    ) -> Self {
+        cells: &[&str],
+    ) -> Result<Self> {
+        let layout = table
+            .layout(version)
+            .ok_or(FecError::NoMatchingVersionBucket {
+                table,
+                version,
+                line_no: Some(line_no),
+            })?;
+        Ok(Self::with_layout(layout, line_no, cells))
+    }
+
+    fn with_layout(layout: &'static Layout, line_no: u64, cells: &[&str]) -> Self {
+        let values: Box<[CompactString]> = layout
+            .fields
+            .iter()
+            .map(|f| {
+                cells
+                    .get(usize::from(f.column))
+                    .map(|c| CompactString::new(normalize_field(c)))
+                    .unwrap_or_default()
+            })
+            .collect();
+        let raw_form_type = normalize_form_type(cells.first().copied().unwrap_or(""));
         Self {
-            raw_form_type: raw_form_type.into(),
-            table,
+            raw_form_type,
             line_no,
-            fields,
+            layout,
+            values,
         }
     }
 
-    /// Convenience accessor equivalent to `self.fields.get(field)`.
-    pub fn get(&self, field: &str) -> Option<&str> {
-        self.fields.get(field).map(|s| s.as_str())
+    /// Builds a line from `(field, value)` pairs -- for tests, synthetic
+    /// fixtures, and editors. Every name must exist in the layout for
+    /// `table` at `version`; unspecified fields are blank. The `form_type`
+    /// field, if not given, defaults to the table's name.
+    pub fn from_pairs<'p>(
+        table: Table,
+        version: SpecVersion,
+        line_no: u64,
+        pairs: impl IntoIterator<Item = (&'p str, &'p str)>,
+    ) -> Result<Self> {
+        let mut line = Self::from_cells(table, version, line_no, &[])?;
+        for (name, value) in pairs {
+            line.set(name, value)?;
+        }
+        if line.raw_form_type.is_empty() {
+            let _ = line.set("form_type", table.as_str());
+        }
+        Ok(line)
     }
 
-    /// Converts this line into a typed view, refusing if the line belongs
-    /// to a different table than `V` expects.
+    /// Which format table this line was parsed with.
+    #[must_use]
+    pub fn table(&self) -> Table {
+        self.layout.table
+    }
+
+    /// The version-bucket layout this line was parsed with.
+    #[must_use]
+    pub fn layout(&self) -> &'static Layout {
+        self.layout
+    }
+
+    /// The value of `field`: `Some("")` if the field exists in this layout
+    /// but was blank or beyond the end of the physical line, `None` if the
+    /// field does not exist in this layout at all.
+    #[must_use]
+    pub fn get(&self, field: &str) -> Option<&str> {
+        self.layout
+            .index_of(field)
+            .and_then(|i| self.values.get(i))
+            .map(CompactString::as_str)
+    }
+
+    /// Like [`get`](Self::get) but `None` for blank values too.
+    #[must_use]
+    pub fn get_non_empty(&self, field: &str) -> Option<&str> {
+        self.get(field).filter(|v| !v.is_empty())
+    }
+
+    /// Sets `field` (trimmed); fails if the layout has no such field. If
+    /// `field` is `form_type`, `raw_form_type` is updated too.
+    pub fn set(&mut self, field: &str, value: &str) -> Result<()> {
+        let i = self
+            .layout
+            .index_of(field)
+            .ok_or_else(|| FecError::UnknownField {
+                table: self.layout.table,
+                field: field.to_string(),
+            })?;
+        if let Some(slot) = self.values.get_mut(i) {
+            *slot = CompactString::new(normalize_field(value));
+        }
+        if field == "form_type" {
+            self.raw_form_type = normalize_form_type(value);
+        }
+        Ok(())
+    }
+
+    /// Every `(field, value)` in layout (table) order, including blanks.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (&'static str, &str)> + '_ {
+        self.layout
+            .fields
+            .iter()
+            .zip(self.values.iter())
+            .map(|(f, v)| (f.name, v.as_str()))
+    }
+
+    /// Field names in layout order (shared with every line of this layout).
+    #[must_use]
+    pub fn field_names(&self) -> impl ExactSizeIterator<Item = &'static str> + '_ {
+        self.layout.fields.iter().map(|f| f.name)
+    }
+
+    /// The record as delimited cells in wire order: `layout.width` cells,
+    /// with fields placed at their columns and unassigned columns blank.
+    #[must_use]
+    pub fn to_cells(&self) -> Vec<&str> {
+        let mut cells = vec![""; usize::from(self.layout.width)];
+        for (f, v) in self.layout.fields.iter().zip(self.values.iter()) {
+            if let Some(slot) = cells.get_mut(usize::from(f.column)) {
+                *slot = v.as_str();
+            }
+        }
+        cells
+    }
+
+    /// Whether this line is a memo entry (`memo_code == "X"`,
+    /// case-insensitive). Memo entries are informational and are excluded
+    /// from every cover-page total. Lines whose table has no `memo_code`
+    /// column are never memos.
+    #[must_use]
+    pub fn is_memo(&self) -> bool {
+        self.get("memo_code").is_some_and(is_memo_code)
+    }
+
+    /// A compile-time-checked view of this line as table `T`.
     ///
-    /// ```no_run
-    /// # use hardmoney::{Filing, ScheduleA};
-    /// # let filing = Filing::parse("").unwrap();
+    /// ```
+    /// use hardmoney::parser::tables::{sch_a, markers::SchA};
+    /// # use hardmoney::Filing;
+    /// # let text = "HDR\u{1c}FEC\u{1c}8.5\u{1c}X\u{1c}1\nF3XN\u{1c}C00123456\nSA11AI\u{1c}C00123456";
+    /// # let filing = Filing::parse(text).unwrap();
     /// for line in &filing.lines {
-    ///     if let Ok(a) = line.view::<ScheduleA>() {
-    ///         println!("{:?} {:?}", a.contributor_name, a.contribution_amount);
+    ///     if let Ok(a) = line.typed::<SchA>() {
+    ///         println!("{:?}", a.money(sch_a::CONTRIBUTION_AMOUNT));
     ///     }
     /// }
     /// ```
-    pub fn view<V: TypedView>(&self) -> std::result::Result<V, crate::parser::TypedViewError> {
+    pub fn typed<T: TableMarker>(&self) -> std::result::Result<Typed<'_, T>, TypedViewError> {
+        Typed::new(self)
+    }
+
+    /// Converts this line into a domain view such as
+    /// [`ScheduleA`](crate::ScheduleA), refusing if the line belongs to a
+    /// different table than `V` expects.
+    pub fn view<V: TypedView>(&self) -> std::result::Result<V, TypedViewError> {
         V::from_line(self)
     }
 }
 
+impl PartialEq for ParsedLine {
+    /// Two lines are equal when they were parsed with the same layout
+    /// (compared by identity -- layouts are statics) and hold the same
+    /// values; `line_no` and `raw_form_type` are included too.
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.layout, other.layout)
+            && self.line_no == other.line_no
+            && self.raw_form_type == other.raw_form_type
+            && self.values == other.values
+    }
+}
+impl Eq for ParsedLine {}
+
+impl fmt::Debug for ParsedLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ParsedLine")
+            .field("raw_form_type", &self.raw_form_type)
+            .field("table", &self.layout.table)
+            .field("line_no", &self.line_no)
+            .field("fields", &format_args!("{}", NonEmptyFields(self)))
+            .finish()
+    }
+}
+
+/// Debug helper: prints only the non-blank fields of a line.
+struct NonEmptyFields<'a>(&'a ParsedLine);
+
+impl fmt::Display for NonEmptyFields<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut m = f.debug_map();
+        for (k, v) in self.0.iter().filter(|(_, v)| !v.is_empty()) {
+            m.entry(&k, &v);
+        }
+        m.finish()
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for ParsedLine {
+    /// Serialises as `{ "raw_form_type", "table", "line_no", "fields": {name: value, …} }`
+    /// with every field of the layout present (blanks as `""`), in layout order.
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeMap, SerializeStruct};
+        struct Fields<'a>(&'a ParsedLine);
+        impl serde::Serialize for Fields<'_> {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                s: S,
+            ) -> std::result::Result<S::Ok, S::Error> {
+                let mut m = s.serialize_map(Some(self.0.values.len()))?;
+                for (k, v) in self.0.iter() {
+                    m.serialize_entry(k, v)?;
+                }
+                m.end()
+            }
+        }
+        let mut st = serializer.serialize_struct("ParsedLine", 4)?;
+        st.serialize_field("raw_form_type", &self.raw_form_type)?;
+        st.serialize_field("table", &self.layout.table)?;
+        st.serialize_field("line_no", &self.line_no)?;
+        st.serialize_field("fields", &Fields(self))?;
+        st.end()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Filing
+// ---------------------------------------------------------------------------
+
 /// A fully parsed FEC electronic filing (`.fec` file).
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub struct Filing {
     /// The parsed `HDR` record (software name/version, report id, etc.).
-    pub headers: HeaderMap,
-    /// The filing's FEC spec version, e.g. `"8.5"` -- drives which
-    /// column-position bucket every line below is parsed with.
-    pub version: String,
-    /// The top-level form type exactly as filed, e.g. `"F3XA"`.
+    pub header: Header,
+    /// The filing's FEC spec version -- drives which column layout every
+    /// line below is parsed with. Same as `header.version`.
+    pub version: SpecVersion,
+    /// The top-level form type as filed, upper-cased, e.g. `"F3XA"`.
     pub raw_form_type: String,
     /// `raw_form_type` with any trailing amendment/new/termination
     /// designator stripped, e.g. `"F3X"`.
     pub base_form_type: String,
-    /// True if `raw_form_type` designates an amendment.
+    /// True if `raw_form_type` designates an amendment (ends in `A`).
     pub is_amendment: bool,
-    /// The filing number this filing amends, recovered from the header's
-    /// `report_id` (e.g. `"FEC-1234567"` -> `"1234567"`). Always `None`
-    /// when `is_amendment` is false.
-    pub amends_filing: Option<String>,
-    /// The parsed top-level summary/cover line (row 2 of the file). For a
-    /// Form 99, this is also where any `[BEGINTEXT]` block's content ends
-    /// up (spliced into the `text` field).
+    /// The filing number this filing amends, from the header's `report_id`
+    /// (`"FEC-1234567"` -> `1234567`). `None` when the header does not carry
+    /// a well-formed reference -- including on amendments, which the FEC's
+    /// own validator would reject (`hardmoney validate` reports it).
+    pub amends_filing: Option<u64>,
+    /// The cover/summary line (row 2 of the file). For a Form 99, this is
+    /// also where any `[BEGINTEXT]` block's content ends up (spliced into
+    /// the `text` field).
     pub summary: ParsedLine,
     /// Every subsequent body line (schedules, sub-forms, `TEXT` records),
     /// in file order.
@@ -150,81 +357,75 @@ pub struct Filing {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum OnUnparseableLine {
-    /// Fail the whole filing with the first error (the default).
+    /// Fail the whole parse with the first such error (the default).
     #[default]
     Fail,
-    /// Record the line in [`Lenient::skipped`] and continue.
+    /// Record it as a [`SkippedLine`] and keep going.
     Skip,
 }
 
-/// Options for [`Filing::parse_with`]. Construct with [`ParseOptions::default`]
-/// (identical to [`Filing::parse`]) or [`ParseOptions::lenient`].
+/// Controls how [`Filing::parse_with`] treats body lines it cannot parse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct ParseOptions {
-    /// A body line whose form-type token matches no format table.
+    /// A body line whose form-type token matches no known table.
     pub on_unknown_line: OnUnparseableLine,
-    /// A body line whose table has no layout for the filing's spec version.
+    /// A body line whose table has no column layout for this spec version.
     pub on_missing_version: OnUnparseableLine,
 }
 
 impl ParseOptions {
-    /// Strict: any unparseable body line fails the filing.
-    pub const STRICT: ParseOptions = ParseOptions {
+    /// Fail on anything unparseable (what [`Filing::parse`] uses).
+    pub const STRICT: Self = Self {
         on_unknown_line: OnUnparseableLine::Fail,
         on_missing_version: OnUnparseableLine::Fail,
     };
 
-    /// Lenient: unparseable body lines are skipped and reported.
-    pub const LENIENT: ParseOptions = ParseOptions {
+    /// Skip anything unparseable, recording it.
+    pub const LENIENT: Self = Self {
         on_unknown_line: OnUnparseableLine::Skip,
         on_missing_version: OnUnparseableLine::Skip,
     };
 
     /// Same as [`ParseOptions::LENIENT`].
-    pub fn lenient() -> Self {
+    #[must_use]
+    pub const fn lenient() -> Self {
         Self::LENIENT
     }
 
-    fn is_strict(&self) -> bool {
-        *self == Self::STRICT
+    const fn is_strict(&self) -> bool {
+        matches!(self.on_unknown_line, OnUnparseableLine::Fail)
+            && matches!(self.on_missing_version, OnUnparseableLine::Fail)
     }
 }
 
-/// Why a line was skipped under lenient parsing.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Why a body line was skipped under a lenient [`ParseOptions`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub enum SkipReason {
     /// The form-type token matched no dispatch pattern.
+    #[strum(serialize = "unknown form type")]
     UnknownFormType,
-    /// The table exists but has no layout for this spec version.
+    /// The table exists but has no layout for this filing's spec version.
+    #[strum(serialize = "no column layout for this spec version")]
     NoLayoutForVersion,
 }
 
-impl std::fmt::Display for SkipReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SkipReason::UnknownFormType => f.write_str("unknown form type"),
-            SkipReason::NoLayoutForVersion => f.write_str("no column layout for this spec version"),
-        }
-    }
-}
-
-/// A body line that could not be parsed and was skipped.
+/// A body line that a lenient parse could not interpret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct SkippedLine {
-    /// 1-based physical line number in the source file.
+    /// 1-based physical line number.
     pub line_no: u64,
-    /// The cleaned form-type token (column 0) of the skipped line.
+    /// The form-type token (column 0), upper-cased.
     pub raw_form_type: String,
     pub reason: SkipReason,
 }
 
-impl std::fmt::Display for SkippedLine {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for SkippedLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "line {}: '{}' skipped ({})",
@@ -233,15 +434,13 @@ impl std::fmt::Display for SkippedLine {
     }
 }
 
-/// The result of a lenient parse: a value plus the lines that were skipped
-/// to produce it.
+/// The result of a parse that may have skipped lines.
 ///
-/// This type is deliberately opaque. There is no `Deref` to `T` and no
-/// public fields: the only ways out are [`into_parts`](Self::into_parts)
-/// (which hands you the skipped lines alongside the value) and
-/// [`into_strict`](Self::into_strict) (which turns any skips into an
-/// error). You cannot accidentally forget that lines were dropped.
-#[must_use = "a Lenient<T> holds skipped-line information; call into_parts() or into_strict()"]
+/// This type is `#[must_use]` and has no `Deref` to the inner value on
+/// purpose: to get the [`Filing`] out you either acknowledge the skipped
+/// lines ([`into_parts`](Self::into_parts)) or assert there were none
+/// ([`into_strict`](Self::into_strict)). Data does not go missing silently.
+#[must_use = "a Lenient<T> may have skipped lines; call .into_parts() or .into_strict()"]
 #[derive(Debug)]
 pub struct Lenient<T> {
     value: T,
@@ -250,32 +449,35 @@ pub struct Lenient<T> {
 }
 
 impl<T> Lenient<T> {
-    /// Splits into the parsed value and the lines that were skipped.
+    /// The value together with every skipped line (possibly none).
     pub fn into_parts(self) -> (T, Vec<SkippedLine>) {
         (self.value, self.skipped)
     }
 
-    /// Returns the value only if nothing was skipped; otherwise
-    /// [`FecError::LinesSkipped`] carrying the count and first error.
+    /// The value, or [`FecError::LinesSkipped`] if anything was skipped
+    /// (carrying the first underlying error).
     pub fn into_strict(self) -> Result<T> {
-        match (self.skipped.len(), self.first_error) {
-            (0, _) => Ok(self.value),
-            (count, Some(first)) => Err(FecError::LinesSkipped { count, first }),
-            // Unreachable in practice: a skip always records its error.
-            (count, None) => Err(FecError::LinesSkipped {
-                count,
-                first: Box::new(FecError::MissingFormLine),
-            }),
+        if self.skipped.is_empty() {
+            return Ok(self.value);
         }
+        let first = self
+            .first_error
+            .unwrap_or_else(|| Box::new(FecError::MissingFormLine));
+        Err(FecError::LinesSkipped {
+            count: self.skipped.len(),
+            first,
+        })
     }
 
-    /// The skipped lines, without consuming the wrapper.
+    /// The skipped lines, without consuming.
+    #[must_use]
     pub fn skipped(&self) -> &[SkippedLine] {
         &self.skipped
     }
 
-    /// Borrow the value. Prefer [`into_parts`](Self::into_parts) -- this is
-    /// for inspection, and does not discharge the `#[must_use]`.
+    /// A reference to the value, without consuming. Prefer
+    /// [`into_parts`](Self::into_parts) so skipped lines are not forgotten.
+    #[must_use]
     pub fn value(&self) -> &T {
         &self.value
     }
@@ -307,7 +509,7 @@ impl Filing {
     /// With [`ParseOptions::STRICT`] the returned [`Lenient`] never has
     /// skipped lines. With [`ParseOptions::LENIENT`], unparseable body
     /// lines are recorded instead of failing the parse. Errors that are not
-    /// about a single body line (bad header, missing summary line,
+    /// about a single body line (bad header, missing cover line,
     /// unterminated `[BEGINTEXT]`) always fail.
     pub fn parse_with(content: &str, options: &ParseOptions) -> Result<Lenient<Filing>> {
         if content.starts_with("/*") {
@@ -345,16 +547,17 @@ impl Filing {
 
     /// Whether this filing's base form type is one this crate knows how to
     /// interpret end-to-end.
+    #[must_use]
     pub fn is_allowed(&self) -> bool {
         form::is_allowed_top_level_form(&self.base_form_type)
     }
 
     /// Iterates the body lines that belong to `table`.
     pub fn lines_for(&self, table: Table) -> impl Iterator<Item = &ParsedLine> + '_ {
-        self.lines.iter().filter(move |l| l.table == table)
+        self.lines.iter().filter(move |l| l.table() == table)
     }
 
-    /// Iterates the body lines of `V`'s table as typed views, skipping any
+    /// Iterates the body lines of `V`'s table as domain views, skipping any
     /// that fail conversion (which, for a line of the right table, only
     /// happens if a genuinely required field is blank).
     ///
@@ -371,6 +574,21 @@ impl Filing {
             .filter_map(|l| V::from_line(l).ok())
     }
 
+    /// The cover line as a compile-time-checked view of table `T`.
+    ///
+    /// ```
+    /// use hardmoney::parser::tables::{f3x, markers::F3X};
+    /// # use hardmoney::Filing;
+    /// # let text = "HDR\u{1c}FEC\u{1c}8.5\u{1c}X\u{1c}1\nF3XN\u{1c}C00123456";
+    /// # let filing = Filing::parse(text).unwrap();
+    /// if let Ok(cover) = filing.summary_as::<F3X>() {
+    ///     println!("{:?}", cover.money(f3x::COL_A_TOTAL_RECEIPTS));
+    /// }
+    /// ```
+    pub fn summary_as<T: TableMarker>(&self) -> std::result::Result<Typed<'_, T>, TypedViewError> {
+        self.summary.typed::<T>()
+    }
+
     fn parse_new_delimited(content: &str, options: &ParseOptions) -> Result<Lenient<Filing>> {
         // (line_no, raw text) pairs; line numbers are 1-based.
         let mut lines = content.lines().enumerate().map(|(i, l)| (i as u64 + 1, l));
@@ -380,7 +598,7 @@ impl Filing {
         let header_fields = split_new_delimited(header_raw);
         let summary_fields = split_new_delimited(summary_raw);
 
-        let mut parsed = Self::parse_headers_and_summary(&header_fields, &summary_fields)?;
+        let mut parsed = Self::parse_header_and_summary(&header_fields, &summary_fields)?;
         let mut acc = BodyAccumulator::new(options);
 
         while let Some((line_no, raw)) = lines.next() {
@@ -389,27 +607,27 @@ impl Filing {
             }
 
             if raw.trim().eq_ignore_ascii_case("[BEGINTEXT]") {
-                let mut collected: Vec<String> = Vec::new();
+                let mut collected: Vec<&str> = Vec::new();
                 let mut terminated = false;
                 for (_, text_raw) in lines.by_ref() {
                     if text_raw.trim().eq_ignore_ascii_case("[ENDTEXT]") {
                         terminated = true;
                         break;
                     }
-                    collected.push(utf8_clean(text_raw));
+                    collected.push(text_raw.trim_end_matches('\r'));
                 }
                 if !terminated {
                     return Err(FecError::UnterminatedTextBlock { line_no });
                 }
-                acc.attach_free_text(&mut parsed.summary, collected.join("\n"));
+                acc.attach_free_text(&mut parsed.summary, &collected.join("\n"));
                 continue;
             }
 
             let fields = split_new_delimited(raw);
-            if fields.iter().all(|f| f.is_empty()) {
+            if fields.iter().all(|f| f.trim().is_empty()) {
                 continue;
             }
-            acc.push_body_line(&fields, &parsed.version, line_no)?;
+            acc.push_body_line(&fields, parsed.version, line_no)?;
         }
 
         Ok(acc.finish(parsed))
@@ -430,10 +648,10 @@ impl Filing {
             .next()
             .transpose()?
             .ok_or(FecError::MissingFormLine)?;
-        let header_fields: Vec<String> = header_record.iter().map(utf8_clean).collect();
-        let summary_fields: Vec<String> = summary_record.iter().map(utf8_clean).collect();
+        let header_fields: Vec<&str> = header_record.iter().collect();
+        let summary_fields: Vec<&str> = summary_record.iter().collect();
 
-        let parsed = Self::parse_headers_and_summary(&header_fields, &summary_fields)?;
+        let parsed = Self::parse_header_and_summary(&header_fields, &summary_fields)?;
         let mut acc = BodyAccumulator::new(options);
 
         // Pre-6.0 filings (the only ones using the comma delimiter) predate
@@ -443,58 +661,41 @@ impl Filing {
             let record = record?;
             // csv reports the 1-based line of the record's first byte.
             let line_no = record.position().map(|p| p.line()).unwrap_or(0);
-            let fields: Vec<String> = record.iter().map(utf8_clean).collect();
+            let fields: Vec<&str> = record.iter().collect();
             if fields.iter().all(|f| f.trim().is_empty()) {
                 continue;
             }
-            acc.push_body_line(&fields, &parsed.version, line_no)?;
+            acc.push_body_line(&fields, parsed.version, line_no)?;
         }
 
         Ok(acc.finish(parsed))
     }
 
-    /// Shared header + summary-line parsing, common to both delimiter
+    /// Shared header + cover-line parsing, common to both delimiter
     /// styles. Returns a `Filing` with an empty `lines` vec -- callers fill
     /// that in afterward.
-    fn parse_headers_and_summary(
-        header_fields: &[String],
-        summary_fields: &[String],
-    ) -> Result<Filing> {
-        let headers = header::parse(header_fields, false)?;
-        let version = clean_entry(headers.get("fec_version").map(|s| s.as_str()).unwrap_or(""));
+    fn parse_header_and_summary(header_fields: &[&str], summary_fields: &[&str]) -> Result<Filing> {
+        let header = Header::from_fields(header_fields)?;
+        let version = header.version;
 
-        let raw_form_type = clean_entry(summary_fields.first().map(|s| s.as_str()).unwrap_or(""));
+        let raw_form_type = normalize_form_type(summary_fields.first().copied().unwrap_or(""));
         if raw_form_type.is_empty() {
             return Err(FecError::MissingFormLine);
         }
         let base_form_type = strip_ant_suffix(&raw_form_type);
-
-        // Amendment discovery: a form ending in 'A' is an amendment; the
-        // filing it amends is embedded in the header's report_id as
-        // "FEC-<original filing number>".
         let is_amendment = raw_form_type.ends_with('A');
-        let amends_filing = if is_amendment {
-            let report_id = headers.get("report_id").map(|s| s.as_str()).unwrap_or("");
-            let captured = AMENDS_RE
-                .as_ref()
-                .and_then(|re| re.captures(report_id))
-                .and_then(|c| c.get(1))
-                .map(|m| m.as_str().to_string());
-            Some(captured.ok_or_else(|| FecError::AmendmentOriginalNotFound {
-                report_id: report_id.to_string(),
-            })?)
-        } else {
-            None
-        };
+        let amends_filing = header.original_filing_id();
 
-        let (table, summary_parser) = form::dispatch(&raw_form_type).map_err(|e| e.at_line(2))?;
-        let summary_fields_map = summary_parser
-            .parse_line(summary_fields, &version)
-            .map_err(|e| e.at_line(2))?;
-        let summary = ParsedLine::new(raw_form_type.clone(), table, 2, summary_fields_map);
+        let table =
+            form::table_for_form_type(&raw_form_type).ok_or_else(|| FecError::ParserMissing {
+                form_type: raw_form_type.clone(),
+                version,
+                line_no: Some(2),
+            })?;
+        let summary = ParsedLine::from_cells(table, version, 2, summary_fields)?;
 
         Ok(Filing {
-            headers,
+            header,
             version,
             raw_form_type,
             base_form_type,
@@ -524,45 +725,47 @@ impl<'o> BodyAccumulator<'o> {
         }
     }
 
-    fn push_body_line(&mut self, fields: &[String], version: &str, line_no: u64) -> Result<()> {
-        let form_type = clean_entry(fields.first().map(String::as_str).unwrap_or(""));
+    fn push_body_line(
+        &mut self,
+        fields: &[&str],
+        version: SpecVersion,
+        line_no: u64,
+    ) -> Result<()> {
+        let form_type = normalize_form_type(fields.first().copied().unwrap_or(""));
         if form_type.is_empty() {
-            // Tolerant blank-line skipping, as pyfec did.
+            // A line whose first column is blank carries no record type;
+            // treat it like a blank line.
             return Ok(());
         }
 
-        let (table, parser) = match form::table_for_form_type(&form_type) {
-            Some(table) => (table, form::line_parser(table)?),
-            None => {
-                let err = FecError::ParserMissing {
-                    form_type: form_type.clone(),
-                    version: version.to_string(),
-                    line_no: Some(line_no),
-                };
-                return self.skip_or_fail(
-                    self.options.on_unknown_line,
-                    err,
-                    line_no,
-                    form_type,
-                    SkipReason::UnknownFormType,
-                );
-            }
+        let Some(table) = form::table_for_form_type(&form_type) else {
+            let err = FecError::ParserMissing {
+                form_type: form_type.clone(),
+                version,
+                line_no: Some(line_no),
+            };
+            return self.skip_or_fail(
+                self.options.on_unknown_line,
+                err,
+                line_no,
+                form_type,
+                SkipReason::UnknownFormType,
+            );
         };
 
-        match parser.parse_line(fields, version) {
+        match ParsedLine::from_cells(table, version, line_no, fields) {
             Ok(parsed) => {
-                self.lines
-                    .push(ParsedLine::new(form_type, table, line_no, parsed));
+                self.lines.push(parsed);
                 Ok(())
             }
             Err(e @ FecError::NoMatchingVersionBucket { .. }) => self.skip_or_fail(
                 self.options.on_missing_version,
-                e.at_line(line_no),
+                e,
                 line_no,
                 form_type,
                 SkipReason::NoLayoutForVersion,
             ),
-            Err(e) => Err(e.at_line(line_no)),
+            Err(e) => Err(e),
         }
     }
 
@@ -592,12 +795,12 @@ impl<'o> BodyAccumulator<'o> {
 
     /// Splices a slurped `[BEGINTEXT]...[ENDTEXT]` block into whichever
     /// record precedes it: the most recent body line if any, else the
-    /// top-level summary line (the common case -- Form 99's own free text).
-    fn attach_free_text(&mut self, summary: &mut ParsedLine, text: String) {
-        match self.lines.last_mut() {
-            Some(line) => line.fields.insert("text".to_string(), text),
-            None => summary.fields.insert("text".to_string(), text),
-        };
+    /// cover line (the common case -- Form 99's own free text). A record
+    /// whose layout has no `text` field cannot carry it; the block is then
+    /// dropped, which `hardmoney validate` reports.
+    fn attach_free_text(&mut self, summary: &mut ParsedLine, text: &str) {
+        let target = self.lines.last_mut().unwrap_or(summary);
+        let _ = target.set("text", text);
     }
 
     fn finish(self, mut filing: Filing) -> Lenient<Filing> {
@@ -612,6 +815,7 @@ impl<'o> BodyAccumulator<'o> {
 }
 
 /// Decodes raw filing bytes: UTF-8 if valid, else Windows-1252.
+#[must_use]
 pub fn decode(bytes: &[u8]) -> String {
     match std::str::from_utf8(bytes) {
         Ok(s) => s.to_string(),
@@ -622,27 +826,28 @@ pub fn decode(bytes: &[u8]) -> String {
     }
 }
 
-/// Splits one already-utf8-decoded raw line on the ASCII-28 delimiter,
-/// applying `utf8_clean` to each field.
-pub fn split_new_delimited(raw: &str) -> Vec<String> {
-    raw.trim_end_matches('\r')
-        .split(NEW_DELIMITER)
-        .map(utf8_clean)
-        .collect()
+/// Splits one already-decoded raw line on the ASCII-28 delimiter. A
+/// trailing `\r` (CRLF line ending) is dropped; fields are otherwise
+/// returned exactly as filed -- per-field trimming happens in
+/// [`ParsedLine::from_cells`].
+#[must_use]
+pub fn split_new_delimited(raw: &str) -> Vec<&str> {
+    raw.trim_end_matches('\r').split(NEW_DELIMITER).collect()
 }
 
-/// Strips a trailing amendment/new/termination designator by finding the
-/// *first* occurrence of `A`, `N`, `T` (or a literal `|`, per the Python
-/// character-class-vs-alternation quirk noted in `form.rs`) and returning
-/// everything before it. Returns the input unchanged if none of those
-/// characters appear at all (e.g. `"F99"`, `"F5"`).
+/// Strips a trailing amendment (`A`), new (`N`), or termination (`T`)
+/// designator from a top-level form-type token, returning the upper-cased
+/// base form: `"F3XA"` -> `"F3X"`, `"F1MN"` -> `"F1M"`, `"F99"` -> `"F99"`.
+///
+/// Only a *trailing* designator is stripped, and only when what remains
+/// still looks like a form (`F…`), so `"TEXT"` is never mangled.
+#[must_use]
 pub fn strip_ant_suffix(raw_form_type: &str) -> String {
-    for (i, ch) in raw_form_type.char_indices() {
-        if matches!(ch, 'A' | 'N' | 'T' | '|') {
-            return raw_form_type[..i].to_string();
-        }
+    let token = raw_form_type.trim().to_ascii_uppercase();
+    match token.strip_suffix(['A', 'N', 'T']) {
+        Some(base) if !base.is_empty() && base.starts_with('F') => base.to_string(),
+        _ => token,
     }
-    raw_form_type.to_string()
 }
 
 #[cfg(test)]
@@ -658,13 +863,27 @@ mod tests {
         .join("\n")
     }
 
+    /// Builds a delimited line for `table` at 8.5 with the given fields.
+    fn line_85(table: Table, pairs: &[(&str, &str)]) -> String {
+        ParsedLine::from_pairs(
+            table,
+            SpecVersion::electronic(8, 5),
+            0,
+            pairs.iter().copied(),
+        )
+        .unwrap()
+        .to_cells()
+        .join(&NEW_DELIMITER.to_string())
+    }
+
     #[test]
     fn parses_header_and_summary() {
         let filing = Filing::parse(&new_delim_sample()).unwrap();
-        assert_eq!(filing.version, "8.5");
+        assert_eq!(filing.version, SpecVersion::electronic(8, 5));
+        assert_eq!(filing.header.soft_name, "FECfile");
         assert_eq!(filing.raw_form_type, "F3XN");
         assert_eq!(filing.base_form_type, "F3X");
-        assert_eq!(filing.summary.table, Table::F3X);
+        assert_eq!(filing.summary.table(), Table::F3X);
         assert_eq!(filing.summary.line_no, 2);
         assert!(!filing.is_amendment);
         assert!(filing.amends_filing.is_none());
@@ -675,7 +894,7 @@ mod tests {
     fn dispatches_body_lines_with_line_numbers() {
         let filing = Filing::parse(&new_delim_sample()).unwrap();
         assert_eq!(filing.lines.len(), 1);
-        assert_eq!(filing.lines[0].table, Table::SchA);
+        assert_eq!(filing.lines[0].table(), Table::SchA);
         assert_eq!(filing.lines[0].raw_form_type, "SA11AI");
         assert_eq!(filing.lines[0].line_no, 3);
     }
@@ -689,20 +908,22 @@ mod tests {
         .join("\n");
         let filing = Filing::parse(&content).unwrap();
         assert!(filing.is_amendment);
-        assert_eq!(filing.amends_filing.as_deref(), Some("1234567"));
+        assert_eq!(filing.amends_filing, Some(1_234_567));
+        assert_eq!(filing.header.amendment_number(), Some(1));
     }
 
     #[test]
-    fn amendment_without_report_id_errors() {
+    fn amendment_without_report_id_parses_with_none() {
+        // The FEC's validator rejects this; the parser does not -- see
+        // `hardmoney validate`.
         let content = [
             "HDR\u{1c}FEC\u{1c}8.5\u{1c}FECfile\u{1c}8.5.1.0(f34)\u{1c}\u{1c}",
             "F3XA\u{1c}C00123456\u{1c}COMMITTEE NAME",
         ]
         .join("\n");
-        assert!(matches!(
-            Filing::parse(&content),
-            Err(FecError::AmendmentOriginalNotFound { .. })
-        ));
+        let filing = Filing::parse(&content).unwrap();
+        assert!(filing.is_amendment);
+        assert_eq!(filing.amends_filing, None);
     }
 
     #[test]
@@ -740,10 +961,14 @@ mod tests {
 
     #[test]
     fn old_delimiter_comma_filing_parses() {
-        let content = "HDR,FEC,5.3,SoftCo,1.0\nF3XN,C00123456,COMMITTEE NAME\n";
+        let content = "HDR,FEC,5.3,SoftCo,1.0\nF3XN,C00123456,\"COMMITTEE, INC.\"\n";
         let filing = Filing::parse(content).unwrap();
-        assert_eq!(filing.version, "5.3");
+        assert_eq!(filing.version, SpecVersion::electronic(5, 3));
         assert_eq!(filing.raw_form_type, "F3XN");
+        assert_eq!(
+            filing.summary.get("committee_name"),
+            Some("COMMITTEE, INC.")
+        );
     }
 
     #[test]
@@ -758,6 +983,7 @@ mod tests {
             "HDR\u{1c}FEC\u{1c}8.5",
             "HDR,FEC,5.3\n",
             "\u{1c}\u{1c}\u{1c}\n\n",
+            "HDR\u{1c}FEC\u{1c}8.5\n\u{1c}\u{1c}",
         ] {
             assert!(Filing::parse(input).is_err(), "{input:?}");
         }
@@ -773,7 +999,7 @@ mod tests {
                 line_no,
             }) => {
                 assert_eq!(form_type, "ZZZ");
-                assert_eq!(version, "8.5");
+                assert_eq!(version, SpecVersion::electronic(8, 5));
                 assert_eq!(line_no, Some(4));
             }
             other => panic!("expected ParserMissing, got {other:?}"),
@@ -790,11 +1016,15 @@ mod tests {
             .unwrap()
             .into_parts();
         assert_eq!(filing.lines.len(), 2);
-        assert_eq!(filing.lines[1].table, Table::SchB);
+        assert_eq!(filing.lines[1].table(), Table::SchB);
         assert_eq!(skipped.len(), 1);
         assert_eq!(skipped[0].line_no, 4);
         assert_eq!(skipped[0].raw_form_type, "ZZZ");
         assert_eq!(skipped[0].reason, SkipReason::UnknownFormType);
+        assert_eq!(
+            skipped[0].to_string(),
+            "line 4: 'ZZZ' skipped (unknown form type)"
+        );
     }
 
     #[test]
@@ -833,7 +1063,7 @@ mod tests {
         assert!(matches!(
             Filing::parse(&content),
             Err(FecError::NoMatchingVersionBucket {
-                table: "SchI",
+                table: Table::SchI,
                 line_no: Some(3),
                 ..
             })
@@ -862,14 +1092,163 @@ mod tests {
     }
 
     #[test]
-    fn strip_ant_suffix_matches_pyfec_semantics() {
+    fn strip_ant_suffix_strips_only_a_trailing_designator() {
         assert_eq!(strip_ant_suffix("F3XN"), "F3X");
         assert_eq!(strip_ant_suffix("F3A"), "F3");
+        assert_eq!(strip_ant_suffix("F3T"), "F3");
         assert_eq!(strip_ant_suffix("F24N"), "F24");
         assert_eq!(strip_ant_suffix("F99"), "F99");
         assert_eq!(strip_ant_suffix("F5"), "F5");
+        assert_eq!(strip_ant_suffix("F5N"), "F5");
         assert_eq!(strip_ant_suffix("F13N"), "F13");
         assert_eq!(strip_ant_suffix("F1MN"), "F1M");
+        assert_eq!(strip_ant_suffix("F1M"), "F1M");
         assert_eq!(strip_ant_suffix("F2A"), "F2");
+        assert_eq!(strip_ant_suffix("f3xa"), "F3X");
+        assert_eq!(strip_ant_suffix("TEXT"), "TEXT");
+        assert_eq!(strip_ant_suffix("A"), "A");
+        assert_eq!(strip_ant_suffix(""), "");
+    }
+
+    #[test]
+    fn field_values_are_preserved_verbatim_except_trimming() {
+        let sb = line_85(
+            Table::SchB,
+            &[
+                ("form_type", "sb21b"),
+                ("filer_committee_id_number", "C00123456"),
+                ("payee_organization_name", "  Vendor, Inc.  "),
+            ],
+        );
+        let content = [
+            "HDR\u{1c}FEC\u{1c}8.5\u{1c}FECfile\u{1c}8.5.1.0(f34)\u{1c}\u{1c}".to_string(),
+            "F3XN\u{1c}C00123456\u{1c}  Friends of AT&T <PAC> \"Official\" \\ a|b  ".to_string(),
+            sb,
+        ]
+        .join("\r\n");
+        let filing = Filing::parse(&content).unwrap();
+        assert_eq!(filing.header.soft_name, "FECfile");
+        assert_eq!(
+            filing.summary.get("committee_name"),
+            Some("Friends of AT&T <PAC> \"Official\" \\ a|b")
+        );
+        // Tokens are normalised for dispatch, but the field keeps the
+        // as-filed spelling.
+        assert_eq!(filing.lines[0].raw_form_type, "SB21B");
+        assert_eq!(filing.lines[0].get("form_type"), Some("sb21b"));
+        assert_eq!(
+            filing.lines[0].get("payee_organization_name"),
+            Some("Vendor, Inc.")
+        );
+    }
+
+    #[test]
+    fn get_distinguishes_blank_from_absent() {
+        let filing = Filing::parse(&new_delim_sample()).unwrap();
+        let sa = &filing.lines[0];
+        assert_eq!(sa.get("contribution_amount"), Some(""));
+        assert_eq!(sa.get_non_empty("contribution_amount"), None);
+        assert_eq!(sa.get("no_such_field"), None);
+        assert_eq!(sa.iter().len(), sa.layout().fields.len());
+    }
+
+    #[test]
+    fn set_rejects_unknown_fields_and_tracks_form_type() {
+        let mut line = ParsedLine::from_pairs(
+            Table::SchA,
+            SpecVersion::electronic(8, 5),
+            0,
+            [("contribution_amount", " 12.50 ")],
+        )
+        .unwrap();
+        assert_eq!(line.raw_form_type, "SCHA");
+        assert_eq!(line.get("contribution_amount"), Some("12.50"));
+        line.set("form_type", "sa11ai").unwrap();
+        assert_eq!(line.raw_form_type, "SA11AI");
+        assert!(matches!(
+            line.set("bogus", "x"),
+            Err(FecError::UnknownField { table: Table::SchA, field }) if field == "bogus"
+        ));
+        assert!(ParsedLine::from_pairs(Table::SchI, SpecVersion::electronic(8, 5), 0, []).is_err());
+    }
+
+    #[test]
+    fn to_cells_places_fields_at_layout_columns() {
+        let line = ParsedLine::from_pairs(
+            Table::SchA,
+            SpecVersion::electronic(8, 5),
+            0,
+            [("form_type", "SA11AI"), ("memo_code", "X")],
+        )
+        .unwrap();
+        let cells = line.to_cells();
+        let layout = Table::SchA.layout(SpecVersion::electronic(8, 5)).unwrap();
+        assert_eq!(cells.len(), usize::from(layout.width));
+        assert_eq!(cells[0], "SA11AI");
+        let memo_col = usize::from(layout.field("memo_code").unwrap().column);
+        assert_eq!(cells[memo_col], "X");
+        assert!(
+            cells
+                .iter()
+                .enumerate()
+                .all(|(i, c)| c.is_empty() || i == 0 || i == memo_col)
+        );
+    }
+
+    #[test]
+    fn is_memo_is_case_insensitive_and_table_aware() {
+        let sa = line_85(
+            Table::SchA,
+            &[
+                ("form_type", "SA11AI"),
+                ("filer_committee_id_number", "C1"),
+                ("memo_code", "x"),
+            ],
+        );
+        let content = format!("{}\n{sa}", new_delim_sample());
+        let filing = Filing::parse(&content).unwrap();
+        assert!(!filing.lines[0].is_memo());
+        assert!(filing.lines[1].is_memo(), "{:?}", filing.lines[1]);
+        assert!(!filing.summary.is_memo());
+    }
+
+    #[test]
+    fn typed_view_checks_table_once_then_fields_at_compile_time() {
+        use crate::parser::tables::{f3x, markers::F3X, markers::SchA, sch_a};
+        let filing = Filing::parse(&new_delim_sample()).unwrap();
+        let cover = filing.summary_as::<F3X>().unwrap();
+        assert_eq!(cover.get(f3x::FILER_COMMITTEE_ID_NUMBER), Some("C00123456"));
+        assert_eq!(cover.money(f3x::COL_A_TOTAL_RECEIPTS), None);
+        assert!(matches!(
+            filing.summary.typed::<SchA>(),
+            Err(TypedViewError::WrongTable {
+                expected: Table::SchA,
+                found: Table::F3X,
+                line_no: 2
+            })
+        ));
+        let a = filing.lines[0].typed::<SchA>().unwrap();
+        assert_eq!(a.get(sch_a::FILER_COMMITTEE_ID_NUMBER), Some("C00123456"));
+        assert_eq!(a.get(sch_a::CONTRIBUTION_AMOUNT), None);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serializes_fields_as_a_map_in_layout_order() {
+        let filing = Filing::parse(&new_delim_sample()).unwrap();
+        let v = serde_json::to_value(&filing.lines[0]).unwrap();
+        assert_eq!(v["table"], "SchA");
+        assert_eq!(v["line_no"], 3);
+        // `new_delim_sample` puts "IND" in column 2, which is
+        // `transaction_id` at 8.5.
+        assert_eq!(v["fields"]["transaction_id"], "IND");
+        assert_eq!(v["fields"]["contribution_amount"], "");
+        let keys: Vec<&str> = v["fields"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys[0], "form_type");
     }
 }

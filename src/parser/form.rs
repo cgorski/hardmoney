@@ -1,41 +1,34 @@
 //! Dispatch from a raw line's `form_type` token (column 0, e.g. `"SA11AI"`,
-//! `"F3XN"`, `"SC/10"`) to the [`Table`] whose format table parses it, and
-//! the registry of compiled [`Line`] parsers.
+//! `"F3XN"`, `"SC/10"`) to the [`Table`] whose format table parses it.
 //!
-//! Two independent regex layers are involved (do not confuse them):
+//! Two independent lookups are involved (do not confuse them):
 //!   1. Here: `form_type` token -> [`Table`] (e.g. "SA11AI" -> `Table::SchA`).
-//!   2. In `line.rs`: `fec_version` string -> column-position bucket within
-//!      that table.
+//!   2. [`Table::layout`]: spec version -> column layout within that table.
 //!
-//! The first 41 dispatch entries are nyt-pyfec's `regex_tuple`, in its
-//! original order (order is load-bearing: several patterns are prefixes of
-//! each other). The remaining entries cover tables pyfec bundled but never
-//! dispatched to -- Form 1/1M/1S/2/2S (registrations), Form 3Z/3Z1/3Z2 and
-//! 3P31/3PZ1/3PZ2 (consolidated candidate-committee sub-forms), Form 8/8II/
-//! 8III and 10/10.5 (historical), and Schedule I (Levin funds). Before they
-//! were added, every Form 1/2 filing on the FEC's live feed (~26% of daily
-//! volume) failed to parse.
+//! Order is load-bearing: several patterns are prefixes of each other, and
+//! the first match wins. The entries cover every bundled table, including
+//! Form 1/1M/1S/2/2S (registrations), Form 3Z/3Z1/3Z2 and 3P31/3PZ1/3PZ2
+//! (consolidated candidate-committee sub-forms), Form 8/8II/8III and
+//! 10/10.5 (historical), and Schedule I (Levin funds). Before the
+//! registration forms were added, every Form 1/2 filing on the FEC's live
+//! feed (~26% of daily volume) failed to parse.
 
 use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::parser::error::{FecError, Result};
-use crate::parser::format_data::Table;
-use crate::parser::line::Line;
+use crate::parser::tables::Table;
 
 /// Top-level filing form types this crate processes end-to-end. These are
 /// the forms that can appear on a filing's *summary* (second) line; body
 /// lines (schedules, sub-forms, `TEXT` records) are dispatched separately.
 ///
-/// pyfec's `allowed_forms` covered only the periodic/notice reports; the
-/// registration and administrative forms (F1, F1M, F2, F8, F10) were added
-/// once their dispatch entries existed.
 pub static ALLOWED_TOP_LEVEL_FORMS: &[&str] = &[
     "F3", "F3X", "F3P", "F9", "F5", "F24", "F6", "F7", "F4", "F3L", "F13", "F99", "F1", "F1M",
     "F2", "F8", "F10",
 ];
 
+#[must_use]
 pub fn is_allowed_top_level_form(base_form: &str) -> bool {
     ALLOWED_TOP_LEVEL_FORMS.contains(&base_form.to_uppercase().as_str())
 }
@@ -43,12 +36,8 @@ pub fn is_allowed_top_level_form(base_form: &str) -> bool {
 /// `(form_type_regex, table)` pairs, tried in order; the first match wins.
 ///
 /// Every pattern is compiled as `(?i)^(?:{pattern})` -- case-insensitive
-/// (pyfec used `re.I`; real filings contain e.g. `SB21b`) and start-anchored,
-/// with alternations safely grouped.
-///
-/// Note on pyfec's `[A|N|T]`: in Python that is a *character class* where
-/// `|` is a literal, so it matches one of `A`, `|`, `N`, `T`. A literal pipe
-/// never appears in a real form_type, so `[ANT]` is equivalent.
+/// (real filings contain e.g. `SB21b`) and start-anchored, with
+/// alternations safely grouped.
 static DISPATCH_ORDER: &[(&str, Table)] = &[
     (r"SA3L", Table::SchA3L),
     (r"SA", Table::SchA),
@@ -145,44 +134,14 @@ static DISPATCH: LazyLock<Vec<CompiledDispatch>> = LazyLock::new(|| {
         .collect()
 });
 
-/// One compiled [`Line`] per [`Table`], indexed by [`Table::index`]. A table
-/// whose bundled CSV fails to parse is stored as `Err` (surfaced as
-/// [`FecError::UnknownForm`] at use) rather than panicking; the
-/// `format_table_integrity` tests fail loudly in that case.
-static TABLES: LazyLock<Vec<std::result::Result<Line, String>>> = LazyLock::new(|| {
-    Table::ALL
-        .iter()
-        .map(|&t| Line::for_table(t).map_err(|e| e.to_string()))
-        .collect()
-});
-
 /// Finds which [`Table`] a raw `form_type` token (column 0 of a line, e.g.
 /// `"SA11AI"`) should be parsed with.
+#[must_use]
 pub fn table_for_form_type(form_type: &str) -> Option<Table> {
     DISPATCH
         .iter()
-        .find(|d| d.regex.is_match(form_type))
+        .find(|d| d.regex.is_match(form_type.trim()))
         .map(|d| d.table)
-}
-
-/// The compiled column-position parser for `table`.
-pub fn line_parser(table: Table) -> Result<&'static Line> {
-    match TABLES.get(table.index()) {
-        Some(Ok(line)) => Ok(line),
-        Some(Err(_)) | None => Err(FecError::UnknownForm {
-            form: table.as_str().to_string(),
-        }),
-    }
-}
-
-/// Resolves a raw `form_type` token to its table and parser in one step.
-pub fn dispatch(form_type: &str) -> Result<(Table, &'static Line)> {
-    let table = table_for_form_type(form_type).ok_or_else(|| FecError::ParserMissing {
-        form_type: form_type.to_string(),
-        version: String::new(),
-        line_no: None,
-    })?;
-    Ok((table, line_parser(table)?))
 }
 
 #[cfg(test)]
@@ -192,17 +151,6 @@ mod tests {
     #[test]
     fn every_dispatch_pattern_compiles() {
         assert_eq!(DISPATCH.len(), DISPATCH_ORDER.len());
-    }
-
-    #[test]
-    fn every_bundled_table_builds() {
-        for (t, built) in Table::ALL.iter().zip(TABLES.iter()) {
-            assert!(
-                built.is_ok(),
-                "{t}: {}",
-                built.as_ref().err().unwrap_or(&String::new())
-            );
-        }
     }
 
     #[test]
@@ -284,12 +232,9 @@ mod tests {
     }
 
     #[test]
-    fn unknown_form_type_errors() {
+    fn unknown_form_type_is_none() {
         assert_eq!(table_for_form_type("ZZZ"), None);
-        assert!(matches!(
-            dispatch("ZZZ"),
-            Err(FecError::ParserMissing { form_type, .. }) if form_type == "ZZZ"
-        ));
+        assert_eq!(table_for_form_type(""), None);
     }
 
     #[test]

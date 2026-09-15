@@ -1,23 +1,24 @@
-//! Ergonomic typed views over the highest-value schedules and forms, built
-//! on top of the stringly-typed [`ParsedLine`] output.
+//! Domain views over the highest-value schedules and forms, built on the
+//! compile-time-checked [`Typed`] layer.
 //!
-//! The raw layer hands back `IndexMap<String, String>`, which is faithful to
-//! the wire format but tedious and error-prone to consume -- every caller
-//! has to remember field names, re-parse dates and money by hand, and
-//! re-derive things like "is this an individual or a committee contributor"
-//! from raw entity-type codes. The [`TypedView`] trait and its
-//! implementations here do that once, correctly.
+//! The raw layer hands back trimmed strings by field name, which is
+//! faithful to the wire format but tedious to consume -- every caller has
+//! to re-parse dates and money and re-derive things like "is this an
+//! individual or a committee contributor" from raw entity-type codes. The
+//! [`TypedView`] trait and its implementations here do that once, correctly.
 //!
 //! # Table safety
 //!
-//! Every typed view declares which [`Table`] it reads. [`TypedView::from_line`]
-//! (reached via [`ParsedLine::view`] and [`Filing::views`](crate::Filing::views))
-//! refuses a line from any other table with [`TypedViewError::WrongTable`].
-//! Without that check, a table-blind `ScheduleE` conversion would happily
-//! "succeed" on a Schedule A line --
-//! every schedule carries `filer_committee_id_number` -- and produce an
-//! all-`None` phantom expenditure. That misfiling was observed on 587 of
-//! 587 non-Schedule-E lines of a real F3A before this guard existed.
+//! Every view declares its table through an associated [`TableMarker`].
+//! [`TypedView::from_line`] (reached via [`ParsedLine::view`] and
+//! [`Filing::views`](crate::Filing::views)) refuses a line from any other
+//! table with [`TypedViewError::WrongTable`], and *inside* a view the field
+//! constants are checked against that table by the compiler. Without the
+//! runtime check, a table-blind `ScheduleE` conversion would happily
+//! "succeed" on a Schedule A line -- every schedule carries
+//! `filer_committee_id_number` -- and produce an all-`None` phantom
+//! expenditure. That misfiling was observed on 587 of 587 non-Schedule-E
+//! lines of a real F3A before this guard existed.
 //!
 //! # Money
 //!
@@ -29,11 +30,12 @@
 //! at any layer.
 
 use chrono::NaiveDate;
-use indexmap::IndexMap;
 use rust_decimal::Decimal;
 
 use crate::parser::filing::ParsedLine;
-use crate::parser::format_data::Table;
+use crate::parser::schema::{Field, TableMarker, Typed};
+use crate::parser::tables::markers::{F3X, SchA, SchB, SchE};
+use crate::parser::tables::{Table, f3x, sch_a, sch_b, sch_e};
 
 /// Parses an FEC amount field (e.g. `"1000"`, `"250.50"`, `"-75"`) into an
 /// exact [`Decimal`] with scale 2. Returns `None` for blank or unparseable
@@ -48,6 +50,7 @@ use crate::parser::format_data::Table;
 /// The parse itself never goes through `f64`: the validated digits are
 /// assembled directly into a scaled integer and handed to
 /// [`Decimal::new`], which represents `value * 10^-scale` exactly.
+#[must_use]
 pub fn parse_money(raw: &str) -> Option<Decimal> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -56,14 +59,18 @@ pub fn parse_money(raw: &str) -> Option<Decimal> {
 
     let negative = trimmed.starts_with('-');
     let unsigned = trimmed.trim_start_matches(['+', '-']);
+    if unsigned.len() + 1 < trimmed.len() {
+        // More than one sign character.
+        return None;
+    }
 
     let (whole, frac) = match unsigned.split_once('.') {
         Some((w, f)) => (w, f),
         None => (unsigned, ""),
     };
     if frac.len() > 2
-        || !whole.chars().all(|c| c.is_ascii_digit())
-        || !frac.chars().all(|c| c.is_ascii_digit())
+        || !whole.bytes().all(|c| c.is_ascii_digit())
+        || !frac.bytes().all(|c| c.is_ascii_digit())
     {
         return None;
     }
@@ -95,6 +102,7 @@ pub fn parse_money(raw: &str) -> Option<Decimal> {
 /// [`NaiveDate`]. Returns `None` for blank, all-zero, or unparseable input
 /// -- FEC filings routinely leave optional dates blank or zero-filled
 /// rather than omitting the column.
+#[must_use]
 pub fn parse_fec_date(raw: &str) -> Option<NaiveDate> {
     let trimmed = raw.trim();
     if trimmed.len() != 8
@@ -142,103 +150,77 @@ impl TypedViewError {
     }
 }
 
-/// A strongly-typed view over the fields of one [`Table`].
+/// A domain view over the fields of one [`Table`].
 ///
-/// Implementors declare their table and how to build themselves from a
-/// field map; [`from_line`](Self::from_line) adds the table check and
-/// line-number context. Use [`ParsedLine::view`] or [`Filing::views`](crate::Filing::views)
-/// rather than calling these directly.
+/// Implementors name their table via [`TypedView::Marker`] and build
+/// themselves from a [`Typed`] view whose field access is checked against
+/// that table at compile time. Use [`ParsedLine::view`] or
+/// [`Filing::views`](crate::Filing::views) rather than calling these directly.
 pub trait TypedView: Sized {
-    /// The format table this view reads.
-    const TABLE: Table;
+    /// The marker type of the table this view reads.
+    type Marker: TableMarker;
 
-    /// Builds the view from a field map assumed to come from
-    /// [`Self::TABLE`]. Missing optional fields become `None`; only a
-    /// genuinely required field (the filer id) is an error.
-    fn from_fields(fields: &IndexMap<String, String>) -> Result<Self, TypedViewError>;
+    /// The table this view reads.
+    const TABLE: Table = <Self::Marker as TableMarker>::TABLE;
+
+    /// Builds the view from a table-checked line. Missing optional fields
+    /// become `None`; only a genuinely required field (the filer id) is an
+    /// error.
+    fn from_typed(line: Typed<'_, Self::Marker>) -> Result<Self, TypedViewError>;
 
     /// Builds the view from a parsed line, refusing lines from other tables.
     fn from_line(line: &ParsedLine) -> Result<Self, TypedViewError> {
-        if line.table != Self::TABLE {
-            return Err(TypedViewError::WrongTable {
-                expected: Self::TABLE,
-                found: line.table,
-                line_no: line.line_no,
-            });
-        }
-        Self::from_fields(&line.fields).map_err(|e| e.with_line(line.line_no))
+        let typed = line.typed::<Self::Marker>()?;
+        Self::from_typed(typed).map_err(|e| e.with_line(line.line_no))
     }
 }
 
-/// Non-empty string field, or `None`.
-fn opt(fields: &IndexMap<String, String>, name: &str) -> Option<String> {
-    fields
-        .get(name)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-}
-
 /// Required non-empty string field.
-fn req(
-    fields: &IndexMap<String, String>,
-    table: Table,
-    name: &'static str,
-) -> Result<String, TypedViewError> {
-    opt(fields, name).ok_or(TypedViewError::MissingField {
-        table,
-        field: name,
+fn req<T: TableMarker>(line: Typed<'_, T>, field: Field<T>) -> Result<String, TypedViewError> {
+    line.string(field).ok_or(TypedViewError::MissingField {
+        table: T::TABLE,
+        field: field.name(),
         line_no: None,
     })
 }
 
-fn date(fields: &IndexMap<String, String>, name: &str) -> Option<NaiveDate> {
-    fields.get(name).and_then(|s| parse_fec_date(s))
-}
-
-fn money(fields: &IndexMap<String, String>, name: &str) -> Option<Decimal> {
-    fields.get(name).and_then(|s| parse_money(s))
-}
-
-/// Field names for the name-shaped columns a schedule/form may use --
-/// see [`combined_name`] for why both shapes need to be checked. Pass
-/// `""` for `organization` on schedules that have no such column (e.g. a
-/// Schedule E candidate, who is always an individual).
-struct NameFields {
-    single: &'static str,
-    organization: &'static str,
-    prefix: &'static str,
-    first: &'static str,
-    middle: &'static str,
-    last: &'static str,
-    suffix: &'static str,
+/// The name-shaped columns a schedule may use -- see [`combined_name`] for
+/// why both shapes need to be checked. `organization` is `None` for
+/// schedules with no such column (e.g. a Schedule E candidate, who is
+/// always an individual).
+struct NameFields<T: TableMarker> {
+    single: Field<T>,
+    organization: Option<Field<T>>,
+    prefix: Field<T>,
+    first: Field<T>,
+    middle: Field<T>,
+    last: Field<T>,
+    suffix: Field<T>,
 }
 
 /// Resolves a display name from the fields FEC uses across spec versions.
 ///
-/// Older spec versions (roughly pre-8.0) report a single pre-joined name
-/// field (e.g. `contributor_name`, `payee_name`, `candidate_name`).
-/// Current spec versions (8.0 and later, which is what real-world filings
-/// use today) drop that combined field entirely and instead split the name
-/// into `*_organization_name` (for a committee/business payee or
-/// contributor) or `*_prefix`/`*_first_name`/`*_middle_name`/`*_last_name`/
-/// `*_suffix` (for a person). Without this fallback, every typed-view name
-/// field would be `None` for virtually all present-day filings even though
-/// the name is right there in the raw line.
-fn combined_name(fields: &IndexMap<String, String>, f: NameFields) -> Option<String> {
-    if let Some(name) = opt(fields, f.single) {
+/// Spec 5.x and older report a single pre-joined name field (e.g.
+/// `contributor_name`, `payee_name`, `candidate_name`). From 6.1 the FEC
+/// dropped that combined field and split the name into
+/// `*_organization_name` (for a committee/business payee or contributor)
+/// or `*_prefix`/`*_first_name`/`*_middle_name`/`*_last_name`/`*_suffix`
+/// (for a person). Without this fallback, every typed-view name field would
+/// be `None` for virtually all present-day filings even though the name is
+/// right there in the raw line.
+fn combined_name<T: TableMarker>(line: Typed<'_, T>, f: &NameFields<T>) -> Option<String> {
+    if let Some(name) = line.string(f.single) {
         return Some(name);
     }
-    if !f.organization.is_empty()
-        && let Some(org) = opt(fields, f.organization)
-    {
+    if let Some(org) = f.organization.and_then(|o| line.string(o)) {
         return Some(org);
     }
     let parts = [
-        opt(fields, f.prefix),
-        opt(fields, f.first),
-        opt(fields, f.middle),
-        opt(fields, f.last),
-        opt(fields, f.suffix),
+        line.get(f.prefix),
+        line.get(f.first),
+        line.get(f.middle),
+        line.get(f.last),
+        line.get(f.suffix),
     ];
     let joined = parts.into_iter().flatten().collect::<Vec<_>>().join(" ");
     if joined.is_empty() {
@@ -281,6 +263,7 @@ pub enum EntityType {
 
 impl EntityType {
     /// Parses an FEC entity-type code (case-insensitive, trimmed).
+    #[must_use]
     pub fn from_code(code: &str) -> Self {
         match code.trim().to_ascii_uppercase().as_str() {
             "IND" => Self::Individual,
@@ -295,6 +278,7 @@ impl EntityType {
     }
 
     /// The FEC code, e.g. `"IND"`.
+    #[must_use]
     pub fn code(&self) -> &str {
         match self {
             Self::Individual => "IND",
@@ -309,6 +293,7 @@ impl EntityType {
     }
 
     /// True for the documented codes, false for [`EntityType::Other`].
+    #[must_use]
     pub fn is_known(&self) -> bool {
         !matches!(self, Self::Other(_))
     }
@@ -334,6 +319,7 @@ pub enum SupportOppose {
 }
 
 impl SupportOppose {
+    #[must_use]
     pub fn from_code(code: &str) -> Self {
         match code.trim().to_ascii_uppercase().as_str() {
             "S" => Self::Support,
@@ -342,6 +328,7 @@ impl SupportOppose {
         }
     }
 
+    #[must_use]
     pub fn code(&self) -> &str {
         match self {
             Self::Support => "S",
@@ -350,6 +337,7 @@ impl SupportOppose {
         }
     }
 
+    #[must_use]
     pub fn is_known(&self) -> bool {
         !matches!(self, Self::Other(_))
     }
@@ -359,10 +347,6 @@ impl std::fmt::Display for SupportOppose {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.code())
     }
-}
-
-fn entity_type(fields: &IndexMap<String, String>) -> Option<EntityType> {
-    opt(fields, "entity_type").map(|c| EntityType::from_code(&c))
 }
 
 // ---------------------------------------------------------------------------
@@ -386,41 +370,45 @@ pub struct ScheduleA {
     pub contribution_date: Option<NaiveDate>,
     /// Exact contribution amount in dollars (see [`parse_money`]).
     pub contribution_amount: Option<Decimal>,
+    /// Year-to-date (F3X) / cycle-to-date (F3, F3P) aggregate for this
+    /// contributor, as reported by the filer.
+    pub contribution_aggregate: Option<Decimal>,
     pub contribution_purpose_descrip: Option<String>,
     pub memo_code: Option<String>,
     pub memo_text_description: Option<String>,
 }
 
 impl TypedView for ScheduleA {
-    const TABLE: Table = Table::SchA;
+    type Marker = SchA;
 
-    fn from_fields(fields: &IndexMap<String, String>) -> Result<Self, TypedViewError> {
+    fn from_typed(l: Typed<'_, SchA>) -> Result<Self, TypedViewError> {
         Ok(ScheduleA {
-            filer_committee_id: req(fields, Self::TABLE, "filer_committee_id_number")?,
-            transaction_id: opt(fields, "transaction_id"),
-            entity_type: entity_type(fields),
+            filer_committee_id: req(l, sch_a::FILER_COMMITTEE_ID_NUMBER)?,
+            transaction_id: l.string(sch_a::TRANSACTION_ID),
+            entity_type: l.get(sch_a::ENTITY_TYPE).map(EntityType::from_code),
             contributor_name: combined_name(
-                fields,
-                NameFields {
-                    single: "contributor_name",
-                    organization: "contributor_organization_name",
-                    prefix: "contributor_prefix",
-                    first: "contributor_first_name",
-                    middle: "contributor_middle_name",
-                    last: "contributor_last_name",
-                    suffix: "contributor_suffix",
+                l,
+                &NameFields {
+                    single: sch_a::CONTRIBUTOR_NAME,
+                    organization: Some(sch_a::CONTRIBUTOR_ORGANIZATION_NAME),
+                    prefix: sch_a::CONTRIBUTOR_PREFIX,
+                    first: sch_a::CONTRIBUTOR_FIRST_NAME,
+                    middle: sch_a::CONTRIBUTOR_MIDDLE_NAME,
+                    last: sch_a::CONTRIBUTOR_LAST_NAME,
+                    suffix: sch_a::CONTRIBUTOR_SUFFIX,
                 },
             ),
-            contributor_city: opt(fields, "contributor_city"),
-            contributor_state: opt(fields, "contributor_state"),
-            contributor_zip_code: opt(fields, "contributor_zip_code"),
-            contributor_employer: opt(fields, "contributor_employer"),
-            contributor_occupation: opt(fields, "contributor_occupation"),
-            contribution_date: date(fields, "contribution_date"),
-            contribution_amount: money(fields, "contribution_amount"),
-            contribution_purpose_descrip: opt(fields, "contribution_purpose_descrip"),
-            memo_code: opt(fields, "memo_code"),
-            memo_text_description: opt(fields, "memo_text_description"),
+            contributor_city: l.string(sch_a::CONTRIBUTOR_CITY),
+            contributor_state: l.string(sch_a::CONTRIBUTOR_STATE),
+            contributor_zip_code: l.string(sch_a::CONTRIBUTOR_ZIP_CODE),
+            contributor_employer: l.string(sch_a::CONTRIBUTOR_EMPLOYER),
+            contributor_occupation: l.string(sch_a::CONTRIBUTOR_OCCUPATION),
+            contribution_date: l.date(sch_a::CONTRIBUTION_DATE),
+            contribution_amount: l.money(sch_a::CONTRIBUTION_AMOUNT),
+            contribution_aggregate: l.money(sch_a::CONTRIBUTION_AGGREGATE),
+            contribution_purpose_descrip: l.string(sch_a::CONTRIBUTION_PURPOSE_DESCRIP),
+            memo_code: l.string(sch_a::MEMO_CODE),
+            memo_text_description: l.string(sch_a::MEMO_TEXT_DESCRIPTION),
         })
     }
 }
@@ -447,36 +435,37 @@ pub struct ScheduleB {
 }
 
 impl TypedView for ScheduleB {
-    const TABLE: Table = Table::SchB;
+    type Marker = SchB;
 
-    fn from_fields(fields: &IndexMap<String, String>) -> Result<Self, TypedViewError> {
+    fn from_typed(l: Typed<'_, SchB>) -> Result<Self, TypedViewError> {
         Ok(ScheduleB {
-            filer_committee_id: req(fields, Self::TABLE, "filer_committee_id_number")?,
-            transaction_id: opt(fields, "transaction_id_number"),
-            entity_type: entity_type(fields),
-            payee_name: combined_name(fields, PAYEE_NAME),
-            payee_city: opt(fields, "payee_city"),
-            payee_state: opt(fields, "payee_state"),
-            payee_zip_code: opt(fields, "payee_zip_code"),
-            expenditure_date: date(fields, "expenditure_date"),
-            expenditure_amount: money(fields, "expenditure_amount"),
-            expenditure_purpose_descrip: opt(fields, "expenditure_purpose_descrip"),
-            category_code: opt(fields, "category_code"),
-            memo_code: opt(fields, "memo_code"),
-            memo_text_description: opt(fields, "memo_text_description"),
+            filer_committee_id: req(l, sch_b::FILER_COMMITTEE_ID_NUMBER)?,
+            transaction_id: l.string(sch_b::TRANSACTION_ID_NUMBER),
+            entity_type: l.get(sch_b::ENTITY_TYPE).map(EntityType::from_code),
+            payee_name: combined_name(
+                l,
+                &NameFields {
+                    single: sch_b::PAYEE_NAME,
+                    organization: Some(sch_b::PAYEE_ORGANIZATION_NAME),
+                    prefix: sch_b::PAYEE_PREFIX,
+                    first: sch_b::PAYEE_FIRST_NAME,
+                    middle: sch_b::PAYEE_MIDDLE_NAME,
+                    last: sch_b::PAYEE_LAST_NAME,
+                    suffix: sch_b::PAYEE_SUFFIX,
+                },
+            ),
+            payee_city: l.string(sch_b::PAYEE_CITY),
+            payee_state: l.string(sch_b::PAYEE_STATE),
+            payee_zip_code: l.string(sch_b::PAYEE_ZIP_CODE),
+            expenditure_date: l.date(sch_b::EXPENDITURE_DATE),
+            expenditure_amount: l.money(sch_b::EXPENDITURE_AMOUNT),
+            expenditure_purpose_descrip: l.string(sch_b::EXPENDITURE_PURPOSE_DESCRIP),
+            category_code: l.string(sch_b::CATEGORY_CODE),
+            memo_code: l.string(sch_b::MEMO_CODE),
+            memo_text_description: l.string(sch_b::MEMO_TEXT_DESCRIPTION),
         })
     }
 }
-
-const PAYEE_NAME: NameFields = NameFields {
-    single: "payee_name",
-    organization: "payee_organization_name",
-    prefix: "payee_prefix",
-    first: "payee_first_name",
-    middle: "payee_middle_name",
-    last: "payee_last_name",
-    suffix: "payee_suffix",
-};
 
 /// Ergonomic view over a Schedule E line (independent expenditures).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -503,87 +492,117 @@ pub struct ScheduleE {
 
 impl ScheduleE {
     /// The support/oppose indicator as its raw code (`"S"`, `"O"`, ...).
+    #[must_use]
     pub fn support_oppose_code(&self) -> Option<&str> {
         self.support_oppose.as_ref().map(SupportOppose::code)
     }
 }
 
 impl TypedView for ScheduleE {
-    const TABLE: Table = Table::SchE;
+    type Marker = SchE;
 
-    fn from_fields(fields: &IndexMap<String, String>) -> Result<Self, TypedViewError> {
+    fn from_typed(l: Typed<'_, SchE>) -> Result<Self, TypedViewError> {
         Ok(ScheduleE {
-            filer_committee_id: req(fields, Self::TABLE, "filer_committee_id_number")?,
-            transaction_id: opt(fields, "transaction_id_number"),
-            payee_name: combined_name(fields, PAYEE_NAME),
-            support_oppose: opt(fields, "support_oppose_code")
-                .map(|c| SupportOppose::from_code(&c)),
-            candidate_id_number: opt(fields, "candidate_id_number"),
-            // Schedule E has no `candidate_organization_name` (candidates
-            // are always individuals), so the organization slot is empty.
-            candidate_name: combined_name(
-                fields,
-                NameFields {
-                    single: "candidate_name",
-                    organization: "",
-                    prefix: "candidate_prefix",
-                    first: "candidate_first_name",
-                    middle: "candidate_middle_name",
-                    last: "candidate_last_name",
-                    suffix: "candidate_suffix",
+            filer_committee_id: req(l, sch_e::FILER_COMMITTEE_ID_NUMBER)?,
+            transaction_id: l.string(sch_e::TRANSACTION_ID_NUMBER),
+            payee_name: combined_name(
+                l,
+                &NameFields {
+                    single: sch_e::PAYEE_NAME,
+                    organization: Some(sch_e::PAYEE_ORGANIZATION_NAME),
+                    prefix: sch_e::PAYEE_PREFIX,
+                    first: sch_e::PAYEE_FIRST_NAME,
+                    middle: sch_e::PAYEE_MIDDLE_NAME,
+                    last: sch_e::PAYEE_LAST_NAME,
+                    suffix: sch_e::PAYEE_SUFFIX,
                 },
             ),
-            candidate_office: opt(fields, "candidate_office"),
-            candidate_state: opt(fields, "candidate_state"),
-            candidate_district: opt(fields, "candidate_district"),
-            dissemination_date: date(fields, "dissemination_date"),
-            disbursement_date: date(fields, "disbursement_date"),
-            expenditure_amount: money(fields, "expenditure_amount"),
-            expenditure_purpose_descrip: opt(fields, "expenditure_purpose_descrip"),
-            memo_code: opt(fields, "memo_code"),
-            memo_text_description: opt(fields, "memo_text_description"),
+            support_oppose: l
+                .get(sch_e::SUPPORT_OPPOSE_CODE)
+                .map(SupportOppose::from_code),
+            candidate_id_number: l.string(sch_e::CANDIDATE_ID_NUMBER),
+            // Schedule E has no `candidate_organization_name` (candidates
+            // are always individuals).
+            candidate_name: combined_name(
+                l,
+                &NameFields {
+                    single: sch_e::CANDIDATE_NAME,
+                    organization: None,
+                    prefix: sch_e::CANDIDATE_PREFIX,
+                    first: sch_e::CANDIDATE_FIRST_NAME,
+                    middle: sch_e::CANDIDATE_MIDDLE_NAME,
+                    last: sch_e::CANDIDATE_LAST_NAME,
+                    suffix: sch_e::CANDIDATE_SUFFIX,
+                },
+            ),
+            candidate_office: l.string(sch_e::CANDIDATE_OFFICE),
+            candidate_state: l.string(sch_e::CANDIDATE_STATE),
+            candidate_district: l.string(sch_e::CANDIDATE_DISTRICT),
+            dissemination_date: l.date(sch_e::DISSEMINATION_DATE),
+            disbursement_date: l.date(sch_e::DISBURSEMENT_DATE),
+            expenditure_amount: l.money(sch_e::EXPENDITURE_AMOUNT),
+            expenditure_purpose_descrip: l.string(sch_e::EXPENDITURE_PURPOSE_DESCRIP),
+            memo_code: l.string(sch_e::MEMO_CODE),
+            memo_text_description: l.string(sch_e::MEMO_TEXT_DESCRIPTION),
         })
     }
 }
 
-/// Ergonomic view over a Form 3X summary/cover line (periodic report of a
+/// Ergonomic view over a Form 3X cover line (periodic report of a
 /// PAC/party committee) -- the most commonly filed top-level form.
+///
+/// For every cover-page line (Column A and B), use
+/// [`Filing::summary_as::<F3X>`](crate::Filing::summary_as) with the
+/// constants in [`crate::parser::tables::f3x`]; this view carries the
+/// headline figures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct Form3XSummary {
     pub filer_committee_id: String,
     pub committee_name: Option<String>,
+    /// e.g. `"Q1"`, `"12G"`, `"YE"`.
     pub report_code: Option<String>,
     pub coverage_from_date: Option<NaiveDate>,
     pub coverage_through_date: Option<NaiveDate>,
-    /// Column A ("this period") cash on hand at close of period.
+    pub date_signed: Option<NaiveDate>,
+    /// Column A line 6(b).
+    pub cash_on_hand_beginning_period: Option<Decimal>,
+    /// Column A line 8.
     pub cash_on_hand_close_of_period: Option<Decimal>,
-    /// Column A total receipts this period.
+    /// Column A line 6(c) ("this period") total receipts.
     pub total_receipts: Option<Decimal>,
-    /// Column A total disbursements this period.
+    /// Column A line 7 total disbursements.
     pub total_disbursements: Option<Decimal>,
-    /// Column B (election-cycle-to-date) total receipts.
+    /// Column A line 9.
+    pub debts_owed_to_committee: Option<Decimal>,
+    /// Column A line 10.
+    pub debts_owed_by_committee: Option<Decimal>,
+    /// Column B (year-to-date) total receipts.
     pub cycle_total_receipts: Option<Decimal>,
-    /// Column B (election-cycle-to-date) total disbursements.
+    /// Column B (year-to-date) total disbursements.
     pub cycle_total_disbursements: Option<Decimal>,
 }
 
 impl TypedView for Form3XSummary {
-    const TABLE: Table = Table::F3X;
+    type Marker = F3X;
 
-    fn from_fields(fields: &IndexMap<String, String>) -> Result<Self, TypedViewError> {
+    fn from_typed(l: Typed<'_, F3X>) -> Result<Self, TypedViewError> {
         Ok(Form3XSummary {
-            filer_committee_id: req(fields, Self::TABLE, "filer_committee_id_number")?,
-            committee_name: opt(fields, "committee_name"),
-            report_code: opt(fields, "report_code"),
-            coverage_from_date: date(fields, "coverage_from_date"),
-            coverage_through_date: date(fields, "coverage_through_date"),
-            cash_on_hand_close_of_period: money(fields, "col_a_cash_on_hand_close_of_period"),
-            total_receipts: money(fields, "col_a_total_receipts"),
-            total_disbursements: money(fields, "col_a_total_disbursements"),
-            cycle_total_receipts: money(fields, "col_b_total_receipts"),
-            cycle_total_disbursements: money(fields, "col_b_total_disbursements"),
+            filer_committee_id: req(l, f3x::FILER_COMMITTEE_ID_NUMBER)?,
+            committee_name: l.string(f3x::COMMITTEE_NAME),
+            report_code: l.string(f3x::REPORT_CODE),
+            coverage_from_date: l.date(f3x::COVERAGE_FROM_DATE),
+            coverage_through_date: l.date(f3x::COVERAGE_THROUGH_DATE),
+            date_signed: l.date(f3x::DATE_SIGNED),
+            cash_on_hand_beginning_period: l.money(f3x::COL_A_CASH_ON_HAND_BEGINNING_PERIOD),
+            cash_on_hand_close_of_period: l.money(f3x::COL_A_CASH_ON_HAND_CLOSE_OF_PERIOD),
+            total_receipts: l.money(f3x::COL_A_TOTAL_RECEIPTS),
+            total_disbursements: l.money(f3x::COL_A_TOTAL_DISBURSEMENTS),
+            debts_owed_to_committee: l.money(f3x::COL_A_DEBTS_TO),
+            debts_owed_by_committee: l.money(f3x::COL_A_DEBTS_BY),
+            cycle_total_receipts: l.money(f3x::COL_B_TOTAL_RECEIPTS),
+            cycle_total_disbursements: l.money(f3x::COL_B_TOTAL_DISBURSEMENTS),
         })
     }
 }
@@ -591,20 +610,35 @@ impl TypedView for Form3XSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::schema::SpecVersion;
     use rust_decimal_macros::dec;
 
     fn line(table: Table, fields: &[(&str, &str)]) -> ParsedLine {
-        let map: IndexMap<String, String> = fields
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        ParsedLine::new(table.as_str(), table, 7, map)
+        ParsedLine::from_pairs(
+            table,
+            SpecVersion::electronic(8, 5),
+            7,
+            fields.iter().copied(),
+        )
+        .unwrap()
+    }
+
+    /// Spec 5.x layouts carry the combined `*_name` columns.
+    fn line_v53(table: Table, fields: &[(&str, &str)]) -> ParsedLine {
+        ParsedLine::from_pairs(
+            table,
+            SpecVersion::electronic(5, 3),
+            7,
+            fields.iter().copied(),
+        )
+        .unwrap()
     }
 
     #[test]
     fn parses_whole_dollar_amounts() {
         assert_eq!(parse_money("1000"), Some(dec!(1000.00)));
         assert_eq!(parse_money("0"), Some(dec!(0.00)));
+        assert_eq!(parse_money("+5"), Some(dec!(5.00)));
     }
 
     #[test]
@@ -613,6 +647,8 @@ mod tests {
         assert_eq!(parse_money("0.01"), Some(dec!(0.01)));
         assert_eq!(parse_money("19.99"), Some(dec!(19.99)));
         assert_eq!(parse_money("100.1"), Some(dec!(100.10)));
+        assert_eq!(parse_money(".5"), Some(dec!(0.50)));
+        assert_eq!(parse_money("7."), Some(dec!(7.00)));
     }
 
     #[test]
@@ -636,6 +672,9 @@ mod tests {
         assert_eq!(parse_money("abc"), None);
         assert_eq!(parse_money("1.234"), None);
         assert_eq!(parse_money("1,000"), None);
+        assert_eq!(parse_money("--5"), None);
+        assert_eq!(parse_money("-"), None);
+        assert_eq!(parse_money("."), None);
         // i64::MAX dollars * 100 overflows; must be None, not a panic.
         assert_eq!(parse_money("9223372036854775807"), None);
         assert_eq!(parse_money("-9223372036854775808.99"), None);
@@ -665,17 +704,20 @@ mod tests {
             Table::SchA,
             &[
                 ("filer_committee_id_number", "C00123456"),
-                ("entity_type", "IND"),
-                ("contributor_name", "SMITH, JANE"),
+                ("entity_type", "ind"),
+                ("contributor_last_name", "Smith"),
+                ("contributor_first_name", "Jane"),
                 ("contribution_date", "20260101"),
                 ("contribution_amount", "500.00"),
+                ("contribution_aggregate", "1250"),
             ],
         );
         let sa: ScheduleA = l.view().unwrap();
         assert_eq!(sa.filer_committee_id, "C00123456");
         assert_eq!(sa.entity_type, Some(EntityType::Individual));
-        assert_eq!(sa.contributor_name.as_deref(), Some("SMITH, JANE"));
+        assert_eq!(sa.contributor_name.as_deref(), Some("Jane Smith"));
         assert_eq!(sa.contribution_amount, Some(dec!(500.00)));
+        assert_eq!(sa.contribution_aggregate, Some(dec!(1250.00)));
         assert_eq!(sa.contribution_date, NaiveDate::from_ymd_opt(2026, 1, 1));
     }
 
@@ -698,7 +740,7 @@ mod tests {
 
     #[test]
     fn missing_or_blank_required_field_errors_with_line_number() {
-        let l = line(Table::SchA, &[("contributor_name", "X")]);
+        let l = line(Table::SchA, &[("contributor_last_name", "X")]);
         match l.view::<ScheduleA>() {
             Err(TypedViewError::MissingField {
                 table,
@@ -737,6 +779,7 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(l.view::<ScheduleA>().is_ok());
+        assert_eq!(ScheduleE::TABLE, Table::SchE);
     }
 
     #[test]
@@ -754,17 +797,16 @@ mod tests {
     }
 
     #[test]
-    fn schedule_a_falls_back_to_split_individual_name_for_modern_spec_versions() {
-        let l = line(
+    fn schedule_a_uses_combined_name_on_older_versions() {
+        let l = line_v53(
             Table::SchA,
             &[
                 ("filer_committee_id_number", "C00123456"),
-                ("contributor_first_name", "JANE"),
-                ("contributor_last_name", "SMITH"),
+                ("contributor_name", "SMITH, JANE"),
             ],
         );
         let sa: ScheduleA = l.view().unwrap();
-        assert_eq!(sa.contributor_name.as_deref(), Some("JANE SMITH"));
+        assert_eq!(sa.contributor_name.as_deref(), Some("SMITH, JANE"));
     }
 
     #[test]
@@ -792,11 +834,12 @@ mod tests {
                 ("filer_committee_id_number", "C00123456"),
                 ("committee_name", "PAC"),
                 ("col_a_total_receipts", "1000.50"),
+                ("col_a_debts_by", "12"),
             ],
         );
         let s: Form3XSummary = l.view().unwrap();
         assert_eq!(s.total_receipts, Some(dec!(1000.50)));
-        let s2 = Form3XSummary::from_fields(&l.fields).unwrap();
-        assert_eq!(s, s2);
+        assert_eq!(s.debts_owed_by_committee, Some(dec!(12.00)));
+        assert_eq!(s.cycle_total_receipts, None);
     }
 }

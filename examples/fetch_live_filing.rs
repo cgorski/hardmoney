@@ -29,7 +29,7 @@ fn main() {
         filing.raw_form_type, filing.base_form_type, filing.version
     );
 
-    if filing.summary.table == Table::F3X {
+    if filing.summary.table() == Table::F3X {
         match filing.summary.view::<Form3XSummary>() {
             Ok(summary) => {
                 println!("committee:            {:?}", summary.committee_name);

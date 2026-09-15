@@ -14,7 +14,7 @@
 
 use sqlx::PgPool;
 
-use crate::parser::{Filing, ParseOptions, ScheduleE, SkippedLine, Table};
+use crate::parser::{Filing, ParseOptions, ParsedLine, ScheduleE, SkippedLine, Table};
 
 use super::error::Result;
 
@@ -29,15 +29,18 @@ fn schedule_e_lines(filing: &Filing) -> Vec<(usize, ScheduleE)> {
         .lines
         .iter()
         .enumerate()
-        .filter(|(_, l)| l.table == Table::SchE)
+        .filter(|(_, l)| l.table() == Table::SchE)
         .filter_map(|(idx, line)| line.view::<ScheduleE>().ok().map(|se| (idx, se)))
         .collect()
 }
 
-fn indexmap_to_json(map: &indexmap::IndexMap<String, String>) -> serde_json::Value {
-    let mut obj = serde_json::Map::with_capacity(map.len());
-    for (k, v) in map {
-        obj.insert(k.clone(), serde_json::Value::String(v.clone()));
+/// A line's fields as a JSON object in layout order (stored in `JSONB`
+/// columns, where the full record is kept for anything the typed columns
+/// do not cover).
+fn fields_json(line: &ParsedLine) -> serde_json::Value {
+    let mut obj = serde_json::Map::with_capacity(line.iter().len());
+    for (k, v) in line.iter() {
+        obj.insert(k.to_string(), serde_json::Value::String(v.to_string()));
     }
     serde_json::Value::Object(obj)
 }
@@ -75,14 +78,14 @@ pub async fn ingest_filing(
     filing: &Filing,
     skipped: Vec<SkippedLine>,
 ) -> Result<IngestReport> {
-    let header_json = indexmap_to_json(&filing.headers);
-    let summary_json = indexmap_to_json(&filing.summary.fields);
+    let header_json = serde_json::to_value(&filing.header)?;
+    let summary_json = fields_json(&filing.summary);
     let committee_id = filing
         .summary
-        .get("filer_committee_id_number")
+        .get_non_empty("filer_committee_id_number")
         .map(str::to_string);
-    let amends_filing_id: Option<i64> =
-        filing.amends_filing.as_deref().and_then(|s| s.parse().ok());
+    let amends_filing_id: Option<i64> = filing.amends_filing.and_then(|n| i64::try_from(n).ok());
+    let version = filing.version.to_string();
     let skipped_count = i32::try_from(skipped.len()).unwrap_or(i32::MAX);
 
     let mut tx = pool.begin().await?;
@@ -100,7 +103,7 @@ pub async fn ingest_filing(
     )
     .bind(filing_id)
     .bind(&filing.raw_form_type)
-    .bind(&filing.version)
+    .bind(&version)
     .bind(&committee_id)
     .bind(filing.is_amendment)
     .bind(amends_filing_id)
@@ -139,7 +142,7 @@ pub async fn ingest_filing(
         .bind(&se.candidate_id_number)
         .bind(&se.candidate_name)
         .bind(&se.candidate_state)
-        .bind(indexmap_to_json(&line.fields))
+        .bind(fields_json(line))
         .execute(&mut *tx)
         .await?;
     }
@@ -188,16 +191,18 @@ pub fn filing_id_from_path(path: &std::path::Path) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::ParsedLine;
+    use crate::parser::SpecVersion;
     use rust_decimal_macros::dec;
     use std::path::Path;
 
     fn line(table: Table, n: u64, fields: &[(&str, &str)]) -> ParsedLine {
-        let map: indexmap::IndexMap<String, String> = fields
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        ParsedLine::new(table.as_str(), table, n, map)
+        ParsedLine::from_pairs(
+            table,
+            SpecVersion::electronic(8, 5),
+            n,
+            fields.iter().copied(),
+        )
+        .unwrap()
     }
 
     fn filing_with(lines: Vec<ParsedLine>) -> Filing {

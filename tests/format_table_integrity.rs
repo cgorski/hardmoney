@@ -1,81 +1,142 @@
-//! Regression tests guarding the fec-csv-sources format tables against the
-//! class of bug found and fixed in this project: a format table CSV
-//! assigning the same canonical field name to two different column
-//! positions within the same FEC spec version bucket. Before the fix,
-//! `IndexMap::insert` in `src/parser/line.rs` silently kept only the later
-//! position, so real filings quietly lost data for the earlier field (this
-//! was confirmed against real F3XN filings: `col_b` "line 19 Total
-//! Receipts" and "line 6(c) Total Receipts" legitimately differ on some
-//! real filings, e.g. a committee that reports a coarse period total but
-//! hasn't itemized any of the categories that roll up into the line-19
-//! recap).
+//! Integrity checks over the build-time-generated format tables.
 //!
-//! Six format tables were affected: F2 (candidate_state), F3P, F3X, F4
-//! (col_a/col_b total_receipts & total_disbursements recap lines), SchC1
-//! (description, date_signed), and SchL (a column mislabeled col_b when it
-//! belongs to col_a's own per-period recap). All were fixed by giving the
-//! colliding field its own distinct, form-accurate canonical name.
-//!
-//! `Line::from_csv_str` now returns `FecError::DuplicateCanonicalField`
-//! instead of silently overwriting, so any *new* collision -- whether from
-//! a future upstream fech-sources update or a local edit mistake -- fails
-//! loudly here instead of silently dropping data in production.
+//! The two collision classes that once silently dropped data -- one
+//! canonical name at two columns, or two canonical names at one column,
+//! within a single version bucket -- are now rejected by `build.rs` itself
+//! (the crate does not compile if a bundled CSV has either), so this file
+//! checks the *shape* of what the generator produced: every table has
+//! layouts, every layout is internally consistent, every field constant
+//! names a real field, and the fields renamed to fix upstream collisions
+//! (see `NOTICE`) exist under their new names.
 
-use hardmoney::parser::format_data::{FORM_CSV_DATA, Table};
-use hardmoney::parser::line::Line;
+use hardmoney::parser::tables::{f3x, sch_a, sch_c1};
+use hardmoney::{SpecVersion, Table};
+use strum::IntoEnumIterator;
 
 #[test]
-fn every_bundled_format_table_parses_without_canonical_field_collisions() {
-    let mut failures = Vec::new();
-    for (form, csv) in FORM_CSV_DATA {
-        if let Err(e) = Line::from_csv_str(Table::from_name(form).expect(form), csv) {
-            failures.push(format!("{form}: {e}"));
+fn every_table_is_in_all_and_round_trips_its_name() {
+    let iter: Vec<Table> = Table::iter().collect();
+    assert_eq!(iter, Table::ALL.to_vec());
+    for &t in Table::ALL {
+        assert_eq!(t.as_str().parse::<Table>().ok(), Some(t), "{t}");
+        assert_eq!(t.to_string(), t.as_str());
+        assert_eq!(
+            t.as_str().to_lowercase().parse::<Table>().ok(),
+            Some(t),
+            "case-insensitive {t}"
+        );
+    }
+    assert!("ZZZ".parse::<Table>().is_err());
+}
+
+#[test]
+fn layouts_are_consistent_and_version_sets_do_not_overlap() {
+    for &t in Table::ALL {
+        let layouts = t.layouts();
+        assert!(!layouts.is_empty(), "{t} has no layouts");
+        for (i, l) in layouts.iter().enumerate() {
+            assert_eq!(l.table, t);
+            assert!(!l.fields.is_empty(), "{t} layout {i} has no fields");
+            // Distinct columns, distinct names, all below width.
+            let mut cols: Vec<u16> = l.fields.iter().map(|f| f.column).collect();
+            cols.sort_unstable();
+            cols.dedup();
+            assert_eq!(
+                cols.len(),
+                l.fields.len(),
+                "{t} layout {i}: column collision"
+            );
+            assert!(
+                cols.iter().all(|&c| c < l.width),
+                "{t} layout {i}: column >= width"
+            );
+            for f in l.fields {
+                assert_eq!(
+                    l.field(f.name).map(|d| d.column),
+                    Some(f.column),
+                    "{t}.{}",
+                    f.name
+                );
+            }
+            // A version is claimed by at most one layout of a table.
+            for other in &layouts[i + 1..] {
+                for v in l.versions {
+                    assert!(!other.supports(*v), "{t}: version {v} in two layouts");
+                }
+            }
+        }
+        for name in t.field_names() {
+            assert!(
+                layouts.iter().any(|l| l.field(name).is_some()),
+                "{t}.{name} is in FIELD_NAMES but in no layout"
+            );
         }
     }
+}
+
+#[test]
+fn field_constants_are_real_fields_of_their_table() {
+    let v85 = SpecVersion::electronic(8, 5);
+    let f3x = Table::F3X.layout(v85).expect("F3X 8.5 layout");
+    assert!(f3x.field(f3x::COL_A_TOTAL_RECEIPTS.name()).is_some());
+    assert!(f3x.field(f3x::COL_B_CASH_ON_HAND_JAN_1.name()).is_some());
+    let sch_a = Table::SchA.layout(v85).expect("SchA 8.5 layout");
+    assert!(sch_a.field(sch_a::CONTRIBUTION_AGGREGATE.name()).is_some());
+    assert_eq!(sch_a::CONTRIBUTION_AGGREGATE.table(), Table::SchA);
+}
+
+#[test]
+fn spec_rows_agree_with_current_layouts() {
+    let v85 = SpecVersion::electronic(8, 5);
+    let mut tables_with_specs = 0;
+    for &t in Table::ALL {
+        let specs = t.specs();
+        if specs.is_empty() {
+            continue;
+        }
+        tables_with_specs += 1;
+        // F3PZ1/F3PZ2 are still documented in the FEC's workbook but were
+        // dropped from the 8.5 format ("no longer needed"), so they have
+        // spec rows and no current layout.
+        let Some(layout) = t.layout(v85) else {
+            assert!(t.specs().iter().all(|s| s.canonical.is_none()), "{t}");
+            continue;
+        };
+        for s in specs {
+            if let Some(name) = s.canonical {
+                let def = layout.field(name).unwrap_or_else(|| panic!("{t}.{name}"));
+                assert_eq!(
+                    def.column, s.column,
+                    "{t}.{name} spec/layout column disagree"
+                );
+            }
+        }
+        // Nearly every current-layout field should have a spec row.
+        let unspecified: Vec<&str> = layout
+            .fields
+            .iter()
+            .filter(|f| t.spec(f.name).is_none())
+            .map(|f| f.name)
+            .collect();
+        assert!(
+            unspecified.len() * 10 <= layout.fields.len() + 9,
+            "{t}: {} of {} 8.5 fields have no spec row: {unspecified:?}",
+            unspecified.len(),
+            layout.fields.len()
+        );
+    }
     assert!(
-        failures.is_empty(),
-        "found canonical field collisions in bundled format tables:\n{}",
-        failures.join("\n")
+        tables_with_specs >= 45,
+        "only {tables_with_specs} tables carry spec rows"
     );
 }
 
 #[test]
-fn detects_a_synthetic_collision() {
-    // Same canonical name ("dup") assigned to two different positions (2
-    // and 3) within the single "^8" version bucket -- must be rejected,
-    // not silently resolved to whichever row came last.
-    let csv = "canonical,^8\ndup,2,FIRST\ndup,3,SECOND\n";
-    match Line::from_csv_str(Table::F3X, csv) {
-        Ok(_) => panic!("expected a DuplicateCanonicalField error, but parsing succeeded"),
-        Err(e) => assert!(
-            matches!(e, hardmoney::FecError::DuplicateCanonicalField { .. }),
-            "expected DuplicateCanonicalField, got: {e}"
-        ),
-    }
-}
-
-#[test]
-fn allows_the_same_canonical_name_repeated_with_an_identical_position() {
-    // Not every repeat is a bug: a handful of rows in the real tables
-    // legitimately restate the same canonical name at the same position
-    // across cosmetic label variants. That must keep working.
-    let csv = "canonical,^8\nsame,2,LABEL A\nsame,2,LABEL A (cosmetic variant)\n";
-    let line =
-        Line::from_csv_str(Table::F3X, csv).expect("identical-position repeat must not error");
-    let cols = line.column_locations("8").unwrap();
-    assert_eq!(cols.get("same"), Some(&1));
-}
-
-/// Every previously-colliding canonical name must now resolve to exactly
-/// the distinct, form-accurate name chosen when the bug was fixed, so a
-/// careless future edit that reverts one of these renames is caught here
-/// even if it doesn't happen to reintroduce a same-bucket collision.
-#[test]
 fn renamed_fields_use_their_new_distinct_canonical_names() {
-    let expectations: &[(&str, &str, &[&str])] = &[
+    let v85 = SpecVersion::electronic(8, 5);
+    let expectations: &[(Table, &[&str])] = &[
         (
-            "F3X",
-            "8.5",
+            Table::F3X,
             &[
                 "col_a_total_receipts",
                 "col_a_total_receipts_recap",
@@ -90,29 +151,25 @@ fn renamed_fields_use_their_new_distinct_canonical_names() {
             ],
         ),
         (
-            "F3P",
-            "8.5",
+            Table::F3P,
             &["col_a_total_receipts", "col_a_total_receipts_recap"],
         ),
         (
-            "F4",
-            "8.5",
+            Table::F4,
             &["col_a_total_receipts", "col_a_total_receipts_recap"],
         ),
-        ("F2", "8.5", &["candidate_state", "candidate_office_state"]),
+        (Table::F2, &["candidate_state", "candidate_office_state"]),
         (
-            "SchC1",
-            "8.5",
+            Table::SchC1,
             &[
-                "collateral_description",
-                "future_income_description",
-                "treasurer_date_signed",
-                "authorized_date_signed",
+                sch_c1::COLLATERAL_DESCRIPTION.name(),
+                sch_c1::FUTURE_INCOME_DESCRIPTION.name(),
+                sch_c1::TREASURER_DATE_SIGNED.name(),
+                sch_c1::AUTHORIZED_DATE_SIGNED.name(),
             ],
         ),
         (
-            "SchL",
-            "8.5",
+            Table::SchL,
             &[
                 "col_a_disbursements_period",
                 "col_a_cash_on_hand_close_of_period",
@@ -122,22 +179,89 @@ fn renamed_fields_use_their_new_distinct_canonical_names() {
         ),
     ];
 
-    for (form, version, names) in expectations {
-        let csv = FORM_CSV_DATA
-            .iter()
-            .find(|(name, _)| name == form)
-            .unwrap_or_else(|| panic!("no bundled format table named '{form}'"))
-            .1;
-        let line = Line::from_csv_str(Table::from_name(form).expect(form), csv)
-            .unwrap_or_else(|e| panic!("{form} failed to parse: {e}"));
-        let cols = line
-            .column_locations(version)
-            .unwrap_or_else(|| panic!("no {version} bucket for {form}"));
+    for (table, names) in expectations {
+        let layout = table
+            .layout(v85)
+            .unwrap_or_else(|| panic!("no 8.5 layout for {table}"));
         for name in *names {
             assert!(
-                cols.contains_key(*name),
-                "{form} version {version} is missing expected canonical field '{name}'"
+                layout.field(name).is_some(),
+                "{table} 8.5 is missing field '{name}'"
             );
         }
     }
+}
+
+/// The upstream data defects fixed in 2.0 (see `NOTICE`): fields that were
+/// unreadable in the affected versions must now resolve to the FEC's
+/// documented columns.
+#[test]
+fn upstream_position_fixes_are_in_effect() {
+    let col = |t: Table, v: SpecVersion, f: &str| {
+        t.layout(v)
+            .and_then(|l| l.field(f))
+            .map(|d| d.column + 1)
+            .unwrap_or_else(|| panic!("{t} {v} {f}"))
+    };
+    // F3 6.1-6.3: election_date collided with report_code at 12.
+    assert_eq!(
+        col(Table::F3, SpecVersion::electronic(6, 2), "election_date"),
+        14
+    );
+    assert_eq!(
+        col(Table::F3, SpecVersion::electronic(6, 2), "report_code"),
+        12
+    );
+    // F3X 5.x: an unquoted comma in the 6(a) label shifted the cell.
+    assert_eq!(
+        col(
+            Table::F3X,
+            SpecVersion::electronic(5, 3),
+            "col_b_cash_on_hand_jan_1"
+        ),
+        62
+    );
+    assert_eq!(
+        col(Table::F3X, SpecVersion::electronic(5, 3), "col_b_year"),
+        63
+    );
+    // F3S 5.x: three fields had label text where their positions should be.
+    assert_eq!(
+        col(
+            Table::F3S,
+            SpecVersion::electronic(5, 3),
+            "19_b_loan_repayments_all_other_loans"
+        ),
+        26
+    );
+    assert_eq!(
+        col(
+            Table::F3S,
+            SpecVersion::electronic(5, 3),
+            "20_b_refund_political_party_committees"
+        ),
+        29
+    );
+    assert_eq!(
+        col(
+            Table::F3S,
+            SpecVersion::electronic(5, 3),
+            "20_c_refund_other_political_committees"
+        ),
+        30
+    );
+    // F5 5.3: occupation collided with coverage_through_date at 18.
+    assert_eq!(
+        col(
+            Table::F5,
+            SpecVersion::electronic(5, 3),
+            "individual_occupation"
+        ),
+        12
+    );
+    // F57 3.x: street 2 collided with street 1 at 5.
+    assert_eq!(
+        col(Table::F57, SpecVersion::electronic(3, 0), "payee_street_2"),
+        6
+    );
 }

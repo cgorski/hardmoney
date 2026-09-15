@@ -63,7 +63,7 @@ pub use cycle::Cycle;
 // Ergonomic re-exports at the crate root so `use hardmoney::Filing` reads
 // naturally.
 pub use parser::{
-    EntityType, FecError, Filing, Form3XSummary, HeaderMap, Lenient, ParseOptions, ParsedLine,
-    Result, ScheduleA, ScheduleB, ScheduleE, SkippedLine, SupportOppose, Table, TypedView,
-    TypedViewError, parse_fec_date, parse_money,
+    EntityType, FecError, Field, Filing, Form3XSummary, Header, Lenient, ParseOptions, ParsedLine,
+    Result, ScheduleA, ScheduleB, ScheduleE, SkippedLine, SpecVersion, SupportOppose, Table, Typed,
+    TypedView, TypedViewError, parse_fec_date, parse_money,
 };

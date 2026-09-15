@@ -43,7 +43,7 @@ pub fn run(args: ParseArgs) -> super::CliResult {
 
     let mut by_table: BTreeMap<String, usize> = BTreeMap::new();
     for line in &filing.lines {
-        *by_table.entry(line.table.to_string()).or_default() += 1;
+        *by_table.entry(line.table().to_string()).or_default() += 1;
     }
 
     let mut out = serde_json::json!({
@@ -56,8 +56,8 @@ pub fn run(args: ParseArgs) -> super::CliResult {
         "lines_by_table": by_table,
         "skipped_count": skipped.len(),
         "skipped": skipped,
-        "header": filing.headers,
-        "summary": filing.summary.fields,
+        "header": filing.header,
+        "summary": serde_json::to_value(&filing.summary)?["fields"],
     });
     if args.lines {
         out["lines"] = serde_json::to_value(&filing.lines)?;

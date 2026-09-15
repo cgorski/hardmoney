@@ -1,5 +1,5 @@
 //! Common, very useful pattern: use the ergonomic typed views instead of
-//! hand-parsing raw `IndexMap<String, String>` fields. `Filing::views::<ScheduleA>()`
+//! hand-parsing raw string fields. `Filing::views::<ScheduleA>()`
 //! yields only genuine Schedule A lines (the table is checked, so a Schedule
 //! B line can never masquerade as a contribution) and each `ScheduleA` gives
 //! you a real `NaiveDate` and an exact `rust_decimal::Decimal` (never

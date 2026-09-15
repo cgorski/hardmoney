@@ -33,6 +33,10 @@ pub enum BulkError {
     #[error("filing parse error: {0}")]
     Parse(#[from] crate::parser::FecError),
 
+    /// Serialising a parsed record to JSON for a `JSONB` column failed.
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
+
     /// A source row had fewer pipe-delimited fields than its
     /// [`crate::bulk::source::BulkSource`] declares, or more than are
     /// permitted by `allow_extra_trailing_fields`.

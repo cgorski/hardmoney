@@ -1,24 +1,22 @@
-//! Less common, but very useful: `hardmoney`'s error type is designed to
-//! be matched on and handled, not just unwrapped. This demonstrates two
-//! scenarios you'll actually hit against real-world FEC data:
+//! `hardmoney`'s error type is designed to be matched on and handled, not
+//! just unwrapped. This demonstrates the scenarios you'll actually hit
+//! against real-world FEC data:
 //!
 //! 1. A malformed/unrecognized filing (garbage input, or a form type this
 //!    crate doesn't know about yet) -- `Filing::parse_bytes` returns a
 //!    `Result`, never panics.
-//! 2. The collision guard: if a format table (whether bundled or your
-//!    own) assigns the same canonical field name to two different column
-//!    positions in one version bucket, `Line::from_csv_str` returns
-//!    `FecError::DuplicateCanonicalField` instead of silently letting the
-//!    second field clobber the first -- this is the exact class of bug
-//!    that was found and fixed in six of the bundled format tables (see
-//!    the README's "Parser correctness" section and `NOTICE`).
+//! 2. A spec version the bundled tables do not cover for some table --
+//!    `FecError::NoMatchingVersionBucket` names the table, version, and
+//!    line.
+//! 3. Strict vs. lenient body-line handling.
+//! 4. Editing a line: `ParsedLine::set` refuses a field name the table
+//!    does not have, so a typo cannot silently create a phantom field.
 //!
 //! Run with:
 //!
 //!     cargo run --example handle_parse_errors
 
-use hardmoney::parser::line::Line;
-use hardmoney::{FecError, Filing, ParseOptions, Table};
+use hardmoney::{FecError, Filing, ParseOptions, ParsedLine, SpecVersion, Table};
 
 fn main() {
     // --- Scenario 1: graceful handling of bad input ---
@@ -27,37 +25,24 @@ fn main() {
         Err(e) => println!("expected parse failure: {e}"),
     }
 
-    // --- Scenario 2: the duplicate-canonical-field guard ---
-    // A minimal synthetic format table with one version bucket ("^1") that
-    // (incorrectly) maps both column 1 and column 2 to the canonical name
-    // "amount" -- exactly the class of mistake six of the real bundled
-    // tables had before it was fixed.
-    let colliding_table = "canonical,^1\namount,1\namount,2\n";
-
-    match Line::from_csv_str(Table::F3X, colliding_table) {
-        Ok(_) => unreachable!("a same-bucket collision must be rejected"),
-        Err(FecError::DuplicateCanonicalField {
-            form,
-            version_bucket,
-            canonical,
-            first_position,
-            second_position,
+    // --- Scenario 2: a table with no layout for this version ---
+    // Schedule I was dropped by the FEC in spec 8.5, so an SI line in an
+    // 8.5 filing has no column layout to parse with.
+    let with_sch_i = concat!(
+        "HDR\x1cFEC\x1c8.5\x1cFECfile\x1c8.5.1.0\x1c\x1c\n",
+        "F3XN\x1cC00123456\x1cCOMMITTEE NAME\n",
+        "SI\x1cC00123456\x1cLEVIN ACCOUNT\n",
+    );
+    match Filing::parse(with_sch_i) {
+        Err(FecError::NoMatchingVersionBucket {
+            table,
+            version,
+            line_no,
         }) => {
-            println!(
-                "caught the collision guard as expected: form={form} bucket={version_bucket} \
-                 field={canonical:?} positions {first_position} and {second_position} collide"
-            );
+            println!("no layout for {table} at spec {version} (line {line_no:?}), as expected");
         }
-        Err(other) => panic!("expected DuplicateCanonicalField, got: {other}"),
+        other => panic!("expected NoMatchingVersionBucket, got {other:?}"),
     }
-
-    // The same canonical name repeated at the *same* position across rows
-    // is fine (that's just redundant documentation in the source table,
-    // not a real conflict) -- only a genuine position mismatch errors.
-    let redundant_but_fine = "canonical,^1\namount,1\namount,1\n";
-    Line::from_csv_str(Table::F3X, redundant_but_fine)
-        .expect("identical repeated positions are not a collision");
-    println!("repeated-but-identical positions parsed fine, as expected");
 
     // --- Scenario 3: strict vs. lenient body-line handling ---
     // A filing with one line whose form-type token matches no format
@@ -88,4 +73,20 @@ fn main() {
         skipped.len(),
         skipped[0]
     );
+
+    // --- Scenario 4: editing with unknown field names is an error ---
+    let mut line = ParsedLine::from_pairs(
+        Table::SchA,
+        SpecVersion::electronic(8, 5),
+        0,
+        [("form_type", "SA11AI"), ("contribution_amount", "250.00")],
+    )
+    .expect("known fields");
+    match line.set("contributon_amount", "1.00") {
+        Err(FecError::UnknownField { table, field }) => {
+            println!("refused to set '{field}' on {table}: no such field, as expected");
+        }
+        other => panic!("expected UnknownField, got {other:?}"),
+    }
+    assert_eq!(line.get("contribution_amount"), Some("250.00"));
 }

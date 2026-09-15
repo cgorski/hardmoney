@@ -27,13 +27,13 @@ fn main() {
     );
     println!("spec version:  {}", filing.version);
     println!("is amendment:  {}", filing.is_amendment);
-    if let Some(original) = &filing.amends_filing {
+    if let Some(original) = filing.amends_filing {
         println!("amends filing: {original}");
     }
     println!("body lines:    {}", filing.lines.len());
 
     // `summary` is the report's top-level cover/totals line -- a
-    // `ParsedLine` whose `fields` are keyed by canonical field name.
+    // `ParsedLine` whose fields are looked up by canonical field name.
     for field in [
         "committee_name",
         "col_a_total_receipts",
@@ -46,7 +46,7 @@ fn main() {
     let mut by_table: std::collections::BTreeMap<hardmoney::Table, usize> =
         std::collections::BTreeMap::new();
     for line in &filing.lines {
-        *by_table.entry(line.table).or_default() += 1;
+        *by_table.entry(line.table()).or_default() += 1;
     }
     println!("lines by table: {by_table:?}");
 }

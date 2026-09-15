@@ -10,7 +10,11 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use hardmoney::{Filing, Table};
+use hardmoney::{Filing, SpecVersion, Table};
+
+fn v(s: &str) -> SpecVersion {
+    s.parse().unwrap_or_else(|e| panic!("{e}"))
+}
 
 fn fixture(name: &str) -> Filing {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -46,7 +50,11 @@ fn every_fixture_parses_and_dispatches_cleanly() {
 
     for name in names {
         let filing = fixture(&name);
-        assert!(!filing.version.is_empty(), "{name}: missing version");
+        assert!(
+            filing.version.major() >= 3,
+            "{name}: implausible version {}",
+            filing.version
+        );
         assert!(
             !filing.raw_form_type.is_empty(),
             "{name}: missing form type"
@@ -58,10 +66,10 @@ fn every_fixture_parses_and_dispatches_cleanly() {
         );
         for line in &filing.lines {
             assert!(
-                !line.fields.is_empty(),
+                line.iter().len() > 0,
                 "{name}: line '{}' (table {}) parsed to zero fields",
                 line.raw_form_type,
-                line.table
+                line.table()
             );
         }
     }
@@ -87,7 +95,7 @@ fn all_fixtures_are_spec_8_5() {
             continue;
         }
         let filing = fixture(&name);
-        assert_eq!(filing.version, "8.5", "{name}: expected spec 8.5");
+        assert_eq!(filing.version, v("8.5"), "{name}: expected spec 8.5");
     }
 }
 
@@ -105,7 +113,7 @@ fn all_fixtures_are_spec_8_5() {
 #[test]
 fn older_spec_version_fixtures_use_the_correct_bucket() {
     let v3 = fixture("F3XA_27789_v3.fec");
-    assert_eq!(v3.version, "3.00");
+    assert_eq!(v3.version, v("3.00"));
     assert_eq!(v3.base_form_type, "F3X");
     assert!(v3.is_amendment);
     assert_eq!(v3.summary.get("col_a_total_receipts"), Some("180046.52"));
@@ -117,37 +125,37 @@ fn older_spec_version_fixtures_use_the_correct_bucket() {
         !v3.lines.is_empty(),
         "v3 filing should have real Schedule A/B body lines"
     );
-    assert!(v3.lines.iter().any(|l| l.table == Table::SchA));
-    assert!(v3.lines.iter().any(|l| l.table == Table::SchB));
+    assert!(v3.lines.iter().any(|l| l.table() == Table::SchA));
+    assert!(v3.lines.iter().any(|l| l.table() == Table::SchB));
 
     let v5_1 = fixture("F6N_150000_v5.1.fec");
-    assert_eq!(v5_1.version, "5.1");
+    assert_eq!(v5_1.version, v("5.1"));
     assert_eq!(v5_1.base_form_type, "F6");
 
     let v5_3 = fixture("F3XN_210000_v5.3.fec");
-    assert_eq!(v5_3.version, "5.3");
+    assert_eq!(v5_3.version, v("5.3"));
     assert_eq!(v5_3.base_form_type, "F3X");
-    assert!(v5_3.summary.fields.contains_key("col_a_total_receipts"));
+    assert!(v5_3.summary.get("col_a_total_receipts").is_some());
 
     let v6_1 = fixture("F3XN_320000_v6.1.fec");
-    assert_eq!(v6_1.version, "6.1");
+    assert_eq!(v6_1.version, v("6.1"));
     assert_eq!(v6_1.base_form_type, "F3X");
-    assert!(v6_1.summary.fields.contains_key("col_a_total_receipts"));
+    assert!(v6_1.summary.get("col_a_total_receipts").is_some());
     assert!(
         v6_1.summary
-            .fields
-            .contains_key("col_a_federal_election_activity_total")
+            .get("col_a_federal_election_activity_total")
+            .is_some()
     );
 }
 
 /// `F3XN_2011835.fec`'s header has a real stray trailing space on the
-/// version field ("8.5 "). Confirms `clean_entry`'s trim survives the
-/// round trip from raw bytes through `Filing::parse_bytes`, matching the
+/// version field ("8.5 "). Confirms field trimming survives the round
+/// trip from raw bytes through `Filing::parse_bytes`, matching the
 /// synthetic case already covered in `header.rs`'s unit tests.
 #[test]
 fn trailing_space_in_real_header_version_is_trimmed() {
     let filing = fixture("F3XN_2011835.fec");
-    assert_eq!(filing.version, "8.5");
+    assert_eq!(filing.version, v("8.5"));
 }
 
 #[test]
@@ -160,10 +168,11 @@ fn f24n_dispatches_to_schedule_e_with_correct_fields() {
 
     assert_eq!(filing.lines.len(), 1);
     let se = &filing.lines[0];
-    assert_eq!(se.table, Table::SchE);
+    assert_eq!(se.table(), Table::SchE);
+    // 2.0: values are as filed (mixed case preserved).
     assert_eq!(
         se.get("payee_organization_name"),
-        Some("STRATEGIC MEDIA PLACEMENT INC.")
+        Some("Strategic Media Placement Inc.")
     );
     assert_eq!(se.get("expenditure_amount"), Some("1074900.00"));
     assert_eq!(se.get("candidate_last_name"), Some("BROWN"));
@@ -175,14 +184,14 @@ fn f24n_dispatches_to_schedule_e_with_correct_fields() {
 fn f24n_second_sample_has_two_schedule_e_lines() {
     let filing = fixture("F24N_2011832.fec");
     assert_eq!(filing.lines.len(), 2);
-    assert!(filing.lines.iter().all(|l| l.table == Table::SchE));
+    assert!(filing.lines.iter().all(|l| l.table() == Table::SchE));
     assert_eq!(
         filing.lines[0].get("payee_organization_name"),
-        Some("DECLARATION MEDIA LLC")
+        Some("Declaration Media LLC")
     );
     assert_eq!(
         filing.lines[1].get("payee_organization_name"),
-        Some("MVAR MEDIA, LLC")
+        Some("MVAR Media, LLC")
     );
 }
 
@@ -195,9 +204,9 @@ fn f3a_large_filing_covers_diverse_schedules() {
     let filing = fixture("F3A_2011812.fec");
     assert_eq!(filing.base_form_type, "F3");
     assert!(filing.is_amendment);
-    assert_eq!(filing.amends_filing.as_deref(), Some("1997089"));
+    assert_eq!(filing.amends_filing, Some(1997089));
 
-    let tables: HashSet<Table> = filing.lines.iter().map(|l| l.table).collect();
+    let tables: HashSet<Table> = filing.lines.iter().map(|l| l.table()).collect();
     assert!(
         tables.contains(&Table::SchA),
         "expected at least one Schedule A line"
@@ -216,7 +225,7 @@ fn f3a_large_filing_covers_diverse_schedules() {
         .iter()
         .find(|l| l.raw_form_type == "SC/10")
         .expect("SC/10 line present");
-    assert_eq!(sc10.table, Table::SchC);
+    assert_eq!(sc10.table(), Table::SchC);
 
     // Real SA11AI and SA11D lines are both present and both dispatch to
     // the same SchA table (they're sub-line-number variants, not distinct
@@ -228,21 +237,21 @@ fn f3a_large_filing_covers_diverse_schedules() {
             .lines
             .iter()
             .filter(|l| l.raw_form_type == "SA11AI")
-            .all(|l| l.table == Table::SchA)
+            .all(|l| l.table() == Table::SchA)
     );
     assert!(
         filing
             .lines
             .iter()
             .filter(|l| l.raw_form_type == "SA11D")
-            .all(|l| l.table == Table::SchA)
+            .all(|l| l.table() == Table::SchA)
     );
 }
 
 #[test]
 fn f3a_second_sample_has_schedule_d_debt_lines() {
     let filing = fixture("F3A_2011822.fec");
-    let tables: HashSet<Table> = filing.lines.iter().map(|l| l.table).collect();
+    let tables: HashSet<Table> = filing.lines.iter().map(|l| l.table()).collect();
     assert!(tables.contains(&Table::SchA));
     assert!(tables.contains(&Table::SchB));
     assert!(
@@ -265,9 +274,9 @@ fn f3xa_covers_schedule_e_and_delimited_text_records() {
     let filing = fixture("F3XA_2011821.fec");
     assert_eq!(filing.base_form_type, "F3X");
     assert!(filing.is_amendment);
-    assert_eq!(filing.amends_filing.as_deref(), Some("1996410"));
+    assert_eq!(filing.amends_filing, Some(1996410));
 
-    let tables: HashSet<Table> = filing.lines.iter().map(|l| l.table).collect();
+    let tables: HashSet<Table> = filing.lines.iter().map(|l| l.table()).collect();
     for expected in [
         Table::SchA,
         Table::SchB,
@@ -284,7 +293,7 @@ fn f3xa_covers_schedule_e_and_delimited_text_records() {
     let text_lines: Vec<_> = filing
         .lines
         .iter()
-        .filter(|l| l.table == Table::Text)
+        .filter(|l| l.table() == Table::Text)
         .collect();
     assert_eq!(text_lines.len(), 3);
     assert!(
@@ -293,15 +302,15 @@ fn f3xa_covers_schedule_e_and_delimited_text_records() {
             .map(|s| !s.is_empty())
             .unwrap_or(false)
     );
-    assert!(text_lines[0].get("text").unwrap().contains("EARMARKED"));
+    assert!(text_lines[0].get("text").unwrap().contains("earmarked"));
 }
 
 #[test]
 fn f3xa_second_sample_is_amendment_with_schedule_e() {
     let filing = fixture("F3XA_2011827.fec");
     assert!(filing.is_amendment);
-    assert_eq!(filing.amends_filing.as_deref(), Some("1991972"));
-    assert!(filing.lines.iter().any(|l| l.table == Table::SchE));
+    assert_eq!(filing.amends_filing, Some(1991972));
+    assert!(filing.lines.iter().any(|l| l.table() == Table::SchE));
 }
 
 #[test]
@@ -309,19 +318,15 @@ fn f3xn_large_filing_is_not_an_amendment() {
     let filing = fixture("F3XN_2011831.fec");
     assert!(!filing.is_amendment);
     assert!(filing.amends_filing.is_none());
-    // The raw bytes contain a lowercase "SB21b" line-type token; clean_entry
-    // uppercases every field (including the form-type column) before
-    // dispatch, so by the time it's a ParsedLine its raw_form_type reads
-    // "SB21B" -- but the *dispatch itself* must still have matched
-    // case-insensitively against the original lowercase bytes, which this
-    // assertion (indirectly, via the line surviving to become a ParsedLine
-    // at all) confirms.
+    // The raw bytes contain a lowercase "SB21b" line-type token. The
+    // token is upper-cased for dispatch and in `raw_form_type`, while the
+    // `form_type` field keeps the as-filed spelling.
     let line = filing
         .lines
         .iter()
-        .find(|l| l.raw_form_type == "SB21B")
-        .expect("SB21B line present");
-    assert_eq!(line.table, Table::SchB);
+        .find(|l| l.raw_form_type == "SB21B" && l.get("form_type") == Some("SB21b"))
+        .expect("SB21b line present");
+    assert_eq!(line.table(), Table::SchB);
 }
 
 #[test]
@@ -329,7 +334,7 @@ fn f5n_dispatches_f57_subform_lines() {
     let filing = fixture("F5N_2011649.fec");
     assert_eq!(filing.base_form_type, "F5");
     assert!(!filing.lines.is_empty());
-    assert!(filing.lines.iter().all(|l| l.table == Table::F57));
+    assert!(filing.lines.iter().all(|l| l.table() == Table::F57));
 }
 
 #[test]
@@ -338,7 +343,7 @@ fn f6n_dispatches_f65_subform_line() {
         let filing = fixture(name);
         assert_eq!(filing.base_form_type, "F6");
         assert_eq!(filing.lines.len(), 1);
-        assert_eq!(filing.lines[0].table, Table::F65);
+        assert_eq!(filing.lines[0].table(), Table::F65);
     }
 }
 
@@ -347,7 +352,7 @@ fn f3n_dispatches_delimited_text_record() {
     let filing = fixture("F3N_2011557.fec");
     assert_eq!(filing.base_form_type, "F3");
     assert_eq!(filing.lines.len(), 1);
-    assert_eq!(filing.lines[0].table, Table::Text);
+    assert_eq!(filing.lines[0].table(), Table::Text);
 }
 
 /// The headline real-data discovery this session: F99's free text is
@@ -387,8 +392,7 @@ fn f99_multi_paragraph_begintext_block_preserves_line_structure_and_case() {
         .expect("text field recovered from BEGINTEXT block");
 
     // Real multi-paragraph letter: must preserve blank lines between
-    // paragraphs and must NOT be uppercased like ordinary delimited fields
-    // (clean_entry uppercases; free text must bypass that).
+    // paragraphs and its original casing.
     assert!(
         text.contains("Michael Dobi"),
         "mixed case must survive: {text}"
@@ -400,12 +404,11 @@ fn f99_multi_paragraph_begintext_block_preserves_line_structure_and_case() {
     assert!(text.starts_with("September 14, 2026"));
     assert!(text.trim_end().ends_with("C00466482"));
 
-    // Ordinary delimited fields (unlike the free-text block) go through
-    // clean_entry, which uppercases -- the real filing's own casing was
-    // "Families for James Lankford".
+    // Ordinary delimited fields keep the filing's own casing too (1.x
+    // upper-cased them).
     assert_eq!(
         filing.summary.get("committee_name"),
-        Some("FAMILIES FOR JAMES LANKFORD")
+        Some("Families for James Lankford")
     );
 }
 
@@ -422,7 +425,7 @@ fn f3xt_termination_report_dispatches_schedule_b() {
     let filing = fixture("F3XT_2011632.fec");
     assert_eq!(filing.base_form_type, "F3X");
     assert!(!filing.is_amendment);
-    assert!(filing.lines.iter().all(|l| l.table == Table::SchB));
+    assert!(filing.lines.iter().all(|l| l.table() == Table::SchB));
 }
 
 // ---------------------------------------------------------------------------
@@ -435,20 +438,20 @@ fn f3xt_termination_report_dispatches_schedule_b() {
 #[test]
 fn form_1_registration_with_f1s_continuation_parses() {
     let filing = fixture("F1A_2011905.fec");
-    assert_eq!(filing.version, "8.5");
+    assert_eq!(filing.version, v("8.5"));
     assert_eq!(filing.raw_form_type, "F1A");
     assert_eq!(filing.base_form_type, "F1");
     assert!(filing.is_amendment);
     assert!(filing.is_allowed());
-    assert_eq!(filing.summary.table, Table::F1);
+    assert_eq!(filing.summary.table(), Table::F1);
     assert_eq!(
         filing.summary.get("committee_name"),
-        Some("INDEPENDENCE BLUE CROSS LLC PAC")
+        Some("Independence Blue Cross LLC PAC")
     );
     // The F1S continuation line (additional joint fundraising participants
     // / affiliated committees) dispatches to its own table.
     assert_eq!(filing.lines.len(), 1);
-    assert_eq!(filing.lines[0].table, Table::F1S);
+    assert_eq!(filing.lines[0].table(), Table::F1S);
     assert_eq!(filing.lines[0].line_no, 3);
 }
 
@@ -457,7 +460,7 @@ fn form_1m_multicandidate_notification_parses() {
     let filing = fixture("F1MN_2011755.fec");
     assert_eq!(filing.raw_form_type, "F1MN");
     assert_eq!(filing.base_form_type, "F1M");
-    assert_eq!(filing.summary.table, Table::F1M);
+    assert_eq!(filing.summary.table(), Table::F1M);
     assert!(filing.lines.is_empty());
     assert!(
         filing
@@ -472,7 +475,7 @@ fn form_2_candidate_registration_with_f2s_authorized_committees_parses() {
     let filing = fixture("F2A_2011896.fec");
     assert_eq!(filing.raw_form_type, "F2A");
     assert_eq!(filing.base_form_type, "F2");
-    assert_eq!(filing.summary.table, Table::F2);
+    assert_eq!(filing.summary.table(), Table::F2);
     assert_eq!(filing.summary.get("candidate_id_number"), Some("S6IL00458"));
     // Three F2S lines, each naming an authorized committee. F2S has no
     // fech-sources table; ours is authored locally.
@@ -496,7 +499,7 @@ fn form_2_candidate_registration_with_f2s_authorized_committees_parses() {
 #[test]
 fn form_3_with_f3z_consolidated_lines_keeps_every_body_line() {
     let filing = fixture("F3A_767339_v8.0.fec");
-    assert_eq!(filing.version, "8.0");
+    assert_eq!(filing.version, v("8.0"));
     assert_eq!(filing.base_form_type, "F3");
     // 524 SA11AI + 52 SA11C + 58 SB17 + 2 SB20A + 2 SD10 + 2 F3Z + 1 F3ZT
     assert_eq!(filing.lines.len(), 641);
@@ -509,10 +512,10 @@ fn form_3_with_f3z_consolidated_lines_keeps_every_body_line() {
         .iter()
         .find(|l| l.raw_form_type == "F3ZT")
         .expect("consolidated F3ZT line present");
-    assert_eq!(f3zt.table, Table::F3Z);
+    assert_eq!(f3zt.table(), Table::F3Z);
     assert_eq!(
         f3zt.get("principal_committee_name"),
-        Some("DJOU FOR HAWAII")
+        Some("Djou for Hawaii")
     );
     assert_eq!(f3zt.get("filer_committee_id_number"), Some("C00441451"));
 }
