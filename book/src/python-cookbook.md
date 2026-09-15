@@ -11,6 +11,11 @@ from a run; the only edits are temporary-directory paths shortened to
 `/tmp/...` and long listings cut with `...`. Money is `decimal.Decimal`
 throughout; no script converts an amount to a float.
 
+See also: [For FEC staff](./for-fec-staff.md), the same package applied
+to the work of the Commission's own divisions (RAD review, vendor
+conformance, FECfile+, the data dumps, audit), with its own scripts in
+`python/examples/fec/`.
+
 ## The whole API on one screen
 
 ```python

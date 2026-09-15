@@ -96,8 +96,22 @@ open("fixed.fec", "wb").write(filing.to_fec())
 ```
 
 The package is the same Rust code with typed stubs and no Python
-dependencies, so it drops into a Django or pandas workflow as is. See the
-[Python chapter](https://cgorski.github.io/hardmoney/python.html).
+dependencies, so it drops into a Django or pandas workflow as is. Every
+class, method, and function carries a docstring, so `help(hardmoney.Filing)`
+at the prompt shows the same text as the reference.
+
+The Python documentation is its own part of the book:
+
+- [Getting started with Python](https://cgorski.github.io/hardmoney/python.html):
+  install, a first script, the mental model, how to find field names,
+  error handling.
+- [Python cookbook](https://cgorski.github.io/hardmoney/python-cookbook.html):
+  thirty-five runnable scripts with their output, from top donors to a
+  pre-submission check.
+- [Python API reference](https://cgorski.github.io/hardmoney/python-api.html):
+  every signature and docstring, generated from the type stub.
+- [For FEC staff](https://cgorski.github.io/hardmoney/for-fec-staff.html):
+  Python-first workflows for reviewing incoming filings.
 
 ## How it compares
 

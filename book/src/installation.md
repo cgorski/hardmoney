@@ -7,7 +7,20 @@ pip install hardmoney
 ```
 
 Wheels are published for Linux (x86_64, aarch64) and macOS (Intel and
-Apple silicon), CPython 3.9 and newer. See [Python](./python.md).
+Apple silicon), CPython 3.9 and newer; the package has no Python
+dependencies. Other platforms build from the source distribution, which
+needs a Rust toolchain. Confirm it works:
+
+```bash
+$ python -c "import hardmoney; print(hardmoney.__version__, hardmoney.BUNDLED_SPEC_VERSION)"
+3.0.0 8.5
+```
+
+The Python package is parser-only (parse, write, validate, reconcile);
+the Postgres ETL and REST API in this book are Rust and CLI only. Start
+with [Getting started with Python](./python.md); the
+[Python cookbook](./python-cookbook.md) and
+[Python API reference](./python-api.md) follow it.
 
 ## As a Rust library
 

@@ -1,5 +1,34 @@
 # Changelog
 
+## 3.0.1 — 2026-09-15
+
+- **For FEC staff** (`book/src/for-fec-staff.md`): a chapter arranged by
+  role (Reports Analysis Division first-pass review and amendment diffs,
+  Electronic Filing Office vendor conformance with the WebCheck diff,
+  FECfile+ integration points and golden fixtures, Data division dump
+  restores and raw-vs-processed comparison, audit-style cycle
+  reconciliation), each backed by a runnable script under
+  `python/examples/fec/` with captured output and a pytest module. New
+  fixtures: `F3XN_1996410.fec` (the original of the existing
+  `F3XA_2011821.fec`, a real original/amendment pair) and
+  `tests/fixtures/rad/F3XA_2011912.fec` (a real accepted report with a
+  $200 line 11(c) discrepancy).
+- **Python documentation reorganised.** The book now has a top-level
+  *Python* part (Getting started with Python, Python cookbook, Python API
+  reference, For FEC staff) ahead of the Rust chapters, with part headers
+  (*Tutorials*, *Filings*, *Data in Postgres*, *Serving*, *Reference*)
+  grouping the rest. The API reference (`book/src/python-api.md`) is
+  generated from the type stub `_hardmoney.pyi` by
+  `scripts/gen_python_api.py` (signatures, docstrings, cross-links;
+  standard library only) and checked for staleness in the book workflow.
+  The stub gains docstrings for `FecError.line_no` and the `__len__`,
+  `__iter__`, `__str__`, and `__repr__` methods, so the reference and
+  `help()` describe them. `python/README.md` (the PyPI page) is rewritten
+  to stand alone with a fuller quick start and absolute links to every
+  Python page; `pyproject.toml` adds `API reference`, `Cookbook`,
+  `For FEC staff`, `Source`, and `Issues` URLs. Installation, Quick start,
+  and the Introduction gain Python sections.
+
 ## 3.0.0 — 2026-09-15
 
 - **Breaking: one canonical field vocabulary across all 59 tables.** The

@@ -28,6 +28,8 @@ class FecError(ValueError):
     """
 
     line_no: Optional[int]
+    """The 1-based physical line the error is about, or ``None``. Always
+    present, even on an exception constructed from Python."""
 
 class UnsupportedForm(FecError):
     """The cover form has no reconciliation rule table (only F3X, F3, and F3P do)."""
@@ -158,7 +160,8 @@ class Filing:
         lines. Raises :class:`UnsupportedForm` unless the cover is F3X, F3,
         or F3P."""
 
-    def __repr__(self) -> str: ...
+    def __repr__(self) -> str:
+        """``<hardmoney.Filing F3XN v8.5 (144 body lines)>``."""
 
 @final
 class Line:
@@ -224,7 +227,9 @@ class Line:
         """The field as a ``YYYYMMDD`` date, or ``None`` when blank, zero-filled,
         or not a real date. ``KeyError`` if the field is not in the layout."""
 
-    def __repr__(self) -> str: ...
+    def __repr__(self) -> str:
+        """``<hardmoney.Line SA11AI (SchA) line 3>``: form type, table, and
+        physical line number."""
 
 @final
 class Validation:
@@ -251,10 +256,20 @@ class Validation:
     def is_acceptable(self) -> bool:
         """True when there are no error-severity findings."""
 
-    def __len__(self) -> int: ...
-    def __iter__(self) -> Iterator[Finding]: ...
-    def __str__(self) -> str: ...
-    def __repr__(self) -> str: ...
+    def __len__(self) -> int:
+        """The number of findings, errors and warnings together."""
+
+    def __iter__(self) -> Iterator[Finding]:
+        """Yield every :class:`Finding` in line order (the same list as
+        :attr:`findings`)."""
+
+    def __str__(self) -> str:
+        """One finding per line in the CLI's WebCheck style, e.g.
+        ``ERROR line 2 F3XA date_signed: 20261301 is not a Real Date``.
+        Empty when there are no findings."""
+
+    def __repr__(self) -> str:
+        """``<hardmoney.Validation 5 error(s), 0 warning(s)>``."""
 
 @final
 class Finding:
@@ -284,8 +299,13 @@ class Finding:
     def message(self) -> str:
         """A complete sentence a filer could act on, worded after the FEC's."""
 
-    def __str__(self) -> str: ...
-    def __repr__(self) -> str: ...
+    def __str__(self) -> str:
+        """The finding as one line of ``hardmoney validate`` output:
+        ``ERROR line 2 F3XA date_signed: 20261301 is not a Real Date``
+        (severity, line number, form type, field, message)."""
+
+    def __repr__(self) -> str:
+        """``<hardmoney.Finding error not_a_real_date line 2 date_signed>``."""
 
 @final
 class Reconciliation:
@@ -316,9 +336,17 @@ class Reconciliation:
         (or this spec version lacks the line). ``ValueError`` for any other
         column."""
 
-    def __len__(self) -> int: ...
-    def __str__(self) -> str: ...
-    def __repr__(self) -> str: ...
+    def __len__(self) -> int:
+        """The number of line checks (``len(r.checks)``)."""
+
+    def __str__(self) -> str:
+        """Every check as ``hardmoney reconcile`` prints it (one
+        :class:`LineCheck` per line, ``ok`` or ``DIFF``), then a summary
+        line such as ``F3X: every line agrees with its rule`` or
+        ``F3X: 2 of 69 line(s) disagree``."""
+
+    def __repr__(self) -> str:
+        """``<hardmoney.Reconciliation F3X 69 check(s), 0 mismatch(es)>``."""
 
 @final
 class LineCheck:
@@ -378,5 +406,12 @@ class LineCheck:
         amount (e.g. ``$5,500.00``). A blank value is ``reported=None`` with
         this ``False``."""
 
-    def __str__(self) -> str: ...
-    def __repr__(self) -> str: ...
+    def __str__(self) -> str:
+        """The check as one line of ``hardmoney reconcile`` output:
+        ``ok   col A line 11(a)(i)   reported 13736.02 expected 13736.02 delta 0.00  = sum of SchA.contribution_amount on SA11AI/SA11A1``
+        (``DIFF`` instead of ``ok`` when it does not match; columns are
+        padded for alignment)."""
+
+    def __repr__(self) -> str:
+        """``<hardmoney.LineCheck col A line 11(a)(i) ok>`` (``DIFF`` when the
+        check fails)."""

@@ -4,13 +4,25 @@ build-backend = "maturin"
 
 [project]
 name = "hardmoney"
-version = "3.0.0"
-description = "FEC electronic filings (.fec) in Python: parse, write, validate, and reconcile campaign-finance reports with exact decimal money. Rust core (hardmoney) via PyO3."
+version = "3.0.1"
+description = "Read, validate, reconcile, edit, and write FEC electronic filings (.fec) with exact decimal money. Every spec version since 2001; typed; no dependencies."
 readme = "README.md"
 requires-python = ">=3.9"
 license = "Apache-2.0 OR BSD-3-Clause"
 authors = [{ name = "cgorski" }]
-keywords = ["fec", "campaign-finance", "election", "parser", "government-data", "fecfile"]
+keywords = [
+  "fec",
+  "campaign-finance",
+  "election",
+  "parser",
+  "government-data",
+  "fecfile",
+  "political-action-committee",
+  "contributions",
+  "validation",
+  "reconciliation",
+  "decimal",
+]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
@@ -36,7 +48,11 @@ classifiers = [
 [project.urls]
 Homepage = "https://github.com/cgorski/hardmoney"
 Documentation = "https://cgorski.github.io/hardmoney/python.html"
-Repository = "https://github.com/cgorski/hardmoney"
+"API reference" = "https://cgorski.github.io/hardmoney/python-api.html"
+Cookbook = "https://cgorski.github.io/hardmoney/python-cookbook.html"
+"For FEC staff" = "https://cgorski.github.io/hardmoney/for-fec-staff.html"
+Source = "https://github.com/cgorski/hardmoney"
+Issues = "https://github.com/cgorski/hardmoney/issues"
 Changelog = "https://github.com/cgorski/hardmoney/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]

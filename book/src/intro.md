@@ -14,6 +14,14 @@ certain design decisions were made, and how to go from "I have a `.fec`
 file" or "I want a searchable database of committees" to a working
 program.
 
+If you work in Python, the same parser, writer, validator, and reconciler
+are on PyPI as `hardmoney` (`pip install hardmoney`), with type stubs,
+exact `decimal.Decimal` money, and no Python dependencies. The
+[Python](./python.md) part of this book has its own getting-started page,
+a [cookbook](./python-cookbook.md) of runnable scripts, and a generated
+[API reference](./python-api.md); you do not need to read the Rust
+chapters first.
+
 For a one-page map of where each kind of FEC data enters the crate and
 which module, command, and table handles it, see
 [How data flows through hardmoney](./architecture.md).
@@ -107,10 +115,12 @@ that matches what you're trying to do:
 1. [Installation](./installation.md): get `hardmoney` building.
 2. [Quick start](./quick-start.md): parse your first filing in under a
    minute.
-3. [Tutorials](./tutorials.md): five goal-driven walkthroughs: funding
+3. [Python](./python.md): the package on PyPI, its cookbook, its API
+   reference, and a guide for FEC staff.
+4. [Tutorials](./tutorials.md): five goal-driven walkthroughs: funding
    a candidate, loading a full cycle, tracking independent expenditures,
    building a Rust pipeline, and what the tool does with messy FEC data.
-4. [Parsing a filing, explained](./parsing-explained.md): what's inside
+5. [Parsing a filing, explained](./parsing-explained.md): what's inside
    a `.fec` file and how the parser turns it into structured data.
    - [Strict vs. lenient parsing](./strict-vs-lenient.md): what happens
      when one line of a filing can't be parsed, and how to choose.
@@ -118,22 +128,22 @@ that matches what you're trying to do:
      not change about a field value.
    - [Streaming large filings](./streaming.md): `FilingReader` and
      `Filing::open`: one pass over a 135 MB filing in 10 MB of memory.
-5. [Tables and typed views](./typed-views.md): the `Table` enum, the
+6. [Tables and typed views](./typed-views.md): the `Table` enum, the
    `view()`/`views()` typed layer, and why money, dates, and names need
    special handling.
-6. [The schema](./library-schema.md): `SpecVersion`, per-version
+7. [The schema](./library-schema.md): `SpecVersion`, per-version
    `Layout`s, the FEC's `FieldSpec` rows, and compile-time-checked field
    access with `Field<T>` and `Typed<T>`.
-7. [Writing `.fec` files](./writing-fec.md): `Filing::to_fec` and
+8. [Writing `.fec` files](./writing-fec.md): `Filing::to_fec` and
    `hardmoney write`: the exact inverse of parsing, and how to edit a
    filing and write it back.
-8. [Reconciling a filing](./reconciling.md): does the cover page
+9. [Reconciling a filing](./reconciling.md): does the cover page
    agree with the schedules? `Filing::reconcile`, the $200 itemization
    threshold, and a real filing that is $200 off.
-9. [Validating a filing](./validating.md): the FEC's acceptance rules
-   as `Filing::validate` and `hardmoney validate`: the 32 rules, where
-   they come from, and where hardmoney deliberately differs.
-10. [Loading bulk data into Postgres](./bulk-etl.md): go from "the FEC's
+10. [Validating a filing](./validating.md): the FEC's acceptance rules
+    as `Filing::validate` and `hardmoney validate`: the 32 rules, where
+    they come from, and where hardmoney deliberately differs.
+11. [Loading bulk data into Postgres](./bulk-etl.md): go from "the FEC's
     own bulk downloads" to a normalized, migrated, queryable schema.
     - [Namespaces](./namespaces.md): many isolated sessions in one
       database.
@@ -141,13 +151,13 @@ that matches what you're trying to do:
       `--if-changed`, and the `loads` table.
     - [Dates](./dates.md): the FEC's two date formats and the raw/parsed
       twin columns.
-11. [The REST API](./rest-api.md): serve that database over HTTP, with
+12. [The REST API](./rest-api.md): serve that database over HTTP, with
     real request/response examples.
     - [Hardening the API](./api-hardening.md): API keys, CORS, timeouts,
       and what error responses look like.
-12. [CLI reference](./cli-reference.md): every subcommand, with options,
+13. [CLI reference](./cli-reference.md): every subcommand, with options,
     including `write`, `reconcile`, `validate`, `query`, and `spec`.
-13. [Troubleshooting & FAQ](./troubleshooting.md).
+14. [Troubleshooting & FAQ](./troubleshooting.md).
 
 Every command and every piece of output shown in this book was run
 against hardmoney while writing it, using the crate's own bundled test

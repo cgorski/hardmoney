@@ -1,8 +1,8 @@
 # Quick start
 
-This chapter parses a real filing two ways, as a CLI command and as a
-five-line Rust program, so you can see the shape of the data before
-getting into how the parser works.
+This chapter parses a real filing three ways, as a CLI command, as a
+five-line Rust program, and as a five-line Python script, so you can see
+the shape of the data before getting into how the parser works.
 
 ## Parsing a filing from the command line
 
@@ -200,6 +200,36 @@ total: $40961.43
 largest: $10170.37 from ONE TEAM SENATE MAJORITY on Some(2026-08-05)
 ```
 
+## Parsing a filing from Python
+
+The same Form 3X from Python, after `pip install hardmoney`
+([Installation](./installation.md#python)):
+
+```python
+import hardmoney
+
+filing = hardmoney.parse_file("tests/fixtures/F3XN_2011834.fec")
+print(filing.form_type, filing.base_form_type, filing.version, len(filing.lines))
+print(filing.summary["committee_name"], filing.summary.amount("col_a_total_receipts"), filing.summary.amount("col_a_total_disbursements"))
+print({t: len(filing.lines_for(t)) for t in ("SchA", "SchB")})
+largest = max(filing.lines_for("SchA"), key=lambda l: l.amount("contribution_amount"))
+print(largest["contributor_organization_name"], largest.amount("contribution_amount"), largest.date("contribution_date"))
+```
+
+```text
+F3XN F3X 8.5 16
+Republican Majority Fund 30408.30 22579.85
+{'SchA': 9, 'SchB': 7}
+ONE TEAM SENATE MAJORITY 10170.37 2026-08-05
+```
+
+The Python package skips the raw-string layer: `line[name]` is the value
+as filed, and `line.amount(name)` and `line.date(name)` return a
+`decimal.Decimal` and a `datetime.date` directly. `filing.validate()` and
+`filing.reconcile()` are the CLI's `validate` and `reconcile` commands as
+method calls. [Getting started with Python](./python.md) continues from
+here.
+
 ## Fetching a filing live from the FEC (optional)
 
 If you have the `fetch` feature enabled (on by default) and network
@@ -224,6 +254,9 @@ covered in full in [Tables and typed views](./typed-views.md).
 
 ## Where to go next
 
+- Working in Python? Read [Getting started with Python](./python.md),
+  then the [Python cookbook](./python-cookbook.md) for worked examples
+  and the [Python API reference](./python-api.md) for every signature.
 - Want to understand exactly what's inside a `.fec` file and how the
   parser handles decades of format changes? Read
   [Parsing a filing, explained](./parsing-explained.md).

@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - "book/**"
+      - "python/python/hardmoney/_hardmoney.pyi"
+      - "scripts/gen_python_api.py"
       - ".github/workflows/book.yml"
   workflow_dispatch:
 
@@ -41,6 +43,18 @@ jobs:
           curl -sSL https://github.com/badboy/mdbook-mermaid/releases/download/v0.17.1/mdbook-mermaid-v0.17.1-x86_64-unknown-linux-gnu.tar.gz \
             | tar -xz -C "$HOME/.cargo/bin"
           mdbook-mermaid --version
+
+      # book/src/python-api.md is generated from the Python type stub and
+      # committed so a local `mdbook build` needs no extra step. Regenerate
+      # it to a temporary path and fail if the committed copy is stale (the
+      # script needs only the standard library; no Rust build).
+      - name: Check the generated Python API reference is current
+        run: |
+          python3 scripts/gen_python_api.py --output "$RUNNER_TEMP/python-api.md"
+          if ! diff -u book/src/python-api.md "$RUNNER_TEMP/python-api.md"; then
+            echo "::error file=book/src/python-api.md::stale; run python3 scripts/gen_python_api.py and commit the result"
+            exit 1
+          fi
 
       - name: Build book
         run: mdbook build book
