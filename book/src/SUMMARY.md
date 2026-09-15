@@ -17,6 +17,7 @@
 - [Tables and Typed Views](./typed-views.md)
 - [The Schema: Versions, Layouts, and Compile-Time-Checked Fields](./library-schema.md)
 - [Writing `.fec` Files](./writing-fec.md)
+- [Exporting a Filing](./exporting.md)
 - [Reconciling a Filing](./reconciling.md)
 - [Validating a Filing](./validating.md)
 - [Loading Bulk Data into Postgres](./bulk-etl.md)

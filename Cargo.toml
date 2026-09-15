@@ -76,17 +76,29 @@ tower-http = { version = "0.7", features = ["trace", "cors", "timeout", "validat
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
+# export (optional): `hardmoney export` and the `export` module. Parquet
+# needs the Arrow columnar model; `zstd` is the only codec we write.
+# SQLite is compiled in (`bundled`) so the binary has no system dependency.
+# rusqlite is held at 0.39 (libsqlite3-sys 0.37) because sqlx 0.9's
+# optional sqlx-sqlite requires libsqlite3-sys < 0.38, and Cargo allows only
+# one crate in the lockfile to `links = "sqlite3"` even when the feature
+# that would pull it in is off. Bump alongside sqlx.
+arrow = { version = "59", default-features = false, optional = true }
+parquet = { version = "59", default-features = false, features = ["arrow", "zstd"], optional = true }
+rusqlite = { version = "0.39", features = ["bundled"], optional = true }
+
 # cli (optional, required for the `hardmoney` binary)
 clap = { version = "4", features = ["derive", "env"], optional = true }
 dotenvy = { version = "0.15", optional = true }
 
 [features]
-default = ["fetch", "bulk", "api", "cli"]
+default = ["fetch", "bulk", "api", "cli", "export"]
 fetch = ["dep:ureq"]
 serde = ["dep:serde", "dep:serde_json", "rust_decimal/serde", "compact_str/serde"]
+export = ["dep:arrow", "dep:parquet", "dep:rusqlite", "serde"]
 bulk = ["dep:sqlx", "dep:whoami", "dep:zip", "dep:tokio", "dep:ureq", "dep:indicatif", "serde"]
 api = ["dep:axum", "dep:tower", "dep:tower-http", "dep:tracing", "dep:tracing-subscriber", "dep:tokio", "bulk", "serde"]
-cli = ["dep:clap", "dep:dotenvy", "bulk", "api", "fetch"]
+cli = ["dep:clap", "dep:dotenvy", "bulk", "api", "fetch", "export"]
 
 [dev-dependencies]
 rust_decimal_macros = "1"

@@ -21,6 +21,7 @@ Commands:
   write              Parse a `.fec` filing and write it back out in canonical form
   reconcile          Recompute a report's cover-page totals from its schedules and show every line that disagrees
   validate           Check a .fec file against the FEC's acceptance rules
+  export             Export a .fec filing's records as CSV, JSON Lines, Parquet, or SQLite
   schema-init        Create or upgrade the Postgres schema in the target namespace
   schema-status      Show migration state and recorded loads for the target namespace
   schema-list        List hardmoney namespaces (schemas) in the database
@@ -43,8 +44,9 @@ Database commands read DATABASE_URL (or --database-url) and an optional HARDMONE
 
 ## The two flags every database command shares
 
-Every subcommand except `parse`, `write`, `reconcile`, `validate`, and
-`spec` (which work on files and bundled data, with no database) takes
+Every subcommand except `parse`, `write`, `reconcile`, `validate`,
+`export`, and `spec` (which work on files and bundled data, with no
+database) takes
 these, so they're described once here and shown verbatim in each block
 below:
 
@@ -127,6 +129,60 @@ A difference prints `MISMATCH: ...` lines on stderr (`header differs`,
 `cover line differs`, `line count differs: A vs B`, `line N differs`)
 and exits 1. Exits 1 on a parse error. See
 [Writing `.fec` Files](./writing-fec.md).
+
+## `export`
+
+```text
+$ hardmoney export -h
+Export a .fec filing's records as CSV, JSON Lines, Parquet, or SQLite
+
+Usage: hardmoney export [OPTIONS] <PATH>
+
+Arguments:
+  <PATH>  Path to a `.fec` file
+
+Options:
+  -f, --format <FORMAT>    Output format. csv/jsonl/parquet write one `<Table>.<ext>` file per table into a directory; sqlite writes one database file [default: csv] [possible values: csv, jsonl, parquet, sqlite]
+  -o, --out <OUT>          Output directory (csv/jsonl/parquet) or database file (sqlite). Created if missing; existing per-table files are replaced, existing SQLite tables are appended to. [default: ./<file-stem>.<format>]
+      --only <ONLY>        Export only these tables, comma-separated: table names (SchA, F3X, TEXT; case-insensitive) or upper-case form-type tokens (SA, SB21B, SE). The cover line is included only if its table is listed
+      --include-filing-id  Prepend a `filing_id` column, taken from the file name (the last run of 4+ digits in its stem, e.g. 2011821 for F3XA_2011821.fec). Fails if the name has none
+      --lenient            Skip body lines that cannot be parsed (unknown form type, or no column layout for this spec version) instead of failing; the count is reported on stderr
+  -h, --help               Print help (see more with '--help')
+```
+
+(`--help` additionally describes each `--format` value.) Streams the
+filing through `FilingReader` and writes one table per record type --
+`F3X` for the cover line, `SchA`, `SchB`, `TEXT`, ... -- named as
+`hardmoney spec tables` lists them. Every table has the columns
+`filing_id` (with `--include-filing-id`), `line_no`, then the layout's
+fields in FEC column order starting with `form_type`. `csv`, `jsonl`,
+and `parquet` write `<out>/<Table>.<ext>`; `sqlite` writes one database
+with one table per `Table` plus a `filings` metadata row (`filing_id`,
+`form_type`, `version`, `committee_id`, `path`, `exported_at`). Amounts
+are exact everywhere: text as filed in csv/jsonl/sqlite,
+`Decimal128(38, 2)` in Parquet, where `NUM-8` dates are also `Date32`
+and everything else is `Utf8`. Ends with a summary table:
+
+```text
+$ hardmoney export tests/fixtures/F3XA_2011821.fec --format parquet --out /tmp/x
+table  rows   bytes
+-----  ----  ------
+F3X       1  49,868
+SchA      5  15,032
+SchB      7  14,475
+SchE      6  14,247
+SchD      5   7,499
+TEXT      3   2,901
+6 table(s), 27 row(s), 104,022 bytes -> /tmp/x/
+```
+
+(For `sqlite` the `bytes` column is omitted and the total is the
+database file's size.) With `--lenient`, `warning: N unparseable
+line(s) skipped (--lenient)` goes to stderr. `--only` takes table names
+(case-insensitive) or upper-case form-type tokens; anything else is a
+usage error (exit 2) naming the token. Exits 1 on a parse error, an
+unwritable output, or `--include-filing-id` on a file name with no
+4+-digit run. See [Exporting a Filing](./exporting.md).
 
 ## `reconcile`
 
@@ -805,5 +861,5 @@ name, column | from, to}]}], unchanged: [table, ...]}`.
 | Code | Meaning |
 |---|---|
 | 0 | success (including `bulk-load --if-changed` skipping an unchanged file, `bulk-restore-dump` succeeding despite `pg_restore`'s expected warnings, and `validate` finding only warnings without `--strict-warnings`) |
-| 1 | a runtime error: parse failure, database error, refused replace, pending migrations, `bulk-load-all` with at least one failed source, `schema-drop` without `--yes`, `write --check` with a record that does not round-trip, `reconcile` with a disagreeing line (or an unsupported form), `validate` with an error finding (or any finding under `--strict-warnings`), a non-2xx API response from `query`, a `spec` version or table the bundled data does not have |
-| 2 | invalid command-line usage (clap): unknown flag, odd `--cycle`, invalid `--schema` name, `query --limit` outside 1-500, an unknown `spec` table name or malformed version |
+| 1 | a runtime error: parse failure, database error, refused replace, pending migrations, `bulk-load-all` with at least one failed source, `schema-drop` without `--yes`, `write --check` with a record that does not round-trip, `reconcile` with a disagreeing line (or an unsupported form), `validate` with an error finding (or any finding under `--strict-warnings`), a non-2xx API response from `query`, a `spec` version or table the bundled data does not have, `export` to an unwritable path or `export --include-filing-id` on a file name with no id |
+| 2 | invalid command-line usage (clap): unknown flag, odd `--cycle`, invalid `--schema` name, `query --limit` outside 1-500, an unknown `spec` table name or malformed version, an unknown `export --only` token or `--format` |

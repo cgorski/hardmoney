@@ -3,6 +3,7 @@
 
 pub mod bulk;
 pub mod db_args;
+pub mod export;
 pub mod parse;
 pub mod query;
 pub mod reconcile;
@@ -42,6 +43,8 @@ enum Command {
     Reconcile(reconcile::ReconcileArgs),
     /// Check a .fec file against the FEC's acceptance rules.
     Validate(validate::ValidateArgs),
+    /// Export a .fec filing's records as CSV, JSON Lines, Parquet, or SQLite.
+    Export(export::ExportArgs),
     /// Create or upgrade the Postgres schema in the target namespace.
     SchemaInit(schema::SchemaInitArgs),
     /// Show migration state and recorded loads for the target namespace.
@@ -73,6 +76,7 @@ pub async fn run() -> CliResult {
         Command::Write(a) => write::run(a),
         Command::Reconcile(a) => reconcile::run(a),
         Command::Validate(a) => validate::run(a),
+        Command::Export(a) => export::run(a),
         Command::SchemaInit(a) => schema::init(a).await,
         Command::SchemaStatus(a) => schema::status(a).await,
         Command::SchemaList(a) => schema::list(a).await,

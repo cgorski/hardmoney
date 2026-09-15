@@ -57,6 +57,9 @@ pub mod db;
 #[cfg(feature = "api")]
 pub mod api;
 
+#[cfg(feature = "export")]
+pub mod export;
+
 #[cfg(feature = "bulk")]
 pub mod cycle;
 
