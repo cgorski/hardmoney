@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.1.1 — 2026-09-15 (Python package only)
+
+- `hardmoney.compat.fecfile_validate.validate_file` and `load_filing`
+  accept a `str` path to an existing file (a single-line `str` naming a
+  file is read; a multi-line `str` is still `.fec` content, as FECfile+'s
+  composer returns). Previously `validate_file("report.fec")` parsed the
+  file name as content and reported "filing has no cover/summary line".
+
 ## 3.1.0 — 2026-09-15
 
 - **Release hygiene for institutional users.** `SECURITY.md` (supported

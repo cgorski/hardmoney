@@ -64,9 +64,13 @@ __all__ = [
 
 FecData = Union[bytes, bytearray, str, "os.PathLike[str]"]
 """What the functions here accept: ``.fec`` content as ``bytes`` or ``str``,
-or a path as any :class:`os.PathLike` (a :class:`pathlib.Path`). A plain
-``str`` is always content, never a path, because that is what FECfile+'s
-``.fec`` composer returns."""
+or a path as any :class:`os.PathLike` (a :class:`pathlib.Path`) or as a
+``str`` naming an existing file. A ``str`` is treated as content when it
+contains a line break (a filing is at least two lines: ``HDR`` and the
+cover), which is what FECfile+'s ``.fec`` composer returns; a single-line
+``str`` that names an existing file is read as that file. A single-line
+``str`` that names no file is parsed as content and fails with the
+parser's "no cover line" message."""
 
 _FS = "\x1c"
 
@@ -155,6 +159,8 @@ def load_filing(data: FecData, *, lenient: bool = False) -> hardmoney.Filing:
     """
     if isinstance(data, os.PathLike):
         return hardmoney.parse_file(os.fspath(data), lenient=lenient)
+    if isinstance(data, str) and "\n" not in data and "\r" not in data and os.path.isfile(data):
+        return hardmoney.parse_file(data, lenient=lenient)
     if isinstance(data, (bytes, bytearray, str)):
         return hardmoney.parse(data, lenient=lenient)
     raise TypeError(f"expected bytes, str, or os.PathLike, got {type(data).__name__}")

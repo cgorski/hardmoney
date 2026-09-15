@@ -34,7 +34,9 @@ from hardmoney.compat import fecfile_validate as fv
 
 `validate_file(data)` takes `.fec` content as `bytes` or `str` (what
 FECfile+'s `compose_dot_fec` returns), or a path as any `os.PathLike`
-(a `pathlib.Path`). A plain `str` is always content, never a path.
+(a `pathlib.Path`) or as a `str` naming an existing file. A multi-line
+`str` is always content; a single-line `str` is read as a path when a
+file of that name exists.
 
 ```python
 result = fv.validate_file(golden / "f3x_duplicate_transaction_id.fec")

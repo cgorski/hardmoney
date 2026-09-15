@@ -68,6 +68,8 @@ def test_accepts_bytes_str_and_paths_alike() -> None:
     from_path = fv.validate_file(path)
     from_bytes = fv.validate_file(path.read_bytes())
     from_str = fv.validate_file(path.read_bytes().decode("utf-8"))
+    from_str_path = fv.validate_file(str(path))
+    assert from_str_path.errors == from_path.errors and from_str_path.warnings == from_path.warnings
     assert from_path.errors == from_bytes.errors == from_str.errors
     assert len(from_path.errors) == 1
 
