@@ -31,15 +31,12 @@ committee"* is harder than it should be. hardmoney makes it one command.
 |---|---|
 | **Parser** | Every FEC electronic spec, 3.x → 8.5, including Form 1/2 registrations, F3Z consolidated reports, and Schedule I — forms most tools skip. Strict by default; lenient mode tells you exactly which lines it skipped and why. Field values come back **verbatim** (trimmed, nothing else); codes are interpreted case-insensitively. Streaming `Filing::open` / `FilingReader` for 135 MB presidential filings in constant memory. |
 | **Schema as data** | The FEC's column positions for every spec version and its field specifications (type, length, required level, rule text) are compiled into the crate: `SpecVersion`, `Layout`, `FieldSpec`. Generated `Field<T>` constants (`sch_a::CONTRIBUTION_AMOUNT`) and `Typed<T>` views make asking an F3X cover page for a Schedule A field a **compile error**. `hardmoney spec` exports or diffs it. |
-| **Validator** | `hardmoney validate` checks a filing against the FEC's acceptance rules — required fields, types and lengths, real dates, amount formats, ID formats, legal characters, unique transaction IDs, back-references — WebCheck-style, one finding per line, exit 1 if the FEC would reject it. |
+| **Validator** | `hardmoney validate` checks a filing against the FEC's acceptance rules — required fields, types and lengths, real dates, amount formats, ID formats, legal characters, unique transaction IDs, back-references — WebCheck-style, one finding per line, exit 1 if the FEC would reject it. Zero error-severity false positives across 102 FEC-accepted filings. |
+| **Reconciler** | `hardmoney reconcile` recomputes every cover-page line of a Form 3X / 3 / 3P from its schedules and formulas with exact decimal math — memo entries excluded, the $200 itemization threshold respected — and shows each line's reported vs. expected value. Agrees with the FEC's own FECfile+ calculator on its test data, and implements the allocation lines (H3–H6) that FECfile+ leaves stubbed. |
+| **Writer** | `Filing::to_fec` is the exact inverse of parsing: edit a filing with `ParsedLine::set`, write it back, and it re-parses field-for-field identical (proven on every fixture and by property tests). `hardmoney write --check` round-trips any file. |
 | **Typed views** | `ScheduleA`, `ScheduleB`, `ScheduleE`, `Form3XSummary` with exact `Decimal` money, real dates, and names that resolve across old and new spec formats. Table-checked: a Schedule A line can't masquerade as a Schedule E. |
 | **Postgres ETL** | All ten FEC bulk files, streamed straight into `COPY`. Transactional replace-reload that mirrors the FEC's weekly file exactly (including deletions). Isolated **namespaces** so one database holds many cycles, snapshots, or investigations. Versioned migrations. |
 | **REST API + `query`** | Candidates, committees, itemized contributions and disbursements, independent expenditures, and per-filing Schedule E — with API keys, CORS allow-lists, timeouts, trigram-indexed search, and out-of-range `limit`/`offset` answered with a 400 rather than silently clamped. `hardmoney query` runs the same routes from the terminal, no server or `curl` needed. |
-
-Also arriving in the 2.0 release: a `Filing::to_fec` writer (the exact
-inverse of parsing, so a filing can be edited and written back out) and
-`Filing::reconcile`, which checks a cover page's totals against its
-schedules to the cent.
 
 **Where it stands out** (per a September 2026 survey of FEC tooling): the
 only active parser covering pre-v6 filings; exact decimal money where others

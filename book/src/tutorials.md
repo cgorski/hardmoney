@@ -22,6 +22,18 @@ The tutorials are independent. Each opens by saying who it's for and what
 you'll have at the end, and each links to the reference chapters rather
 than repeating them.
 
+Three jobs that arrived with 2.0 have no tutorial of their own because
+each is one command: checking whether the FEC would accept a filing
+(`hardmoney validate`), checking whether a report's cover page agrees
+with its schedules (`hardmoney reconcile`), and writing an edited filing
+back out (`hardmoney write`). Their chapters --
+[Validating a Filing](./validating.md),
+[Reconciling a Filing](./reconciling.md), and
+[Writing `.fec` Files](./writing-fec.md) -- are written in the same
+style, with real filings and real output, and
+[Streaming Large Filings](./streaming.md) covers the 135 MB case the
+Rust tutorial's eager parser would not fit in memory for.
+
 ## Conventions used in every tutorial
 
 - **`hardmoney`** in a command means the built binary. After

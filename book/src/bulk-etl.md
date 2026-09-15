@@ -398,7 +398,7 @@ $ cargo run --quiet --bin hardmoney -- bulk-load-filing --schema book_demo --str
 ```
 
 ```text
-error: filing parse error: couldn't find a line parser for form type 'ZZZ' (spec version '8.5') at line 5
+error: filing parse error: no format table for form type 'ZZZ' (spec version 8.5) at line 5
 ```
 
 Re-ingesting the same filing id replaces the previous rows (header,

@@ -26,7 +26,7 @@ $ cargo run --quiet --bin hardmoney -- parse /tmp/with_junk.fec
 ```
 
 ```text
-error: couldn't find a line parser for form type 'ZZZ' (spec version '8.5') at line 5
+error: no format table for form type 'ZZZ' (spec version 8.5) at line 5
 ```
 
 The command exits with status 1 and prints no JSON. Line 5 is right: the
@@ -89,7 +89,7 @@ match Filing::parse(&content) {
 ```
 
 ```text
-refused at line Some(5): couldn't find a line parser for form type 'ZZZ' (spec version '8.5') at line 5
+refused at line Some(5): no format table for form type 'ZZZ' (spec version 8.5) at line 5
 ```
 
 Lenient, via `Filing::parse_with` and `ParseOptions::LENIENT`:
@@ -161,12 +161,15 @@ skipped, and each `SkippedLine` says which via its `reason`:
 | `NoLayoutForVersion` | the table exists, but has no column layout for this filing's spec version (typically a filing newer than the bundled tables) | `FecError::NoMatchingVersionBucket { table, version, line_no }` |
 
 Everything that isn't about one body line **always fails**, in either
-mode: an unrecognized header, a missing summary line
-(`FecError::MissingFormLine`), an amendment whose header doesn't say what
-it amends (`FecError::AmendmentOriginalNotFound`), or a `[BEGINTEXT]`
-free-text block that's never closed with `[ENDTEXT]`
-(`FecError::UnterminatedTextBlock { line_no }`). Those mean the file as a
-whole can't be trusted, so there's nothing sensible to "keep going" with.
+mode: an unrecognized header version
+(`FecError::UnknownElectronicHeaderVersion`), a missing summary line
+(`FecError::MissingFormLine`), or a `[BEGINTEXT]` free-text block that's
+never closed with `[ENDTEXT]` (`FecError::UnterminatedTextBlock { line_no
+}`). Those mean the file as a whole can't be trusted, so there's nothing
+sensible to "keep going" with. (An amendment whose header doesn't say
+what it amends is *not* a parse error in 2.0 -- `filing.amends_filing`
+is simply `None`, and [`hardmoney validate`](./validating.md) reports it
+as `amendment_needs_original_id`, which is how the FEC treats it.)
 
 `ParseOptions` is two independent knobs, so you can also mix them -- skip
 unknown form types but fail on missing version layouts, say:

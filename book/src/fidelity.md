@@ -7,18 +7,29 @@ get from `line.get(..)`, because 1.x did more than it should have, and
 the difference matters if you compare a 1.x pipeline's output with a 2.0
 one.
 
-## The 2.0 rule: verbatim, except trimming
+## The 2.0 rule: verbatim, except two wire conventions
 
 Every field value is preserved **byte for byte, except that leading and
-trailing ASCII whitespace is trimmed**. That is the whole rule.
+trailing ASCII whitespace is trimmed and one pair of wrapping double
+quotes is removed**. That is the whole rule.
 
 - Trimmed: space, tab, CR, LF, form feed, vertical tab -- at the ends of
   the value only. The FEC's own ingestion trims these, and several
   historical filing vendors padded fields to fixed widths, so keeping
   them would be keeping noise.
+- Unwrapped: exactly one pair of surrounding double quotes, then trimmed
+  again (`"BRABANT"` -> `BRABANT`, `" SD12 "` -> `SD12`, `""` -> empty).
+  Some vendors -- CMDI Crimson Filer among them -- quote every text
+  field even in ASCII-28-delimited files, and the FEC's validator
+  accepts and strips the wrapping (its message #26 is "Invalid
+  double-quote surround text field"). A lone or unbalanced quote is
+  data and is kept (`"abc` stays `"abc`); so is anything inside
+  (`""x""` -> `"x"`, `say "hi"` stays `say "hi"`). Whatever quote
+  survives this is therefore genuinely embedded, which is what
+  `hardmoney validate` reports as `embedded_double_quote`.
 - Not trimmed: anything inside the value, and any non-ASCII whitespace
   (a non-breaking space in a name is data, not padding).
-- Not touched: case, punctuation, quotes, angle brackets, ampersands,
+- Not touched: case, punctuation, angle brackets, ampersands,
   backslashes, pipes -- anything at all. `AT&T` stays `AT&T`;
   `O'Brien "Bob" <b>` stays exactly that.
 
@@ -105,9 +116,9 @@ loader use.
 
 The `form_type` *field* (`line.get("form_type")`) keeps the token exactly
 as filed, `"sb21b"` and all. That is what the writer emits, so a
-round-tripped filing is byte-identical, and it is what you want if you
-are auditing which vendor's software wrote a file. `ParsedLine::set("form_type", ..)`
-updates both.
+round-tripped filing keeps the filer's spelling, and it is what you want
+if you are auditing which vendor's software wrote a file.
+`ParsedLine::set("form_type", ..)` updates both.
 
 ## What is still normalised
 
@@ -126,4 +137,7 @@ the types involved:
   parse a copy; `get` on the same field still returns the string as
   filed.
 
-Everything else you get back is what the filer sent.
+Everything else you get back is what the filer sent -- and because the
+parser keeps it, the writer can put it back:
+[Writing `.fec` Files](./writing-fec.md) is the other half of this
+chapter.

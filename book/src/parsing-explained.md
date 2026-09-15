@@ -59,9 +59,10 @@ research, not just watching current filings come in.
 
 `hardmoney` handles this with two pieces working together:
 
-- `header::parse` looks at the version string in the very first line and
-  picks the correct header field layout (the "old" 8-field layout for
-  3.x/4.x/5.x, or the "new" 7-field layout for 6.x and later).
+- `Header::from_fields` parses the version string in the very first line
+  into a `SpecVersion` and picks the correct header layout (the "old"
+  nine-column layout with `name_delim` for 3.x/4.x/5.x, or the "new"
+  eight-column layout for 6.x and later).
 - Every schedule's column-position data is itself *version-bucketed* --
   for example, the Form 3X format table defines separate column-position
   buckets for `8.5|8.4|...|6.1`, for `5.3|5.2|5.1|5.0`, and for `3`, so a
@@ -260,10 +261,11 @@ leave unrouted. Some of them matter more than their obscurity suggests:
 
   ```json
   {
-    "amends_filing": "467627",
-    "base_form_type": "F3",
     "form_type": "F3A",
+    "base_form_type": "F3",
+    "version": "8.0",
     "is_amendment": true,
+    "amends_filing": 467627,
     "line_count": 641,
     "lines_by_table": {
       "F3Z": 3,
@@ -272,7 +274,7 @@ leave unrouted. Some of them matter more than their obscurity suggests:
       "SchD": 2
     },
     "skipped_count": 0,
-    "version": "8.0"
+    "skipped": []
   }
   ```
 

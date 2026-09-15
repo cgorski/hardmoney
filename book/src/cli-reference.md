@@ -18,6 +18,8 @@ Usage: hardmoney <COMMAND>
 
 Commands:
   parse              Parse a single `.fec` filing and print a JSON summary
+  write              Parse a `.fec` filing and write it back out in canonical form
+  reconcile          Recompute a report's cover-page totals from its schedules and show every line that disagrees
   validate           Check a .fec file against the FEC's acceptance rules
   schema-init        Create or upgrade the Postgres schema in the target namespace
   schema-status      Show migration state and recorded loads for the target namespace
@@ -41,9 +43,10 @@ Database commands read DATABASE_URL (or --database-url) and an optional HARDMONE
 
 ## The two flags every database command shares
 
-Every subcommand except `parse`, `validate`, and `spec` (which work on
-files and bundled data, with no database) takes these, so they're
-described once here and shown verbatim in each block below:
+Every subcommand except `parse`, `write`, `reconcile`, `validate`, and
+`spec` (which work on files and bundled data, with no database) takes
+these, so they're described once here and shown verbatim in each block
+below:
 
 | Flag | Environment variable | Default | Meaning |
 |---|---|---|---|
@@ -83,6 +86,94 @@ The JSON output has the keys `form_type`, `base_form_type`, `version`,
 `lines`. See [Quick Start](./quick-start.md) for real examples and
 [Strict vs. Lenient Parsing](./strict-vs-lenient.md) for `--lenient`.
 Exits 1 on a parse error.
+
+## `write`
+
+```text
+$ hardmoney write --help
+Parse a `.fec` filing and write it back out in canonical form
+
+Usage: hardmoney write [OPTIONS] <PATH>
+
+Arguments:
+  <PATH>  Path to a `.fec` file
+
+Options:
+  -o, --out <OUT>  Output path. Defaults to stdout
+      --lenient    Skip body lines that cannot be parsed instead of failing (they are omitted from the output and listed on stderr)
+      --check      Instead of writing, re-parse the written bytes and report whether every record round-trips; exit 1 if not
+  -h, --help       Print help
+```
+
+Parses the file and writes it back through `Filing::to_fec`: `CRLF`
+line endings, ASCII-28 delimiting for spec 6.0+ (comma with CSV quoting
+only where needed for 3.x-5.x), every record padded to its layout's
+full column count, fields trimmed with wrapping quotes removed, a Form
+99's free text as a `[BEGINTEXT]` block, and Windows-1252 encoding when
+every character is representable (else UTF-8). Output goes to stdout or
+`-o FILE`. With `--lenient`, a body line that cannot be parsed is
+omitted from the output and reported as `warning: omitted line N: ...`
+on stderr.
+
+`--check` writes nothing: it re-parses the canonical bytes and compares
+header, cover line, and every body line with the original parse:
+
+```text
+$ hardmoney write --check tests/fixtures/F3XA_2011827.fec
+OK: tests/fixtures/F3XA_2011827.fec round-trips (6 body lines, 1867 bytes in, 1876 bytes out)
+```
+
+A difference prints `MISMATCH: ...` lines on stderr (`header differs`,
+`cover line differs`, `line count differs: A vs B`, `line N differs`)
+and exits 1. Exits 1 on a parse error. See
+[Writing `.fec` Files](./writing-fec.md).
+
+## `reconcile`
+
+```text
+$ hardmoney reconcile --help
+Recompute a report's cover-page totals from its schedules and show every line that disagrees
+
+Usage: hardmoney reconcile [OPTIONS] <PATH>
+
+Arguments:
+  <PATH>  Path to a `.fec` file (Form 3X, 3, or 3P)
+
+Options:
+      --json                   Emit the full check list as JSON
+      --all                    Show every line, not just the ones that disagree
+      --tolerance <TOLERANCE>  Treat violations up to this amount as agreeing (e.g. 0.01 for a filer who rounds each line). A violation is the absolute delta for an `=` line, or the shortfall below the itemized sum for a `>=` line [default: 0]
+      --column <COLUMN>        Only check this column (A = this period, B = year/cycle to date) [possible values: a, b]
+      --lenient                Skip body lines that cannot be parsed instead of failing
+  -h, --help                   Print help
+```
+
+Recomputes every cover-page line of a Form 3X, 3, or 3P from the
+schedules (memo entries excluded) and from the other cover lines'
+reported values, with exact `Decimal` arithmetic. Prints one line per
+disagreeing check -- or every check with `--all` -- in the form
+`STATUS col C line L reported R expected E delta D  RULE`, then a
+verdict:
+
+```text
+$ hardmoney reconcile --lenient tmp/agent-misc/filings/2011912.fec
+DIFF col A line 11(c)      reported         2045.00 expected         1845.00 delta       200.00  = sum of SchA.contribution_amount on SA11C
+F3X C00001313: 1 of 69 line(s) disagree (tolerance 0)
+error: 1 line(s) disagree
+```
+
+A rule beginning `=` must hold exactly; one beginning `>=` is a floor
+(the cover total may exceed the itemized sum, because sub-$200 items
+need not be itemized). `--tolerance N` treats a violation of at most
+`N` as agreement; `--column a` or `b` restricts the checks. `--lenient`
+skips unparseable body lines with a stderr warning that they are
+excluded from the sums. `--json` emits `{form, file, tolerance, checks,
+disagreeing, lines: [{line, field, column, rule, reported, expected,
+delta, relation, lines_summed, reported_unparseable}]}` with amounts as
+strings. Exit 0 when every (selected) line agrees within the
+tolerance, 1 when any disagrees, on a parse error, or on a form with no
+rules (`no reconciliation rules for form F24; supported: F3X, F3, F3P`).
+See [Reconciling a Filing](./reconciling.md).
 
 ## `validate`
 
@@ -131,8 +222,10 @@ error(s), 0 warning(s)`, and exits 0. Exit status is 1 if there is any
 all (bad header, no cover line) is also exit 1, reported on stderr.
 `--json` emits `{file, form_type, version, line_count, acceptable,
 errors, warnings, findings_by_rule, findings: [{severity, rule,
-line_no, form_type, field, message}]}`. The rules and the `FieldSpec`
-data they read are described in
+line_no, form_type, field, message}]}`. The full rule table, the
+deliberate deviations from the FEC's validator, and the library API are
+in [Validating a Filing](./validating.md); the `FieldSpec` data the
+per-field rules read is described in
 [The Schema](./library-schema.md#fieldspec-what-the-fec-says-about-a-field).
 
 ## `schema-init`
@@ -712,5 +805,5 @@ name, column | from, to}]}], unchanged: [table, ...]}`.
 | Code | Meaning |
 |---|---|
 | 0 | success (including `bulk-load --if-changed` skipping an unchanged file, `bulk-restore-dump` succeeding despite `pg_restore`'s expected warnings, and `validate` finding only warnings without `--strict-warnings`) |
-| 1 | a runtime error: parse failure, database error, refused replace, pending migrations, `bulk-load-all` with at least one failed source, `schema-drop` without `--yes`, `validate` with an error finding (or any finding under `--strict-warnings`), a non-2xx API response from `query`, a `spec` version or table the bundled data does not have |
+| 1 | a runtime error: parse failure, database error, refused replace, pending migrations, `bulk-load-all` with at least one failed source, `schema-drop` without `--yes`, `write --check` with a record that does not round-trip, `reconcile` with a disagreeing line (or an unsupported form), `validate` with an error finding (or any finding under `--strict-warnings`), a non-2xx API response from `query`, a `spec` version or table the bundled data does not have |
 | 2 | invalid command-line usage (clap): unknown flag, odd `--cycle`, invalid `--schema` name, `query --limit` outside 1-500, an unknown `spec` table name or malformed version |

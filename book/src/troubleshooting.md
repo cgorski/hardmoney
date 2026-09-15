@@ -14,11 +14,14 @@ book's fixture examples, make sure you're running commands from the
 repository root (`hardmoney/`), since the paths in this book (e.g.
 `tests/fixtures/F24N_2011832.fec`) are relative to that.
 
-## "couldn't find a line parser for form type '...' at line N"
+## "no format table for form type '...' at line N"
 
 ```text
-error: couldn't find a line parser for form type 'ZZZ' (spec version '8.5') at line 5
+error: no format table for form type 'ZZZ' (spec version 8.5) at line 5
 ```
+
+(1.x worded this `couldn't find a line parser for form type ...`; it is
+the same `FecError::ParserMissing`.)
 
 A body line's form-type token (its first column) matched none of the
 parser's dispatch patterns, and you're parsing strictly (the default), so
@@ -34,10 +37,11 @@ the file. Your options:
   CLI or `Filing::parse_with(&content, &ParseOptions::LENIENT)` in code.
   See [Strict vs. Lenient Parsing](./strict-vs-lenient.md).
 
-The sibling message `no column-position data to parse table X at spec
-version 'Y' at line N` means the table is known but has no layout for
-that spec version -- usually a filing newer than the bundled format
-tables. Same two options.
+The sibling message `no column layout for table X at spec version Y at
+line N` (`FecError::NoMatchingVersionBucket`) means the table is known
+but has no layout for that spec version -- usually a filing newer than
+the bundled format tables. Same two options; `hardmoney spec tables`
+lists the versions each table has a layout for.
 
 ## "namespace '...' has N pending migration(s); run `hardmoney schema-init` first"
 

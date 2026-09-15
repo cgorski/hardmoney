@@ -49,7 +49,12 @@ The FEC also publishes two other kinds of data derived from these filings:
 (from disk or fetched live), it can load the FEC's own bulk-data downloads
 into a normal Postgres database, and it can serve that database over a
 REST API. You can use any one of these three things independently, or all
-three together.
+three together. Around the parser, 2.0 adds the rest of what a filing
+needs: a writer that turns a parsed filing back into a `.fec` file, the
+FEC's own acceptance rules (`hardmoney validate`), a reconciler that
+checks a report's cover-page totals against its schedules to the cent
+(`hardmoney reconcile`), and a streaming reader for filings too large to
+hold in memory.
 
 ## Why does this tool exist?
 
@@ -114,35 +119,48 @@ that matches what you're trying to do:
      when one line of a filing can't be parsed, and how to choose.
    - [Fidelity](./fidelity.md) -- exactly what the parser does and does
      not change about a field value, and how that differs from 1.x.
+   - [Streaming Large Filings](./streaming.md) -- `FilingReader` and
+     `Filing::open`: one pass over a 135 MB filing in 10 MB of memory.
 5. [Tables and Typed Views](./typed-views.md) -- the `Table` enum, the
    `view()`/`views()` typed layer, and why money, dates, and names need
    special handling.
 6. [The Schema](./library-schema.md) -- `SpecVersion`, per-version
    `Layout`s, the FEC's `FieldSpec` rows, and compile-time-checked field
    access with `Field<T>` and `Typed<T>`.
-7. [Loading Bulk Data into Postgres](./bulk-etl.md) -- go from "the FEC's
-   own bulk downloads" to a normalized, migrated, queryable schema.
-   - [Namespaces](./namespaces.md) -- many isolated sessions in one
-     database.
-   - [Reloading](./reloading.md) -- `--mode replace`, `--mode append`,
-     `--if-changed`, and the `loads` table.
-   - [Dates](./dates.md) -- the FEC's two date formats and the raw/parsed
-     twin columns.
-8. [The REST API](./rest-api.md) -- serve that database over HTTP, with
-   real request/response examples.
-   - [Hardening the API](./api-hardening.md) -- API keys, CORS, timeouts,
-     and what error responses look like.
-9. [CLI Reference](./cli-reference.md) -- every subcommand, with options,
-   including `validate`, `query`, and `spec`.
-10. [Troubleshooting & FAQ](./troubleshooting.md).
+7. [Writing `.fec` Files](./writing-fec.md) -- `Filing::to_fec` and
+   `hardmoney write`: the exact inverse of parsing, and how to edit a
+   filing and write it back.
+8. [Reconciling a Filing](./reconciling.md) -- does the cover page
+   agree with the schedules? `Filing::reconcile`, the $200 itemization
+   threshold, and a real filing that is $200 off.
+9. [Validating a Filing](./validating.md) -- the FEC's acceptance rules
+   as `Filing::validate` and `hardmoney validate`: the 32 rules, where
+   they come from, and where hardmoney deliberately differs.
+10. [Loading Bulk Data into Postgres](./bulk-etl.md) -- go from "the FEC's
+    own bulk downloads" to a normalized, migrated, queryable schema.
+    - [Namespaces](./namespaces.md) -- many isolated sessions in one
+      database.
+    - [Reloading](./reloading.md) -- `--mode replace`, `--mode append`,
+      `--if-changed`, and the `loads` table.
+    - [Dates](./dates.md) -- the FEC's two date formats and the raw/parsed
+      twin columns.
+11. [The REST API](./rest-api.md) -- serve that database over HTTP, with
+    real request/response examples.
+    - [Hardening the API](./api-hardening.md) -- API keys, CORS, timeouts,
+      and what error responses look like.
+12. [CLI Reference](./cli-reference.md) -- every subcommand, with options,
+    including `write`, `reconcile`, `validate`, `query`, and `spec`.
+13. [Troubleshooting & FAQ](./troubleshooting.md).
 
 Every command and every piece of output shown in this book was actually
-run against hardmoney (the chapters new in 2.0 -- Fidelity, The Schema,
-and the `validate`/`query`/`spec` sections of the CLI Reference --
-against 2.0.0; the rest against the 1.0.0 release they were written for,
-with the API surface updated where 2.0 changed it) -- against the crate's own bundled test
-fixtures, a local Postgres 18 database, or (where noted) a live network
-call to `docquery.fec.gov` or `fec.gov` -- while writing it. The handful
+run against hardmoney (the chapters new in 2.0 -- Fidelity, Streaming,
+The Schema, Writing, Reconciling, Validating, and the
+`write`/`reconcile`/`validate`/`query`/`spec` sections of the CLI
+Reference -- against 2.0.0; the rest against the 1.0.0 release they were
+written for, with the API surface updated where 2.0 changed it) --
+against the crate's own bundled test fixtures, a local Postgres 18
+database, or (where noted) a live network call to `docquery.fec.gov` or
+`fec.gov` -- while writing it. The handful
 of outputs that could not be reproduced on demand (for example, a
 confirmation prompt that only fires when a million rows are about to be
 deleted) are explicitly marked *illustrative*.

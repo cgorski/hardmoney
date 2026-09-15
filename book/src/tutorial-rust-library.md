@@ -464,6 +464,14 @@ the one real independent expenditure with its exact amount.
 - What the parser does and does not change about a field value (2.0
   preserves values verbatim; 1.x upper-cased and stripped characters) is
   in [Fidelity](./fidelity.md).
+- The three things you can do with a parsed filing besides read it:
+  check it against the FEC's acceptance rules
+  ([Validating a Filing](./validating.md)), check its cover page against
+  its schedules ([Reconciling a Filing](./reconciling.md)), and write it
+  back out ([Writing `.fec` Files](./writing-fec.md)).
+- If the filing is a 135 MB presidential report, `Filing::parse_bytes`
+  needs 1.3 GB; [Streaming Large Filings](./streaming.md) shows the same
+  Schedule A total in 10 MB with `FilingReader`.
 - If your pipeline's destination *is* Postgres after all, enable the
   `bulk` feature and see the library section of
   [Loading Bulk Data](./bulk-etl.md#doing-this-from-rust-instead-of-the-cli)
