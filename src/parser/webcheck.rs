@@ -432,16 +432,14 @@ pub fn base64_encode(bytes: &[u8]) -> String {
         )
     };
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    let mut chunks = bytes.chunks_exact(3);
-    for chunk in &mut chunks {
-        if let [b0, b1, b2] = chunk {
-            let n = (u32::from(*b0) << 16) | (u32::from(*b1) << 8) | u32::from(*b2);
-            for shift in [18, 12, 6, 0] {
-                out.push(sextet(n, shift));
-            }
+    let (chunks, remainder) = bytes.as_chunks::<3>();
+    for [b0, b1, b2] in chunks {
+        let n = (u32::from(*b0) << 16) | (u32::from(*b1) << 8) | u32::from(*b2);
+        for shift in [18, 12, 6, 0] {
+            out.push(sextet(n, shift));
         }
     }
-    match chunks.remainder() {
+    match remainder {
         [b0] => {
             let n = u32::from(*b0) << 16;
             out.push(sextet(n, 18));
