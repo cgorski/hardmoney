@@ -52,7 +52,7 @@ pub async fn search(
     State(pool): State<PgPool>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<Vec<IndependentExpenditure>>, ApiError> {
-    let page = Pagination::new(params.limit, params.offset);
+    let page = Pagination::new(params.limit, params.offset).validate()?;
     let rows = sqlx::query_as::<_, IndependentExpenditure>(
         "SELECT sub_id, cmte_id, committee_name, payee_name, candidate_id, candidate_name, \
                 candidate_office_state, support_oppose_code, support_oppose_desc, \

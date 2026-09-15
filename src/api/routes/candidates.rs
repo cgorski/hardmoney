@@ -39,7 +39,7 @@ pub async fn list(
     State(pool): State<PgPool>,
     Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<Candidate>>, ApiError> {
-    let page = Pagination::new(params.limit, params.offset);
+    let page = Pagination::new(params.limit, params.offset).validate()?;
     let cycle = cycle_param(params.cycle)?;
     let rows = sqlx::query_as::<_, Candidate>(
         "SELECT cand_id, cycle, cand_name, cand_pty_affiliation, cand_election_yr, cand_office_st, \

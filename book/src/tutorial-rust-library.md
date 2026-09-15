@@ -21,7 +21,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-hardmoney = { version = "1", default-features = false, features = ["fetch"] }
+hardmoney = { version = "2", default-features = false, features = ["fetch"] }
 rust_decimal = "1"
 ```
 
@@ -41,7 +41,7 @@ Two things to notice:
 
 The scratch crate that verified this chapter used
 `hardmoney = { path = "/path/to/hardmoney", default-features = false, features = ["fetch"] }`
-against the 1.0.0 source tree; the `version = "1"` form is what you'd
+against the 2.0.0 source tree; the `version = "2"` form is what you'd
 publish with.
 
 ## The program
@@ -86,7 +86,7 @@ fn run(filing_id: u64) -> Result<(), FecError> {
 
     // 3. Cover-page totals, if this is a Form 3X.
     let mut cover_receipts: Option<Decimal> = None;
-    if filing.summary.table == Table::F3X {
+    if filing.summary.table() == Table::F3X {
         match filing.summary.view::<Form3XSummary>() {
             Ok(cover) => {
                 println!("committee:     {}", cover.committee_name.as_deref().unwrap_or("?"));
@@ -107,7 +107,7 @@ fn run(filing_id: u64) -> Result<(), FecError> {
     // 4. Every body line, bucketed by table.
     let mut by_table: BTreeMap<Table, usize> = BTreeMap::new();
     for line in &filing.lines {
-        *by_table.entry(line.table).or_insert(0) += 1;
+        *by_table.entry(line.table()).or_insert(0) += 1;
     }
     for (table, n) in &by_table {
         let what = match table {
@@ -457,8 +457,13 @@ the one real independent expenditure with its exact amount.
 - The rest of the typed layer -- `ScheduleB`, name resolution across
   spec versions, `TypedViewError`, writing your own `TypedView` -- is in
   [Tables and Typed Views](./typed-views.md).
-- The raw layer (`ParsedLine`, `HeaderMap`, spec-version handling) is in
-  [Parsing a Filing, Explained](./parsing-explained.md).
+- The raw layer (`ParsedLine`, `Header`, spec-version handling) is in
+  [Parsing a Filing, Explained](./parsing-explained.md); the schema
+  behind it -- `SpecVersion`, `Layout`, and the compile-time-checked
+  `Typed<T>` field access -- is in [The Schema](./library-schema.md).
+- What the parser does and does not change about a field value (2.0
+  preserves values verbatim; 1.x upper-cased and stripped characters) is
+  in [Fidelity](./fidelity.md).
 - If your pipeline's destination *is* Postgres after all, enable the
   `bulk` feature and see the library section of
   [Loading Bulk Data](./bulk-etl.md#doing-this-from-rust-instead-of-the-cli)

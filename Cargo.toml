@@ -94,6 +94,12 @@ tower = { version = "0.5", features = ["util"] }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 # Property tests: writer/parser round-trips over arbitrary field values.
 proptest = "1"
+# benches/parse.rs: eager `Filing::parse_bytes` vs. streaming `FilingReader`.
+criterion = { version = "0.8", features = ["html_reports"] }
+
+[[bench]]
+name = "parse"
+harness = false
 
 [profile.release]
 opt-level = 3

@@ -409,8 +409,10 @@ same namespace can use it to see that `schema-init` is due.
 ## All routes
 
 Every list/search route accepts `limit`/`offset` for pagination
-(`limit` defaults to 50, clamps to a maximum of 500, and a minimum of 1;
-`offset` defaults to 0), in addition to the filters listed below.
+(`limit` defaults to 50 and must be 1-500; `offset` defaults to 0 and
+must be >= 0 -- anything else is a `400` with `{"error": "limit must be
+between 1 and 500"}` or `{"error": "offset must be >= 0"}`, never a
+silently adjusted page), in addition to the filters listed below.
 Substring filters are case-insensitive `ILIKE '%term%'` matches;
 `min_date`/`max_date` are ISO dates (`2025-12-20`) applied to the parsed
 `*_date` column; `min_amount`/`max_amount` are exact decimals.

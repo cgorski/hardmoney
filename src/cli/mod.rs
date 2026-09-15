@@ -7,6 +7,8 @@ pub mod parse;
 pub mod query;
 pub mod schema;
 pub mod serve;
+pub mod spec;
+pub mod validate;
 
 use clap::{Parser, Subcommand};
 
@@ -31,6 +33,8 @@ struct Cli {
 enum Command {
     /// Parse a single `.fec` filing and print a JSON summary.
     Parse(parse::ParseArgs),
+    /// Check a .fec file against the FEC's acceptance rules.
+    Validate(validate::ValidateArgs),
     /// Create or upgrade the Postgres schema in the target namespace.
     SchemaInit(schema::SchemaInitArgs),
     /// Show migration state and recorded loads for the target namespace.
@@ -51,12 +55,15 @@ enum Command {
     Serve(serve::ServeArgs),
     /// Search loaded data from the terminal (same results as the REST API).
     Query(query::QueryArgs),
+    /// Export or diff the machine-readable FEC format specification.
+    Spec(spec::SpecArgs),
 }
 
 pub async fn run() -> CliResult {
     let cli = Cli::parse();
     match cli.command {
         Command::Parse(a) => parse::run(a),
+        Command::Validate(a) => validate::run(a),
         Command::SchemaInit(a) => schema::init(a).await,
         Command::SchemaStatus(a) => schema::status(a).await,
         Command::SchemaList(a) => schema::list(a).await,
@@ -67,5 +74,6 @@ pub async fn run() -> CliResult {
         Command::BulkLoadFiling(a) => bulk::load_filing(a).await,
         Command::Serve(a) => serve::run(a).await,
         Command::Query(a) => query::run(a).await,
+        Command::Spec(a) => spec::run(a),
     }
 }

@@ -303,10 +303,15 @@ Every other field degrades gracefully to `None` instead of failing the
 whole conversion. `TypedViewError` is `#[non_exhaustive]`.
 
 Behind all four views is one trait, `hardmoney::TypedView`, with a
-`TABLE` constant and `from_fields`/`from_line` methods. You won't
-normally call it directly -- `view()` and `views()` are the intended
-surface -- but it's public, so you can write your own view over a table
-the crate doesn't cover yet and use it with the same two methods.
+`TABLE` constant and a `from_line` method. You won't normally call it
+directly -- `view()` and `views()` are the intended surface -- but it's
+public, so you can write your own view over a table the crate doesn't
+cover yet and use it with the same two methods.
+
+For a table nobody has written a view for, you don't have to: every
+table has a compile-time-checked `Typed<T>` view with generated field
+constants (`line.typed::<H4>()?.money(h4::TOTAL_AMOUNT)`), covered in
+[The Schema](./library-schema.md#typed_-t-the-compiler-checks-the-table).
 
 ## The summary line is a `ParsedLine` too: `Form3XSummary`
 
@@ -320,7 +325,7 @@ use hardmoney::{Filing, Form3XSummary, Table};
 let bytes = std::fs::read("tests/fixtures/F3XN_2011834.fec")?;
 let filing = Filing::parse_bytes(&bytes)?;
 
-if filing.summary.table == Table::F3X {
+if filing.summary.table() == Table::F3X {
     let s = filing.summary.view::<Form3XSummary>()?;
     println!("receipts this period: ${}", s.total_receipts.unwrap_or_default());
 }

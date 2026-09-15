@@ -53,7 +53,7 @@ hardmoney --version
 ```
 
 ```text
-hardmoney 1.0.0
+hardmoney 2.0.0
 ```
 
 You also need a running Postgres and a connection URL with a username in
@@ -163,6 +163,14 @@ Leave that running and open a second terminal. Everything below is a
 of some commands just pretty-prints the JSON; drop it if you don't have
 Python.)
 
+Each `curl` is also shown as the equivalent `hardmoney query` command.
+`query` builds the same request and runs it through the API's own code
+against the database, so you don't need `serve` running or `curl`
+installed to get the same rows -- add `--json` to see the identical JSON,
+or `--api-url http://127.0.0.1:18091` to send it to the server you just
+started instead of to the database. Set `HARDMONEY_SCHEMA=tut_journalist`
+once and you can drop the `--schema` from every `query` below.
+
 ## Step 6: find the candidate
 
 `/candidates?q=` does a case-insensitive substring search on the name.
@@ -171,6 +179,8 @@ narrow with the state and office (`H`, `S`, or `P`):
 
 ```bash
 curl -s "http://127.0.0.1:18091/candidates?q=cooper&state=NC" | python3 -m json.tool
+# same thing, no server needed:
+hardmoney query --schema tut_journalist candidates -q cooper --state NC
 ```
 
 ```json
@@ -209,6 +219,8 @@ also works.
 
 ```bash
 curl -s "http://127.0.0.1:18091/committees/C00913566" | python3 -m json.tool
+# same thing, no server needed:
+hardmoney query --schema tut_journalist committee C00913566
 ```
 
 ```json
@@ -248,6 +260,8 @@ committee ID and a minimum amount; results come back newest first:
 
 ```bash
 curl -s "http://127.0.0.1:18091/schedule-a?cmte_id=C00913566&min_amount=1000&limit=2" | python3 -m json.tool
+# same thing, no server needed:
+hardmoney query --schema tut_journalist contributions --committee C00913566 --min-amount 1000 --limit 2
 ```
 
 ```json
@@ -323,7 +337,12 @@ The filters available are `cmte_id`, `cycle`, `name`, `employer`,
 `max_date`, plus `limit`/`offset` -- the full list is in
 [The REST API](./rest-api.md#all-routes). `name`, `employer`, and
 `occupation` are substring matches, so
-`/schedule-a?cmte_id=C00913566&employer=university` works.
+`/schedule-a?cmte_id=C00913566&employer=university` works (as does
+`hardmoney query contributions --committee C00913566 --employer university`;
+the flag-to-parameter table is in the
+[CLI Reference](./cli-reference.md#query)). `limit` must be 1-500: the
+API answers anything else with a 400 rather than quietly giving you a
+different page size, and `query --limit` refuses it before sending.
 
 ## Step 9: the biggest donors -- in plain SQL
 
@@ -453,3 +472,6 @@ directly.
 - For every route and filter the API offers, see
   [The REST API](./rest-api.md); to put a key on it before anyone else
   can reach it, see [Hardening the API](./api-hardening.md).
+- To skip the server and `curl` entirely, every route is also a
+  `hardmoney query` subcommand -- see the
+  [CLI Reference](./cli-reference.md#query).

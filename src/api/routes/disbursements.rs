@@ -56,7 +56,7 @@ pub async fn search(
     State(pool): State<PgPool>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<Vec<Disbursement>>, ApiError> {
-    let page = Pagination::new(params.limit, params.offset);
+    let page = Pagination::new(params.limit, params.offset).validate()?;
     let cycle = cycle_param(params.cycle)?;
     let rows = sqlx::query_as::<_, Disbursement>(
         "SELECT sub_id, cycle, cmte_id, name, city, state, zip_code, transaction_dt, \

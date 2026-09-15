@@ -96,28 +96,34 @@ it's `parse_bytes` and not just `parse` on a `&str`: you often don't know
 the encoding until you've tried. It then:
 
 1. Reads the header line to determine the spec version and pick the
-   correct header/body parsing rules. The result is `filing.headers` (a
-   `HeaderMap`) and `filing.version` (e.g. `"8.5"`).
+   correct header/body parsing rules. The result is `filing.header` (a
+   typed `Header`: software name and version, report id, the raw
+   version string) and `filing.version` (a `SpecVersion`, e.g. `8.5`).
 2. Reads the summary line into `filing.summary`. This is a `ParsedLine`
-   -- the same type as every body line -- so `filing.summary.table`
+   -- the same type as every body line -- so `filing.summary.table()`
    tells you which form it is (`Table::F24` here), and
-   `filing.summary.get("committee_name")` returns `Option<&str>`. The
-   underlying ordered map of canonical field name to raw value is
-   `filing.summary.fields`.
+   `filing.summary.get("committee_name")` returns `Option<&str>`.
+   `filing.summary.iter()` walks every `(field, value)` pair in column
+   order.
 3. Reads every remaining line, looks up which schedule or sub-form table
    it belongs to from its first column (`SE` -> `Table::SchE`, `SA11AI` ->
    `Table::SchA`, `F3ZT` -> `Table::F3Z`, ...), parses it with that
    table's column positions for this filing's spec version, and pushes a
    `ParsedLine` onto `filing.lines`.
 
-A `ParsedLine` has four public fields:
+A `ParsedLine` has two public fields and a small set of accessors:
 
-| Field | Type | Meaning |
+| | Type | Meaning |
 |---|---|---|
-| `raw_form_type` | `String` | column 0 exactly as filed, e.g. `"SE"`, `"SA11AI"`, `"SC/10"` |
-| `table` | `Table` | which format table parsed it -- an **enum**, not a string |
+| `raw_form_type` | `String` | column 0, upper-cased, e.g. `"SE"`, `"SA11AI"`, `"SC/10"` (the `form_type` *field* keeps it as filed -- see [Fidelity](./fidelity.md)) |
 | `line_no` | `u64` | the 1-based physical line number in the file |
-| `fields` | `IndexMap<String, String>` | canonical field name -> raw value, in column order |
+| `table()` | `Table` | which format table parsed it -- an **enum**, not a string |
+| `layout()` | `&Layout` | the version-bucketed column layout it was parsed with |
+| `get(name)` | `Option<&str>` | one field's value; `Some("")` if blank, `None` if this version has no such field |
+| `iter()` | `(&str, &str)` pairs | every canonical field name and raw value, in column order |
+
+The full API -- including `set`, `from_pairs`, and the compile-time-checked
+`typed::<T>()` view -- is in [The Schema](./library-schema.md#parsedline-get-iter-set-from_pairs).
 
 Here's what the two Schedule E body lines of the fixture above look like
 after parsing. This is the real output of
@@ -152,7 +158,7 @@ handful of the 44 fields each line carries:
 In JSON the `Table` serializes as its name, `"SchE"`; in Rust it's
 `Table::SchE`.)
 
-Because `table` is an enum, filtering and matching on it is exact and
+Because `table()` is an enum, filtering and matching on it is exact and
 checked by the compiler -- there is no way to typo `"ScheE"` and silently
 match nothing:
 
@@ -174,7 +180,7 @@ for line in filing.lines_for(Table::SchE) {
 
 // Or dispatch on the table yourself:
 for line in &filing.lines {
-    match line.table {
+    match line.table() {
         Table::SchA => println!("contribution"),
         Table::SchB => println!("disbursement"),
         Table::SchE => println!("independent expenditure"),
@@ -293,7 +299,7 @@ an audit of the vendored format tables found that six of them -- **F2,
 F3P, F3X, F4, SchC1, SchL** -- assigned the *same* canonical name to two
 genuinely different column positions within a single spec-version bucket.
 
-Because the line parser builds an ordered `name -> value` map per line, an
+Because a layout maps each canonical name to one value slot per line, an
 unresolved collision would mean the second-occurring field silently
 overwrote the first, discarding real data. This isn't a hypothetical: in
 `tests/fixtures/F3XN_2011834.fec`, the two colliding "total contribution
@@ -303,9 +309,10 @@ refunds" fields hold genuinely different values (5000.00 vs 0.00, and
 All six tables were corrected with distinct, form-accurate names, and two
 permanent safeguards guard against a regression ever passing silently:
 
-- `Line::from_csv_str` returns a hard `FecError::DuplicateCanonicalField`
-  error instead of silently overwriting, if any future edit (including an
-  upstream format-table update) reintroduces a same-bucket collision.
+- `build.rs` refuses to generate the tables at all if any future edit
+  (including an upstream format-table update) reintroduces a same-bucket
+  collision -- two fields at one column or one field at two columns is a
+  build failure, not a runtime surprise.
 - `tests/format_table_integrity.rs` scans every bundled format table on
   every test run and fails if any collision exists at all.
 

@@ -54,7 +54,12 @@ pub struct QueryArgs {
     pub json: bool,
 
     /// Maximum rows (1-500).
-    #[arg(global = true, long, default_value_t = 25)]
+    #[arg(
+        global = true,
+        long,
+        default_value_t = 25,
+        value_parser = clap::value_parser!(i64).range(1..=hardmoney::api::pagination::Pagination::MAX_LIMIT)
+    )]
     pub limit: i64,
 
     /// Skip this many rows (for paging).

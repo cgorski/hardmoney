@@ -2,7 +2,7 @@
 
 ## What is this book?
 
-This is a tutorial for **hardmoney** 1.0, a Rust crate (library and
+This is a tutorial for **hardmoney** 2.0, a Rust crate (library and
 command-line tool) for working with United States Federal Election
 Commission (FEC) campaign-finance data. It's written for people who have
 never touched FEC data before and want to understand, step by step, what
@@ -112,10 +112,15 @@ that matches what you're trying to do:
    a `.fec` file and how the parser turns it into structured data.
    - [Strict vs. Lenient Parsing](./strict-vs-lenient.md) -- what happens
      when one line of a filing can't be parsed, and how to choose.
+   - [Fidelity](./fidelity.md) -- exactly what the parser does and does
+     not change about a field value, and how that differs from 1.x.
 5. [Tables and Typed Views](./typed-views.md) -- the `Table` enum, the
    `view()`/`views()` typed layer, and why money, dates, and names need
    special handling.
-6. [Loading Bulk Data into Postgres](./bulk-etl.md) -- go from "the FEC's
+6. [The Schema](./library-schema.md) -- `SpecVersion`, per-version
+   `Layout`s, the FEC's `FieldSpec` rows, and compile-time-checked field
+   access with `Field<T>` and `Typed<T>`.
+7. [Loading Bulk Data into Postgres](./bulk-etl.md) -- go from "the FEC's
    own bulk downloads" to a normalized, migrated, queryable schema.
    - [Namespaces](./namespaces.md) -- many isolated sessions in one
      database.
@@ -123,15 +128,19 @@ that matches what you're trying to do:
      `--if-changed`, and the `loads` table.
    - [Dates](./dates.md) -- the FEC's two date formats and the raw/parsed
      twin columns.
-7. [The REST API](./rest-api.md) -- serve that database over HTTP, with
+8. [The REST API](./rest-api.md) -- serve that database over HTTP, with
    real request/response examples.
    - [Hardening the API](./api-hardening.md) -- API keys, CORS, timeouts,
      and what error responses look like.
-8. [CLI Reference](./cli-reference.md) -- every subcommand, with options.
-9. [Troubleshooting & FAQ](./troubleshooting.md).
+9. [CLI Reference](./cli-reference.md) -- every subcommand, with options,
+   including `validate`, `query`, and `spec`.
+10. [Troubleshooting & FAQ](./troubleshooting.md).
 
 Every command and every piece of output shown in this book was actually
-run against hardmoney 1.0.0 -- against the crate's own bundled test
+run against hardmoney (the chapters new in 2.0 -- Fidelity, The Schema,
+and the `validate`/`query`/`spec` sections of the CLI Reference --
+against 2.0.0; the rest against the 1.0.0 release they were written for,
+with the API surface updated where 2.0 changed it) -- against the crate's own bundled test
 fixtures, a local Postgres 18 database, or (where noted) a live network
 call to `docquery.fec.gov` or `fec.gov` -- while writing it. The handful
 of outputs that could not be reproduced on demand (for example, a

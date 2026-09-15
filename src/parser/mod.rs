@@ -73,8 +73,10 @@ pub use schema::{
     Field, FieldDef, FieldKind, FieldSpec, InvalidSpecVersion, Layout, Requirement, SpecVersion,
     TableMarker, Typed,
 };
+pub use stream::{FilingReader, Preamble};
 pub use tables::{BUNDLED_SPEC_VERSION, Table};
 pub use typed::{
     EntityType, Form3XSummary, ScheduleA, ScheduleB, ScheduleE, SupportOppose, TypedView,
     TypedViewError, parse_fec_date, parse_money,
 };
+pub use validate::{Finding, Rule, Severity, Validation};

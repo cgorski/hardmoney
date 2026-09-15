@@ -181,9 +181,13 @@ log (`ERROR hardmoney::api::error: database error while serving
 request`) for the actual cause.
 
 Two more limits are always on: request bodies are capped at 64 KB (the
-API is read-only, so this only bounds abuse), and `limit=` is clamped to
-at most 500 rows per page so a client can't request an unbounded scan of
-a multi-million-row `schedule_a`.
+API is read-only, so this only bounds abuse), and `limit=` may not
+exceed 500 rows per page, so a client can't request an unbounded scan
+of a multi-million-row `schedule_a`. A `limit` outside 1-500 or a
+negative `offset` is rejected with a `400` (`limit must be between 1
+and 500`, `offset must be >= 0`) rather than silently clamped: a client
+that asked for 9,999 rows should find out it is not getting them, not
+discover it three pages later.
 
 ## Graceful shutdown
 

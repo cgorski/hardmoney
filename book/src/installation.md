@@ -16,7 +16,7 @@ feature set instead:
 
 ```toml
 [dependencies]
-hardmoney = { version = "1", default-features = false, features = ["fetch"] }
+hardmoney = { version = "2", default-features = false, features = ["fetch"] }
 ```
 
 `fetch` enables `Filing::fetch`, which downloads a raw filing directly
@@ -47,7 +47,7 @@ To confirm it built correctly:
 
 ```bash
 $ cargo run --quiet --bin hardmoney -- --version
-hardmoney 1.0.0
+hardmoney 2.0.0
 $ cargo run --quiet --bin hardmoney -- --help
 ```
 
