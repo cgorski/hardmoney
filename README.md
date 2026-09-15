@@ -192,7 +192,7 @@ cd python && maturin develop       # Python package, from a checkout (see above)
 
 ```toml
 # Rust library, parser only (no Postgres, Axum, or Tokio):
-hardmoney = { version = "2", default-features = false, features = ["fetch"] }
+hardmoney = { version = "3", default-features = false, features = ["fetch"] }
 ```
 
 Rust 1.94 or newer. Postgres 18 for the ETL and API.

@@ -249,6 +249,42 @@ const SAMPLE_SUCCESS: &str = r##"
 			</div>
 "##;
 
+/// What the upload channel returned for `tests/fixtures/F3A_2004471.fec`
+/// on 2026-09-15 (trimmed): a `WARNINGS` verdict, which the page renders
+/// as "FEC data file PASSED validation with Warnings!".
+const SAMPLE_WARNINGS_ONLY: &str = r##"
+<script type="text/javascript">
+ 	var validationObj = '{"result":"WARNINGS","resultURL":""}';
+ 	var errorsCount = '0';
+	var warningsCount = '2';
+	var largeFileUploadResponse = '';
+</script>
+					<div id="erros-warnings">
+						<div class="attention" style="text-align: center;">
+								<span class='warning'>FEC data file PASSED validation with Warnings!</span><br><br>
+					</div>
+					<table class="" style="text-align: left;">
+							<tr><td style="width: 25%"> Committee ID:</td><td style="width: 75%">    C00837567</td></tr>
+							<tr><td style="width: 25%"> Filing Type:</td><td style="width: 75%">     F3A</td></tr>
+					 </table><br>
+					<div id="tabs">
+					   	<div style="position: relative;" id="errors">
+						</div>
+					   	<div style="position: relative;" id="warnings">
+						    	<span class="attention">Validation Warning messages are not required to be corrected in order to file your report.</span>
+								<table><tbody class="error-warning-results">
+									<tr><td width="5%">1.&nbsp;</td><td>Form{Item}:  SB17     {FRAMER}</td></tr>
+									<tr><td>&nbsp;</td><td>Field Name:  #016  Recipient State Code</td></tr>
+									<tr><td>&nbsp;</td><td>is Required, but field is Empty</td></tr>
+									<tr><td width="5%">2.&nbsp;</td><td>Form{Item}:  SB17     {FRAMER}</td></tr>
+									<tr><td>&nbsp;</td><td>Field Name:  #017  Recipient ZIP Code</td></tr>
+									<tr><td>&nbsp;</td><td>Zip Code is Invalid or Missing / Zip = 1016</td></tr>
+								</tbody></table>
+						</div>
+				</div>
+			</div>
+"##;
+
 /// What `POST /webcheck/services/validate` returned for every request
 /// without a valid vendor API key on 2026-09-15 (MTOM `multipart/related`
 /// wrapping the SOAP envelope; the `<return>` string is JSON).
@@ -346,6 +382,47 @@ fn parses_a_clean_response() {
         report.to_string(),
         "WebCheck ACCEPTABLE: 0 error(s), 0 warning(s), filing type F3XA\n"
     );
+}
+
+/// A `WARNINGS` verdict is an accepted filing: the FEC's own page says
+/// "PASSED validation with Warnings", and its message list says a warning
+/// "will not prevent the filing from being processed".
+#[test]
+fn warnings_only_is_acceptable() {
+    let report = parse_upload_response(SAMPLE_WARNINGS_ONLY).unwrap();
+    assert_eq!(report.result.as_deref(), Some("WARNINGS"));
+    assert_eq!(report.errors_reported, Some(0));
+    assert_eq!(report.warnings_reported, Some(2));
+    assert_eq!(report.warning_count(), 2);
+    assert!(!report.counts_disagree());
+    assert!(report.is_acceptable());
+    assert_eq!(report.filing_type.as_deref(), Some("F3A"));
+    let zip = &report.findings[1];
+    assert_eq!(zip.severity, Some(Severity::Warning));
+    assert_eq!(zip.form_type.as_deref(), Some("SB17"));
+    assert_eq!(zip.field_no, Some(17));
+    assert_eq!(zip.message, "Zip Code is Invalid or Missing / Zip = 1016");
+    assert!(message_matches_rule(Rule::InvalidZipCode, &zip.message));
+    assert!(
+        report.to_string().ends_with(
+            "WebCheck ACCEPTABLE (WARNINGS): 0 error(s), 2 warning(s), filing type F3A\n"
+        ),
+        "{report}"
+    );
+    // WebCheck words a blank `X (warning)` column as a required field; the
+    // live alternate lets the diff pair it with our `recommended_field_empty`.
+    assert_eq!(
+        report.findings[0].message,
+        "is Required, but field is Empty"
+    );
+    assert!(message_matches_rule(
+        Rule::RecommendedFieldEmpty,
+        &report.findings[0].message
+    ));
+    assert!(message_matches_rule(
+        Rule::RecommendedFieldEmpty,
+        "Street Address is Missing"
+    ));
 }
 
 #[test]
@@ -650,6 +727,60 @@ fn live_accepted_fixture_passes_webcheck() {
     let d = diff(&ours, &report);
     eprintln!("{d}");
     assert!(d.is_empty(), "{d}");
+}
+
+/// The 2026 party, House, JFC, and presidential fixtures against the live
+/// service (observed 2026-09-15). Two state-party reports with Schedules
+/// H2-H4 and the joint fundraising committee come back `SUCCESS` with no
+/// messages -- so WebCheck reads the `NUM-5` allocation percentages
+/// (`0.49`) as numeric, as hardmoney now does. The House amendment draws
+/// WebCheck's `Zip Code is Invalid or Missing / Zip = 1016` (W30) and, for
+/// its blank payee state, `is Required, but field is Empty` at warning
+/// severity (the workbook marks the column `X (warning)`); both pair with
+/// ours. The Georgia report draws three `Conditionally Required field is
+/// Empty` warnings
+/// (donor committee id on a `PTY` line; candidate id and last name on a
+/// `CCM` line), all paired with ours; we additionally warn on the `CCM`
+/// line's blank candidate office, which the workbook marks `Used if CAN or
+/// CCM` and WebCheck does not report.
+#[test]
+#[ignore = "network: HARDMONEY_NETWORK_TESTS=1"]
+fn live_party_and_candidate_fixtures_agree_with_webcheck() {
+    if !network_tests_enabled() {
+        return;
+    }
+    let wc = WebCheck::new();
+    for (name, warnings, matched, only_ours, only_theirs) in [
+        ("F3XN_1998773.fec", 0, 0, 0, 0),
+        ("F3XA_2008083.fec", 0, 0, 0, 0),
+        ("F3XN_1965568.fec", 0, 0, 0, 0),
+        ("F3A_2004471.fec", 2, 2, 0, 0),
+        ("F3XA_2011814.fec", 3, 3, 1, 0),
+    ] {
+        let bytes = fixture(name);
+        let report = wc.submit(name, &bytes, None).unwrap();
+        let ours = Filing::parse_bytes(&bytes).unwrap().validate();
+        let d = diff(&ours, &report);
+        eprintln!("--- {name} ---\n{ours}{report}{d}");
+        assert_eq!(report.errors_reported, Some(0), "{name}: {}", report.raw);
+        assert_eq!(report.warnings_reported, Some(warnings), "{name}");
+        assert!(
+            !report.counts_disagree(),
+            "{name}: response format changed?"
+        );
+        assert!(report.is_acceptable(), "{name}");
+        assert!(ours.is_acceptable(), "{name}: {ours}");
+        assert_eq!(d.matched.len(), matched, "{name}: {d}");
+        assert_eq!(d.only_ours.len(), only_ours, "{name}: {d}");
+        assert_eq!(d.only_theirs.len(), only_theirs, "{name}: {d}");
+        for (ours, theirs) in &d.matched {
+            assert_eq!(
+                theirs.severity,
+                Some(ours.severity),
+                "{name}: {ours} ~ {theirs}"
+            );
+        }
+    }
 }
 
 #[test]

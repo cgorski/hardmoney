@@ -265,3 +265,112 @@ fn upstream_position_fixes_are_in_effect() {
         6
     );
 }
+
+/// The 3.0 vocabulary rules (`scripts/rename_canonical.py`, book chapter
+/// "Field names"): one spelling per concept across every table. A new or
+/// edited format table that reintroduces `transaction_id_number`,
+/// `*_zip`, `memo_text_description`, or a `back_reference_*` variant
+/// fails here.
+#[test]
+fn field_vocabulary_is_consistent_across_tables() {
+    // concept -> the one allowed spelling (or spellings) of any name that
+    // matches the concept's pattern.
+    type Concept = (&'static str, fn(&str) -> bool, &'static [&'static str]);
+    let concepts: &[Concept] = &[
+        (
+            "transaction id",
+            |n| n.contains("transaction_id"),
+            &["transaction_id"],
+        ),
+        (
+            "back reference",
+            |n| n.starts_with("back_reference_"),
+            &["back_reference_tran_id", "back_reference_sched_name"],
+        ),
+        ("entity type", |n| n.contains("entity"), &["entity_type"]),
+        (
+            "memo",
+            |n| n.starts_with("memo_"),
+            &["memo_code", "memo_text"],
+        ),
+        (
+            "election date",
+            |n| n.contains("election") && n.contains("date") && !n.contains("general"),
+            &["election_date"],
+        ),
+        ("amended", |n| n.starts_with("amended_"), &["amended_cd"]),
+    ];
+    let mut spellings: Vec<(&str, &str, Table)> = Vec::new();
+    for &t in Table::ALL {
+        let names = t.field_names();
+        assert!(
+            !(names.contains(&"transaction_id") && names.contains(&"transaction_id_number")),
+            "{t}: both transaction id spellings"
+        );
+        for &name in names {
+            for (concept, matches, allowed) in concepts {
+                if matches(name) {
+                    assert!(
+                        allowed.contains(&name),
+                        "{t}.{name}: {concept} must be spelled one of {allowed:?}"
+                    );
+                    spellings.push((concept, name, t));
+                }
+            }
+            // Every ZIP field ends the same way; every street and middle
+            // name field too.
+            if name.contains("zip") {
+                assert!(
+                    name.ends_with("zip_code"),
+                    "{t}.{name}: ZIP fields end in _zip_code"
+                );
+            }
+            if name.contains("street") {
+                assert!(
+                    name.ends_with("street_1") || name.ends_with("street_2"),
+                    "{t}.{name}: street fields end in _street_1/_street_2"
+                );
+            }
+            if name.contains("middle") {
+                assert!(
+                    name.ends_with("middle_name"),
+                    "{t}.{name}: middle names end in _middle_name"
+                );
+            }
+        }
+    }
+    // Each concept is spelled exactly one way per allowed slot across ALL
+    // tables: e.g. no table uses a third back-reference name, and the
+    // transaction id concept has exactly one spelling anywhere.
+    for (concept, _, allowed) in concepts {
+        let mut used: Vec<&str> = spellings
+            .iter()
+            .filter(|(c, _, _)| c == concept)
+            .map(|(_, n, _)| *n)
+            .collect();
+        used.sort_unstable();
+        used.dedup();
+        assert!(!used.is_empty(), "{concept}: no table carries it");
+        assert!(
+            used.iter().all(|u| allowed.contains(u)),
+            "{concept}: spellings in use {used:?} exceed {allowed:?}"
+        );
+    }
+    // The old spellings must be gone everywhere.
+    for &t in Table::ALL {
+        for old in [
+            "transaction_id_number",
+            "back_reference_tran_id_number",
+            "back_reference_sched_form_name",
+            "memo_text_description",
+            "date_of_election",
+            "contributor_zip",
+            "conduit_street1",
+            "conduit_street2",
+            "expenditure_purpose_description",
+            "col_a_individual_contributions_itemized",
+        ] {
+            assert!(!t.field_names().contains(&old), "{t} still has {old}");
+        }
+    }
+}

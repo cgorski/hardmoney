@@ -71,12 +71,10 @@ def main(argv: Sequence[str]) -> int:
 
     # The exactness check: the Decimal sum of the itemized individual lines
     # equals the cover page's 11(a)(i) (17(a)(i) on Form 3P) to the cent.
-    # Form 3X and Form 3P call the field col_a_individuals_itemized, Form 3
-    # col_a_individual_contributions_itemized.
+    # Forms 3, 3X, and 3P all call the field col_a_individuals_itemized.
     itemized = None
-    for field in ("col_a_individuals_itemized", "col_a_individual_contributions_itemized"):
-        if field in filing.summary:
-            itemized = filing.summary.amount(field)
+    if "col_a_individuals_itemized" in filing.summary:
+        itemized = filing.summary.amount("col_a_individuals_itemized")
     if itemized is not None:
         print(f"\nitemized individuals: Decimal sum {individuals}, cover page {itemized}, "
               f"equal: {individuals == itemized}")

@@ -3,15 +3,23 @@
 //! Every Form 3X / 3 / 3P fixture in `tests/fixtures/` was accepted by the
 //! FEC; the cover pages of all of them satisfy every Column A rule (the
 //! itemization-threshold lines as floors, everything else exactly). Across
-//! the wider local corpus of 109 real reports, 95 satisfy every rule and
-//! the rest carry genuine filer discrepancies -- e.g. a committee whose
-//! reported 11(c) exceeds its itemized SA11C lines by exactly one $200
-//! contribution -- which is what a Reports Analysis Division analyst would
-//! flag.
+//! the wider local corpus of 124 real periodic reports, 102 satisfy every
+//! rule; of the rest, 17 are truncated third-party samples (a filing cut
+//! off mid-schedule cannot balance) and 5 carry genuine filer
+//! discrepancies -- e.g. a committee whose reported 11(c) exceeds its
+//! itemized SA11C lines by exactly one $200 contribution -- which is what
+//! a Reports Analysis Division analyst would flag. See
+//! `tests/fixtures/ORACLE_NOTES.md` for each.
+//!
+//! Three fixtures are state-party reports with Schedules H2-H4 (Georgia
+//! Republican Party, Republican Party of Virginia, New Hampshire
+//! Democratic Party), added so the allocation lines 18(a), 21(a)(i),
+//! 21(a)(ii), and 30(b) are tested against real data rather than the spec
+//! text alone.
 
 use std::path::Path;
 
-use hardmoney::parser::reconcile::Column;
+use hardmoney::parser::reconcile::{Column, Relation};
 use hardmoney::{Filing, Table};
 
 fn fixtures() -> Vec<(String, Filing)> {
@@ -30,6 +38,13 @@ fn fixtures() -> Vec<(String, Filing)> {
         out.push((name, filing));
     }
     out
+}
+
+fn fixture(name: &str) -> Filing {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name);
+    Filing::parse_bytes(&std::fs::read(&path).unwrap()).unwrap_or_else(|e| panic!("{name}: {e}"))
 }
 
 #[test]
@@ -52,7 +67,7 @@ fn every_accepted_periodic_report_fixture_reconciles_in_column_a() {
         assert!(bad.is_empty(), "{name}:\n{}", bad.join("\n"));
         assert!(r.column(Column::A).count() >= 30, "{name}: too few checks");
     }
-    assert!(checked >= 12, "only {checked} periodic-report fixtures");
+    assert!(checked >= 18, "only {checked} periodic-report fixtures");
 }
 
 #[test]
@@ -77,10 +92,7 @@ fn old_spec_versions_reconcile_with_the_lines_they_have() {
         "F3XN_210000_v5.3.fec",
         "F3XN_320000_v6.1.fec",
     ] {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures")
-            .join(name);
-        let filing = Filing::parse_bytes(&std::fs::read(path).unwrap()).unwrap();
+        let filing = fixture(name);
         let r = filing.reconcile().unwrap();
         let itemized = r
             .line(Column::A, "11(a)(i)")
@@ -90,5 +102,123 @@ fn old_spec_versions_reconcile_with_the_lines_they_have() {
             "{name}: {itemized}"
         );
         assert!(itemized.matches(), "{name}: {itemized}");
+    }
+}
+
+/// The allocation lines are exercised by real H3/H4 records, not just
+/// satisfied vacuously by zeros: every party fixture has non-zero 18(a)
+/// from Schedule H3 and non-zero 21(a)(i)/(ii) from Schedule H4, summed
+/// over the expected number of records, and each balances to the cent.
+#[test]
+fn party_fixtures_exercise_the_h_schedule_lines() {
+    // (fixture, H3 records summed, H4 non-memo records summed)
+    for (name, h3_lines, h4_lines) in [
+        ("F3XA_2011814.fec", 3, 37),
+        ("F3XN_1998773.fec", 1, 31),
+        ("F3XA_2008083.fec", 13, 161),
+    ] {
+        let filing = fixture(name);
+        let r = filing.reconcile().unwrap();
+        let line = |label: &str| {
+            r.line(Column::A, label)
+                .unwrap_or_else(|| panic!("{name}: no line {label}"))
+        };
+        let a18 = line("18(a)");
+        assert_eq!(a18.lines_summed, h3_lines, "{name}: {a18}");
+        assert!(
+            a18.expected.is_sign_positive() && !a18.expected.is_zero(),
+            "{name}: {a18}"
+        );
+        assert!(a18.matches(), "{name}: {a18}");
+        for label in ["21(a)(i)", "21(a)(ii)"] {
+            let c = line(label);
+            assert_eq!(c.lines_summed, h4_lines, "{name}: {c}");
+            assert!(!c.expected.is_zero(), "{name}: {c}");
+            assert!(c.matches(), "{name}: {c}");
+        }
+        // The formulas that consume them hold too.
+        for label in ["18(c)", "20", "21(c)", "32", "36"] {
+            assert!(line(label).matches(), "{name}: {}", line(label));
+        }
+    }
+}
+
+/// Schedule H3 groups repeat the transfer total on every record: summing
+/// `total_amount_transferred` would overstate 18(a). The Georgia fixture's
+/// three H3 records (`AD`, `DF`, `DC` shares of one and two transfers) sum
+/// to exactly the cover's 18(a) on `transferred_amount`.
+#[test]
+fn h3_transferred_amount_not_total_is_what_balances() {
+    use rust_decimal::Decimal;
+    let filing = fixture("F3XA_2011814.fec");
+    let h3: Vec<_> = filing.lines_for(Table::H3).collect();
+    assert_eq!(h3.len(), 3);
+    let sum = |field: &str| -> Decimal {
+        h3.iter()
+            .filter_map(|l| l.get_non_empty(field))
+            .map(|v| v.parse::<Decimal>().unwrap())
+            .sum()
+    };
+    let reported: Decimal = filing
+        .summary
+        .get_non_empty("col_a_transfers_from_nonfederal_h3")
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(sum("transferred_amount"), reported);
+    assert!(sum("total_amount_transferred") > reported);
+}
+
+/// 30(b), 100%-federal election activity, is itemized on `SB30B` only at
+/// $200 and up (11 CFR 300.36(b)(2)(iv)); the Virginia fixture's cover
+/// total exceeds its itemized sum by $174.19 and is an FEC-accepted report,
+/// so the line is a floor and the check passes.
+#[test]
+fn line_30b_is_a_floor_on_real_party_data() {
+    use rust_decimal_macros::dec;
+    let filing = fixture("F3XN_1998773.fec");
+    let r = filing.reconcile().unwrap();
+    let c = r.line(Column::A, "30(b)").unwrap();
+    assert_eq!(c.relation, Relation::AtLeast);
+    assert_eq!(c.reported, Some(dec!(79762.86)));
+    assert_eq!(c.expected, dec!(79588.67));
+    assert_eq!(c.delta, dec!(174.19));
+    assert_eq!(c.lines_summed, 49); // 69 SB30B records, 20 of them memos
+    assert!(c.matches(), "{c}");
+    assert!(r.line(Column::A, "30(c)").unwrap().matches());
+}
+
+/// The other requested shapes: an F3 with Schedule C loans and Schedule D
+/// debts (lines 9 and 10 from two schedules), a joint fundraising
+/// committee's F3X with `SA12` transfers in and `SB22` transfers out, and
+/// an F3P at spec 8.5 with Schedule D debts, offsets, and refunds -- all
+/// exact.
+#[test]
+fn debts_transfers_and_presidential_fixtures_balance() {
+    let f3 = fixture("F3A_2004471.fec").reconcile().unwrap();
+    let ten = f3.line(Column::A, "10").unwrap();
+    assert_eq!(ten.lines_summed, 61, "{ten}"); // 58 SC/10 + 3 SD10
+    assert!(!ten.expected.is_zero() && ten.matches(), "{ten}");
+
+    let jfc = fixture("F3XN_1965568.fec").reconcile().unwrap();
+    for (label, n) in [("12", 5), ("22", 106)] {
+        let c = jfc.line(Column::A, label).unwrap();
+        assert_eq!(c.lines_summed, n, "{c}");
+        assert!(!c.expected.is_zero() && c.matches(), "{c}");
+    }
+
+    let f3p = fixture("F3PA_1993032.fec").reconcile().unwrap();
+    assert!(f3p.balances(), "{f3p}");
+    // 173 SB23 records, 31 of them memos; 17(a)(i) is 980 itemized donors.
+    for (label, n) in [
+        ("12", 8),
+        ("17(a)(i)", 980),
+        ("20(a)", 2),
+        ("23", 142),
+        ("28(a)", 2),
+    ] {
+        let c = f3p.line(Column::A, label).unwrap();
+        assert_eq!(c.lines_summed, n, "{c}");
+        assert!(!c.expected.is_zero(), "{c}");
     }
 }

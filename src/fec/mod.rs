@@ -245,7 +245,7 @@ const SNIPPET_BYTES: u64 = 400;
 /// any other non-2xx [`FecApiError::Http`] with the redacted URL and a
 /// short body snippet.
 pub(crate) fn get_ok(agent: &ureq::Agent, url: &str) -> Result<http::Response<ureq::Body>> {
-    let response = agent.get(url).call()?;
+    let response = agent.get(url).call().map_err(redact_transport_error)?;
     let status = response.status().as_u16();
     if (200..300).contains(&status) {
         return Ok(response);
@@ -270,6 +270,18 @@ pub(crate) fn get_ok(agent: &ureq::Agent, url: &str) -> Result<http::Response<ur
         status,
         url: redact_url(url),
         body_snippet,
+    })
+}
+
+/// Two `ureq` error variants quote the request URI in their message
+/// (`bad uri: <uri> is missing scheme`, `configured for https only:
+/// <uri>`); with a misconfigured [`openfec::OpenFec::with_base_url`] that
+/// URI carries the key. Everything else passes through unchanged.
+fn redact_transport_error(e: ureq::Error) -> FecApiError {
+    FecApiError::Transport(match e {
+        ureq::Error::BadUri(s) => ureq::Error::BadUri(redact_url(&s)),
+        ureq::Error::RequireHttpsOnly(s) => ureq::Error::RequireHttpsOnly(redact_url(&s)),
+        other => other,
     })
 }
 
@@ -371,6 +383,21 @@ mod tests {
             redact_url("https://x/?api_key=REDACTED"),
             "https://x/?api_key=REDACTED"
         );
+    }
+
+    #[test]
+    fn transport_errors_that_quote_the_uri_are_redacted() {
+        let e = redact_transport_error(ureq::Error::BadUri(
+            "api.open.fec.gov/v1/filings/?api_key=SECRET is missing scheme".to_string(),
+        ));
+        let text = e.to_string();
+        assert!(!text.contains("SECRET"), "{text}");
+        assert!(text.contains("api_key=REDACTED"), "{text}");
+        let passthrough = redact_transport_error(ureq::Error::HostNotFound);
+        assert!(matches!(
+            passthrough,
+            FecApiError::Transport(ureq::Error::HostNotFound)
+        ));
     }
 
     #[test]

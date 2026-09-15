@@ -10,6 +10,7 @@ state,8,STATE
 zip_code,9,ZIP
 report_code,12,REPORT CODE
 election_date,13,DATE OF ELECTION
+state_of_election,14,STATE OF ELECTION
 election_state,10,ELECTION STATE
 election_district,11,ELECTION DISTRICT
 coverage_from_date,16,COVERAGE FROM DATE

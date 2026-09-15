@@ -33,8 +33,12 @@ key and one allowed origin (`--api-key demo-key --cors-origin https://example.or
 ```
 
 (`cors="permissive" api_key=false` is what you see with neither flag.)
-The key itself is never logged, and `--help` hides the value of
-`HARDMONEY_API_KEY` too.
+The key itself is never logged -- the per-request span that
+`RUST_LOG=debug` shows records a `?api_key=` query value as
+`api_key=REDACTED` -- and `--help` hides the value of `HARDMONEY_API_KEY`
+too. (A reverse proxy in front of the server keeps its own access log;
+prefer the `X-Api-Key` header to the query string so the key never
+appears in a URL at all.)
 
 ## The API key
 
@@ -180,8 +184,15 @@ None of that should be handed to an anonymous caller. Look in the server
 log (`ERROR hardmoney::api::error: database error while serving
 request`) for the actual cause.
 
-Two more limits are always on: request bodies are capped at 64 KB (the
-API is read-only, so this only bounds abuse), and `limit=` may not
+Two more limits are always on. Request bodies are capped at 64 KiB
+without `--ui` (the API is then read-only, so this only bounds abuse)
+and at 32 MiB with it, since `POST /tools/parse` takes a whole filing;
+a body over the cap is a `413`. The JSON document routes (`/tools/write`,
+`/tools/validate`, `/tools/reconcile`) apply the same cap to what the
+document would *write*, not just to the JSON: a sixteen-byte record
+builds a full-width line in memory, so the records' layout widths are
+summed and a document that would exceed the cap is refused with a `413`
+before any line is built. And `limit=` may not
 exceed 500 rows per page, so a client can't request an unbounded scan
 of a multi-million-row `schedule_a`. A `limit` outside 1-500 or a
 negative `offset` is rejected with a `400` (`limit must be between 1
@@ -221,7 +232,9 @@ serve(pool, config).await?;
 # }
 ```
 
-`max_body_bytes` is a public field if you need to change the 64 KB cap.
+`max_body_bytes` is a public field if you need to change the body cap
+(`ApiConfig::DEFAULT_MAX_BODY_BYTES`, 64 KiB; `.ui(true)` raises it to
+`ApiConfig::UI_MAX_BODY_BYTES`, 32 MiB, unless you set it yourself).
 The CLI's `--timeout-secs` also sets `DbConfig::statement_timeout`; if
 you build the pool yourself, set that too, or a query the HTTP layer has
 already abandoned will keep running in Postgres.

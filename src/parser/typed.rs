@@ -375,7 +375,7 @@ pub struct ScheduleA {
     pub contribution_aggregate: Option<Decimal>,
     pub contribution_purpose_descrip: Option<String>,
     pub memo_code: Option<String>,
-    pub memo_text_description: Option<String>,
+    pub memo_text: Option<String>,
 }
 
 impl TypedView for ScheduleA {
@@ -408,7 +408,7 @@ impl TypedView for ScheduleA {
             contribution_aggregate: l.money(sch_a::CONTRIBUTION_AGGREGATE),
             contribution_purpose_descrip: l.string(sch_a::CONTRIBUTION_PURPOSE_DESCRIP),
             memo_code: l.string(sch_a::MEMO_CODE),
-            memo_text_description: l.string(sch_a::MEMO_TEXT_DESCRIPTION),
+            memo_text: l.string(sch_a::MEMO_TEXT),
         })
     }
 }
@@ -431,7 +431,7 @@ pub struct ScheduleB {
     pub expenditure_purpose_descrip: Option<String>,
     pub category_code: Option<String>,
     pub memo_code: Option<String>,
-    pub memo_text_description: Option<String>,
+    pub memo_text: Option<String>,
 }
 
 impl TypedView for ScheduleB {
@@ -440,7 +440,7 @@ impl TypedView for ScheduleB {
     fn from_typed(l: Typed<'_, SchB>) -> Result<Self, TypedViewError> {
         Ok(ScheduleB {
             filer_committee_id: req(l, sch_b::FILER_COMMITTEE_ID_NUMBER)?,
-            transaction_id: l.string(sch_b::TRANSACTION_ID_NUMBER),
+            transaction_id: l.string(sch_b::TRANSACTION_ID),
             entity_type: l.get(sch_b::ENTITY_TYPE).map(EntityType::from_code),
             payee_name: combined_name(
                 l,
@@ -462,7 +462,7 @@ impl TypedView for ScheduleB {
             expenditure_purpose_descrip: l.string(sch_b::EXPENDITURE_PURPOSE_DESCRIP),
             category_code: l.string(sch_b::CATEGORY_CODE),
             memo_code: l.string(sch_b::MEMO_CODE),
-            memo_text_description: l.string(sch_b::MEMO_TEXT_DESCRIPTION),
+            memo_text: l.string(sch_b::MEMO_TEXT),
         })
     }
 }
@@ -487,7 +487,7 @@ pub struct ScheduleE {
     pub expenditure_amount: Option<Decimal>,
     pub expenditure_purpose_descrip: Option<String>,
     pub memo_code: Option<String>,
-    pub memo_text_description: Option<String>,
+    pub memo_text: Option<String>,
 }
 
 impl ScheduleE {
@@ -504,7 +504,7 @@ impl TypedView for ScheduleE {
     fn from_typed(l: Typed<'_, SchE>) -> Result<Self, TypedViewError> {
         Ok(ScheduleE {
             filer_committee_id: req(l, sch_e::FILER_COMMITTEE_ID_NUMBER)?,
-            transaction_id: l.string(sch_e::TRANSACTION_ID_NUMBER),
+            transaction_id: l.string(sch_e::TRANSACTION_ID),
             payee_name: combined_name(
                 l,
                 &NameFields {
@@ -543,7 +543,7 @@ impl TypedView for ScheduleE {
             expenditure_amount: l.money(sch_e::EXPENDITURE_AMOUNT),
             expenditure_purpose_descrip: l.string(sch_e::EXPENDITURE_PURPOSE_DESCRIP),
             memo_code: l.string(sch_e::MEMO_CODE),
-            memo_text_description: l.string(sch_e::MEMO_TEXT_DESCRIPTION),
+            memo_text: l.string(sch_e::MEMO_TEXT),
         })
     }
 }

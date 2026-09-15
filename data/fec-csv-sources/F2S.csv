@@ -1,6 +1,6 @@
 canonical,^8.5|8.4|8.3|8.2|8.1|8.0|7.0|6.4|6.3|6.2|6.1,
 form_type,1,FORM TYPE
-filer_candidate_id_number,2,FILER CANDIDATE ID NUMBER
+candidate_id_number,2,FILER CANDIDATE ID NUMBER
 authorized_committee_id_number,3,AUTHORIZED COMMITTEE ID NUMBER
 authorized_committee_name,4,AUTHORIZED COMMITTEE NAME
 authorized_committee_street_1,5,AUTHORIZED COMMITTEE STREET 1

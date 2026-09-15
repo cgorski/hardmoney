@@ -43,8 +43,68 @@
 //! checked only through the formulas that include them. Likewise, lines
 //! whose transactions only need itemizing above the $200 aggregate
 //! threshold (operating expenditures, offsets, other receipts and
-//! disbursements, refunds to individuals) are checked as *floors*: the
-//! cover total must be at least the itemized sum. See [`Relation`].
+//! disbursements, refunds to individuals, independent expenditures,
+//! contributions from the candidate, 100%-federal election activity) are
+//! checked as *floors*: the cover total must be at least the itemized sum.
+//! See [`Relation`] for the line-by-line derivation from the FEC's own
+//! instructions.
+//!
+//! # Allocation schedules (H3-H6)
+//!
+//! Party committees that keep a nonfederal account report allocated
+//! activity on Schedules H3-H6, which feed F3X lines 18(a), 18(b),
+//! 21(a)(i), 21(a)(ii), 30(a)(i), and 30(a)(ii). The rules for those lines
+//! were checked in September 2026 against 45 FEC-accepted F3X reports from
+//! 24 state party committees (Ohio, Florida, Michigan, Wisconsin,
+//! Pennsylvania, North Carolina, Arizona, Nevada, Georgia, California,
+//! Texas, Minnesota, Virginia, Iowa, Colorado, New Hampshire, Maine; both
+//! parties), carrying between 3 and 648 H4 records each and up to 33 H3
+//! records. Every one balanced exactly. What the data settled:
+//!
+//! * **18(a) is the sum of H3 `transferred_amount`, not
+//!   `total_amount_transferred`.** One transfer from the nonfederal account
+//!   is filed as one `AD` (administrative) H3 record plus zero or more
+//!   records for other event types (`DF`, `DC`, `GV`, ...) that
+//!   back-reference it. *Every* record in the group repeats the transfer's
+//!   total in `total_amount_transferred` and carries its own share in
+//!   `transferred_amount`; the shares sum to the total. Summing
+//!   `total_amount_transferred` would count a split transfer once per
+//!   event type.
+//! * **21(a)(i)/(ii) are the sums of H4 `federal_share` /
+//!   `nonfederal_share` with memo entries excluded.** 4,065 of the H4
+//!   records in the sample were memos (credit-card and payroll breakdowns
+//!   back-referencing a parent H4); including them would double every
+//!   affected line. No filing carried an `SB21A` record: Schedule H4 is the
+//!   only itemization of 21(a).
+//! * **30(b) is a floor, not an identity.** 11 CFR 300.36(b)(2)(iv) and the
+//!   Form 3X instructions ("Itemize all such disbursements of $200 or more
+//!   on Schedule B for Line 30(b)") put federal election activity under the
+//!   itemization threshold, and 7 of the 45 reports had a 30(b) total above
+//!   their `SB30B` sum by $5 to $336.
+//! * H5 (Levin transfers) and H6 (Levin-allocated disbursements) appeared
+//!   in none of the reports -- Levin funds have all but vanished since
+//!   2002 -- so 18(b), 30(a)(i), and 30(a)(ii) rest on the spec's field
+//!   layout alone: H5 is one record per transfer carrying
+//!   `total_amount_transferred` plus four category breakdowns (the FEC's
+//!   own warning #49 checks they agree), and H6 mirrors H4 with
+//!   `federal_share` / `levin_share`.
+//!
+//! National party committees (RNC, DNC, NRCC, DCCC, DSCC, NRSC; 24 recent
+//! reports) file no H schedules at all -- BCRA bars them from nonfederal
+//! accounts -- and every one of their reports balanced too, save a 12-cent
+//! gap on one NRSC line 12 (see `tests/fixtures/ORACLE_NOTES.md`).
+//!
+//! # Arithmetic
+//!
+//! Sums use [`Decimal::saturating_add`] / [`Decimal::saturating_sub`] so
+//! the reconciler can never panic, but saturation cannot hide a
+//! discrepancy: `Decimal` holds about ±7.9 × 10^28, an `AMT-12` field
+//! holds at most 999,999,999,999.99 (≈ 10^12), so it would take more than
+//! 7 × 10^16 body lines -- a file of several exabytes -- to reach the limit.
+//! Amounts that fail to parse are skipped in schedule sums (a
+//! [`Rule::InvalidAmount`](crate::parser::Rule::InvalidAmount) finding
+//! from [`Filing::validate`] reports them) and reported as
+//! [`LineCheck::reported_unparseable`] on the cover.
 //!
 //! # Tolerance
 //!
@@ -89,12 +149,30 @@ pub struct Term {
 ///
 /// Federal law only requires *itemizing* a receipt or disbursement once
 /// the payee/contributor aggregate exceeds $200 in the cycle (11 CFR
-/// 104.3); anything smaller is reported in the cover total but need not
-/// appear on the schedule. So for those lines the schedule sum is a
-/// **floor**, not an identity -- a cover total below its itemized sum is a
-/// discrepancy, a cover total above it is normal. Lines that must be fully
-/// itemized regardless of size (contributions from committees, loans,
-/// transfers, independent expenditures, debts) must match **exactly**.
+/// 104.3(a)(4), (b)(3), (b)(4)); anything smaller is reported in the cover
+/// total but need not appear on the schedule. So for those lines the
+/// schedule sum is a **floor**, not an identity -- a cover total below its
+/// itemized sum is a discrepancy, a cover total above it is normal. Lines
+/// that must be itemized regardless of size must match **exactly**.
+///
+/// Which is which comes from the FEC's own form instructions (Forms 3X,
+/// 3, and 3P, revised 05/2016), whose line-by-line text says either
+/// "must be itemized ... regardless of the amount" or "aggregating in
+/// excess of $200":
+///
+/// | Itemized regardless of amount ([`Equal`](Relation::Equal)) | $200 threshold ([`AtLeast`](Relation::AtLeast)) |
+/// |---|---|
+/// | contributions from party committees and PACs (F3X 11(b), 11(c); F3 11(b), 11(c); F3P 17(b), 17(c)) | contributions from the candidate (F3 11(d), F3P 17(d)) |
+/// | transfers in and out (F3X 12, 22; F3 12, 18; F3P 18, 24) | offsets to operating expenditures (F3X 15; F3 14; F3P 20(a)-(c)) |
+/// | loans received, made, and repaid (F3X 13, 14, 26, 27; F3 13(a), 13(b), 19(a), 19(b); F3P 19(a), 19(b), 27(a), 27(b)) | other receipts (F3X 17; F3 15; F3P 21) |
+/// | refunds of contributions made to committees (F3X 16) | operating expenditures (F3X 21(b); F3 17; F3P 23, 25, 26) |
+/// | contributions to candidates and committees (F3X 23) | independent expenditures (F3X 24: Schedule E's paper form has an unitemized "Line (b)" the electronic `SE` layout lacks) |
+/// | coordinated party expenditures (F3X 25: "must itemize each expenditure on Schedule F") | refunds to individuals (F3X 28(a); F3 20(a); F3P 28(a): itemized only if the original contribution was) |
+/// | refunds to party committees and PACs (F3X 28(b), 28(c); F3 20(b), 20(c); F3P 28(b), 28(c)) | other disbursements (F3X 29; F3 21; F3P 29) |
+/// | federal funds (F3P 16), debts (Schedules C and D), and the allocation schedules H3-H6 | 100%-federal election activity (F3X 30(b); 11 CFR 300.36(b)(2)(iv)) |
+///
+/// Line 11(a)(i) (itemized individuals) is `Equal` by definition: it *is*
+/// the itemized total, and the rest goes on 11(a)(ii).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[strum(serialize_all = "snake_case")]
@@ -189,7 +267,10 @@ pub struct LineCheck {
     pub relation: Relation,
     /// For schedule sums: how many body lines contributed.
     pub lines_summed: usize,
-    /// True when the reported value was blank or not a valid amount.
+    /// True when the cover field was non-blank but not a valid amount
+    /// (`reported` is then `None` and counts as 0). A *blank* field gives
+    /// `reported == None` with this `false`: blank is a legitimate way to
+    /// write zero, garbage is not.
     pub reported_unparseable: bool,
 }
 
@@ -470,7 +551,12 @@ macro_rules! rules {
 /// Sources: FEC format spec sheet `F3X`, `RULE REFERENCE` column;
 /// FECfile+ `reports/form_3x/summary.py` (which stubs 18(c), 21(a)(i),
 /// 21(a)(ii), 30(a)(i), 30(a)(ii) to zero -- implemented here from
-/// Schedules H3, H4, H5, and H6 per the spec's own rule text).
+/// Schedules H3, H4, H5, and H6 per the spec's rule text and verified
+/// against 45 state-party reports; see the [module docs](self)); the Form
+/// 3X instructions for the `<-` / `>=` split ([`Relation`]). FECfile+
+/// sums Schedule E for line 24 because, as the filing tool, it holds every
+/// transaction; a filed `.fec` need not itemize sub-$200 payees, so here 24
+/// is a floor.
 pub static F3X_RULES: &[LineRule] = rules! {
     A:
         "9" col_a_debts_to { <- SchC["SC/9"].loan_balance  SchD["SD9"].balance_at_close_this_period };
@@ -478,8 +564,8 @@ pub static F3X_RULES: &[LineRule] = rules! {
         "11(a)(i)" col_a_individuals_itemized { <- SchA["SA11AI", "SA11A1"].contribution_amount };
         "11(a)(ii)" col_a_individuals_unitemized { input };
         "11(a)(iii)" col_a_individual_contribution_total { = "11(a)(i)" + "11(a)(ii)" };
-        "11(b)" col_a_political_party_committees { <- SchA["SA11B"].contribution_amount };
-        "11(c)" col_a_other_political_committees_pacs { <- SchA["SA11C"].contribution_amount };
+        "11(b)" col_a_political_party_contributions { <- SchA["SA11B"].contribution_amount };
+        "11(c)" col_a_pac_contributions { <- SchA["SA11C"].contribution_amount };
         "11(d)" col_a_total_contributions { = "11(a)(iii)" + "11(b)" + "11(c)" };
         "12" col_a_transfers_from_aff_other_party_cmttees { <- SchA["SA12"].contribution_amount };
         "13" col_a_total_loans { <- SchA["SA13"].contribution_amount };
@@ -498,7 +584,7 @@ pub static F3X_RULES: &[LineRule] = rules! {
         "21(c)" col_a_total_operating_expenditures { = "21(a)(i)" + "21(a)(ii)" + "21(b)" };
         "22" col_a_transfers_to_affiliated { <- SchB["SB22"].expenditure_amount };
         "23" col_a_contributions_to_candidates { <- SchB["SB23"].expenditure_amount };
-        "24" col_a_independent_expenditures { <- SchE["SE"].expenditure_amount };
+        "24" col_a_independent_expenditures { >= SchE["SE"].expenditure_amount };
         "25" col_a_coordinated_expenditures_by_party_committees { <- SchF["SF"].expenditure_amount };
         "26" col_a_total_loan_repayments_made { <- SchB["SB26"].expenditure_amount };
         "27" col_a_loans_made { <- SchB["SB27"].expenditure_amount };
@@ -509,7 +595,7 @@ pub static F3X_RULES: &[LineRule] = rules! {
         "29" col_a_other_disbursements { >= SchB["SB29"].expenditure_amount };
         "30(a)(i)" col_a_federal_election_activity_federal_share { <- H6["H6"].federal_share };
         "30(a)(ii)" col_a_federal_election_activity_levin_share { <- H6["H6"].levin_share };
-        "30(b)" col_a_federal_election_activity_all_federal { <- SchB["SB30B"].expenditure_amount };
+        "30(b)" col_a_federal_election_activity_all_federal { >= SchB["SB30B"].expenditure_amount };
         "30(c)" col_a_federal_election_activity_total { = "30(a)(i)" + "30(a)(ii)" + "30(b)" };
         "31" col_a_total_disbursements_recap { = "21(c)" + "22" + "23" + "24" + "25" + "26" + "27" + "28(d)" + "29" + "30(c)" };
         "32" col_a_total_federal_disbursements { = "31" - "21(a)(ii)" - "30(a)(ii)" };
@@ -528,8 +614,8 @@ pub static F3X_RULES: &[LineRule] = rules! {
         "11(a)(i)" col_b_individuals_itemized { input };
         "11(a)(ii)" col_b_individuals_unitemized { input };
         "11(a)(iii)" col_b_individual_contribution_total { = "11(a)(i)" + "11(a)(ii)" };
-        "11(b)" col_b_political_party_committees { input };
-        "11(c)" col_b_other_political_committees_pacs { input };
+        "11(b)" col_b_political_party_contributions { input };
+        "11(c)" col_b_pac_contributions { input };
         "11(d)" col_b_total_contributions { = "11(a)(iii)" + "11(b)" + "11(c)" };
         "12" col_b_transfers_from_aff_other_party_cmttees { input };
         "13" col_b_total_loans { input };
@@ -578,18 +664,22 @@ pub static F3X_RULES: &[LineRule] = rules! {
 
 /// Form 3 (House / Senate candidate committee report).
 ///
-/// Source: FEC format spec sheet `F3`, `RULE REFERENCE` column. (FECfile+
-/// computes this form as all zeros.)
+/// Sources: FEC format spec sheet `F3`, `RULE REFERENCE` column; the Form
+/// 3 instructions for the `<-` / `>=` split (11(d), contributions from the
+/// candidate, is itemized only "aggregating in excess of $200", so it is a
+/// floor). FECfile+ computes this form as all zeros. Checked against 12
+/// recent House and Senate reports carrying Schedule C loans and Schedule
+/// D debts (lines 9 and 10); all balanced.
 pub static F3_RULES: &[LineRule] = rules! {
     A:
         "9" col_a_debts_to { <- SchC["SC/9"].loan_balance  SchD["SD9"].balance_at_close_this_period };
         "10" col_a_debts_by { <- SchC["SC/10"].loan_balance SchD["SD10"].balance_at_close_this_period };
-        "11(a)(i)" col_a_individual_contributions_itemized { <- SchA["SA11AI", "SA11A1"].contribution_amount };
-        "11(a)(ii)" col_a_individual_contributions_unitemized { input };
-        "11(a)(iii)" col_a_total_individual_contributions { = "11(a)(i)" + "11(a)(ii)" };
+        "11(a)(i)" col_a_individuals_itemized { <- SchA["SA11AI", "SA11A1"].contribution_amount };
+        "11(a)(ii)" col_a_individuals_unitemized { input };
+        "11(a)(iii)" col_a_individual_contribution_total { = "11(a)(i)" + "11(a)(ii)" };
         "11(b)" col_a_political_party_contributions { <- SchA["SA11B"].contribution_amount };
         "11(c)" col_a_pac_contributions { <- SchA["SA11C"].contribution_amount };
-        "11(d)" col_a_candidate_contributions { <- SchA["SA11D"].contribution_amount };
+        "11(d)" col_a_candidate_contributions { >= SchA["SA11D"].contribution_amount };
         "11(e)" col_a_total_contributions { = "11(a)(iii)" + "11(b)" + "11(c)" + "11(d)" };
         "12" col_a_transfers_from_authorized { <- SchA["SA12"].contribution_amount };
         "13(a)" col_a_candidate_loans { <- SchA["SA13A"].contribution_amount };
@@ -615,16 +705,16 @@ pub static F3_RULES: &[LineRule] = rules! {
         "7(a)" col_a_total_operating_expenditures { = "17" };
         "7(b)" col_a_total_offset_to_operating_expenditures { = "14" };
         "7(c)" col_a_net_operating_expenditures { = "7(a)" - "7(b)" };
-        "23" col_a_cash_beginning_reporting_period { input };
+        "23" col_a_cash_on_hand_beginning_period { input };
         "24" col_a_total_receipts_period { = "16" };
-        "25" col_a_subtotals { = "23" + "24" };
+        "25" col_a_subtotal { = "23" + "24" };
         "26" col_a_total_disbursements_period { = "22" };
         "27" col_a_cash_on_hand_close { = "25" - "26" };
         "8" col_a_cash_on_hand_close_of_period { = "27" };
     B:
-        "11(a)(i)" col_b_individual_contributions_itemized { input };
-        "11(a)(ii)" col_b_individual_contributions_unitemized { input };
-        "11(a)(iii)" col_b_total_individual_contributions { = "11(a)(i)" + "11(a)(ii)" };
+        "11(a)(i)" col_b_individuals_itemized { input };
+        "11(a)(ii)" col_b_individuals_unitemized { input };
+        "11(a)(iii)" col_b_individual_contribution_total { = "11(a)(i)" + "11(a)(ii)" };
         "11(b)" col_b_political_party_contributions { input };
         "11(c)" col_b_pac_contributions { input };
         "11(d)" col_b_candidate_contributions { input };
@@ -657,10 +747,16 @@ pub static F3_RULES: &[LineRule] = rules! {
 
 /// Form 3P (presidential committee report).
 ///
-/// Source: FEC format spec sheet `F3P`, `RULE REFERENCE` column. Line
-/// 17(a)(i) sums `SA17A` (itemized individuals); unitemized 17(a)(ii) has
-/// no schedule. Lines 14 and 15 are Column-B-derived per the spec
-/// (`= 17e Col B - 28d Col B`, `= 23 Col B - 20a Col B`).
+/// Sources: FEC format spec sheet `F3P`, `RULE REFERENCE` column; the Form
+/// 3P instructions for the `<-` / `>=` split (16, federal funds, "must be
+/// itemized ... regardless of the amount"; 17(d), contributions from the
+/// candidate, only "in excess of $200"). Line 17(a)(i) sums `SA17A`
+/// (itemized individuals); unitemized 17(a)(ii) has no schedule. Lines 14
+/// and 15 are Column-B-derived per the spec (`= 17e Col B - 28d Col B`,
+/// `= 23 Col B - 20a Col B`). Checked against ten 2024-cycle presidential
+/// reports (Harris, Kennedy, Haley, Ramaswamy) at spec 8.4 and four 2026
+/// filings at 8.5; see `tests/fixtures/ORACLE_NOTES.md` for the one that
+/// does not balance.
 pub static F3P_RULES: &[LineRule] = rules! {
     A:
         "11" col_a_debts_to { <- SchC["SC/11"].loan_balance  SchD["SD11"].balance_at_close_this_period };
@@ -669,31 +765,31 @@ pub static F3P_RULES: &[LineRule] = rules! {
         "17(a)(i)" col_a_individuals_itemized { <- SchA["SA17A"].contribution_amount };
         "17(a)(ii)" col_a_individuals_unitemized { input };
         "17(a)(iii)" col_a_individual_contribution_total { = "17(a)(i)" + "17(a)(ii)" };
-        "17(b)" col_a_political_party_committees_receipts { <- SchA["SA17B"].contribution_amount };
-        "17(c)" col_a_other_political_committees_pacs { <- SchA["SA17C"].contribution_amount };
-        "17(d)" col_a_the_candidate { <- SchA["SA17D"].contribution_amount };
+        "17(b)" col_a_political_party_contributions { <- SchA["SA17B"].contribution_amount };
+        "17(c)" col_a_pac_contributions { <- SchA["SA17C"].contribution_amount };
+        "17(d)" col_a_candidate_contributions { >= SchA["SA17D"].contribution_amount };
         "17(e)" col_a_total_contributions { = "17(a)(iii)" + "17(b)" + "17(c)" + "17(d)" };
         "18" col_a_transfers_from_aff_other_party_cmttees { <- SchA["SA18"].contribution_amount };
-        "19(a)" col_a_received_from_or_guaranteed_by_cand { <- SchA["SA19A"].contribution_amount };
+        "19(a)" col_a_candidate_loans { <- SchA["SA19A"].contribution_amount };
         "19(b)" col_a_other_loans { <- SchA["SA19B"].contribution_amount };
         "19(c)" col_a_total_loans { = "19(a)" + "19(b)" };
-        "20(a)" col_a_operating { >= SchA["SA20A"].contribution_amount };
-        "20(b)" col_a_fundraising { >= SchA["SA20B"].contribution_amount };
-        "20(c)" col_a_legal_and_accounting { >= SchA["SA20C"].contribution_amount };
+        "20(a)" col_a_offset_to_operating_expenditures { >= SchA["SA20A"].contribution_amount };
+        "20(b)" col_a_offset_to_fundraising_expenditures { >= SchA["SA20B"].contribution_amount };
+        "20(c)" col_a_offset_to_legal_expenditures { >= SchA["SA20C"].contribution_amount };
         "20(d)" col_a_total_offsets_to_expenditures { = "20(a)" + "20(b)" + "20(c)" };
         "21" col_a_other_receipts { >= SchA["SA21"].contribution_amount };
         "22" col_a_total_receipts_recap { = "16" + "17(e)" + "18" + "19(c)" + "20(d)" + "21" };
         "23" col_a_operating_expenditures { >= SchB["SB23"].expenditure_amount };
-        "24" col_a_transfers_to_other_authorized_committees { <- SchB["SB24"].expenditure_amount };
+        "24" col_a_transfers_to_authorized { <- SchB["SB24"].expenditure_amount };
         "25" col_a_fundraising_disbursements { >= SchB["SB25"].expenditure_amount };
-        "26" col_a_exempt_legal_accounting_disbursement { >= SchB["SB26"].expenditure_amount };
-        "27(a)" col_a_made_or_guaranteed_by_candidate { <- SchB["SB27A"].expenditure_amount };
-        "27(b)" col_a_other_repayments { <- SchB["SB27B"].expenditure_amount };
+        "26" col_a_exempt_legal_disbursements { >= SchB["SB26"].expenditure_amount };
+        "27(a)" col_a_candidate_loan_repayments { <- SchB["SB27A"].expenditure_amount };
+        "27(b)" col_a_other_loan_repayments { <- SchB["SB27B"].expenditure_amount };
         "27(c)" col_a_total_loan_repayments_made { = "27(a)" + "27(b)" };
-        "28(a)" col_a_individuals { >= SchB["SB28A"].expenditure_amount };
-        "28(b)" col_a_political_party_committees_refunds { <- SchB["SB28B"].expenditure_amount };
-        "28(c)" col_a_other_political_committees { <- SchB["SB28C"].expenditure_amount };
-        "28(d)" col_a_total_contributions_refunds { = "28(a)" + "28(b)" + "28(c)" };
+        "28(a)" col_a_refunds_to_individuals { >= SchB["SB28A"].expenditure_amount };
+        "28(b)" col_a_refunds_to_party_committees { <- SchB["SB28B"].expenditure_amount };
+        "28(c)" col_a_refunds_to_other_committees { <- SchB["SB28C"].expenditure_amount };
+        "28(d)" col_a_total_refunds { = "28(a)" + "28(b)" + "28(c)" };
         "29" col_a_other_disbursements { >= SchB["SB29"].expenditure_amount };
         "30" col_a_total_disbursements_recap { = "23" + "24" + "25" + "26" + "27(c)" + "28(d)" + "29" };
         "6" col_a_cash_on_hand_beginning_period { input };
@@ -706,31 +802,31 @@ pub static F3P_RULES: &[LineRule] = rules! {
         "17(a)(i)" col_b_individuals_itemized { input };
         "17(a)(ii)" col_b_individuals_unitemized { input };
         "17(a)(iii)" col_b_individual_contribution_total { = "17(a)(i)" + "17(a)(ii)" };
-        "17(b)" col_b_political_party_committees_receipts { input };
-        "17(c)" col_b_other_political_committees_pacs { input };
-        "17(d)" col_b_the_candidate { input };
-        "17(e)" col_b_total_contributions_other_than_loans { = "17(a)(iii)" + "17(b)" + "17(c)" + "17(d)" };
+        "17(b)" col_b_political_party_contributions { input };
+        "17(c)" col_b_pac_contributions { input };
+        "17(d)" col_b_candidate_contributions { input };
+        "17(e)" col_b_total_contributions { = "17(a)(iii)" + "17(b)" + "17(c)" + "17(d)" };
         "18" col_b_transfers_from_aff_other_party_cmttees { input };
-        "19(a)" col_b_received_from_or_guaranteed_by_cand { input };
+        "19(a)" col_b_candidate_loans { input };
         "19(b)" col_b_other_loans { input };
         "19(c)" col_b_total_loans { = "19(a)" + "19(b)" };
-        "20(a)" col_b_operating { input };
-        "20(b)" col_b_fundraising { input };
-        "20(c)" col_b_legal_and_accounting { input };
-        "20(d)" col_b_total_offsets_to_operating_expenditures { = "20(a)" + "20(b)" + "20(c)" };
+        "20(a)" col_b_offset_to_operating_expenditures { input };
+        "20(b)" col_b_offset_to_fundraising_expenditures { input };
+        "20(c)" col_b_offset_to_legal_expenditures { input };
+        "20(d)" col_b_total_offsets_to_expenditures { = "20(a)" + "20(b)" + "20(c)" };
         "21" col_b_other_receipts { input };
         "22" col_b_total_receipts { = "16" + "17(e)" + "18" + "19(c)" + "20(d)" + "21" };
         "23" col_b_operating_expenditures { input };
-        "24" col_b_transfers_to_other_authorized_committees { input };
+        "24" col_b_transfers_to_authorized { input };
         "25" col_b_fundraising_disbursements { input };
-        "26" col_b_exempt_legal_accounting_disbursement { input };
-        "27(a)" col_b_made_or_guaranteed_by_the_candidate { input };
-        "27(b)" col_b_other_repayments { input };
+        "26" col_b_exempt_legal_disbursements { input };
+        "27(a)" col_b_candidate_loan_repayments { input };
+        "27(b)" col_b_other_loan_repayments { input };
         "27(c)" col_b_total_loan_repayments_made { = "27(a)" + "27(b)" };
-        "28(a)" col_b_individuals { input };
-        "28(b)" col_b_political_party_committees_refunds { input };
-        "28(c)" col_b_other_political_committees { input };
-        "28(d)" col_b_total_contributions_refunds { = "28(a)" + "28(b)" + "28(c)" };
+        "28(a)" col_b_refunds_to_individuals { input };
+        "28(b)" col_b_refunds_to_party_committees { input };
+        "28(c)" col_b_refunds_to_other_committees { input };
+        "28(d)" col_b_total_refunds { = "28(a)" + "28(b)" + "28(c)" };
         "29" col_b_other_disbursements { input };
         "30" col_b_total_disbursements { = "23" + "24" + "25" + "26" + "27(c)" + "28(d)" + "29" };
 };
@@ -934,6 +1030,216 @@ mod tests {
         let c = r.line(Column::A, "6(c)").unwrap();
         assert!(c.reported_unparseable);
         assert_eq!(c.reported, None);
+        // Blank is zero, not garbage.
+        let filing = f3x_with(&[("col_a_total_receipts", "")], vec![]);
+        let r = filing.reconcile().unwrap();
+        let c = r.line(Column::A, "6(c)").unwrap();
+        assert!(!c.reported_unparseable);
+        assert_eq!(c.reported, None);
+        assert_eq!(c.delta, Decimal::ZERO);
+    }
+
+    /// Schedule H3 files one transfer as an `AD` record plus one record per
+    /// other event type, each repeating the transfer's total in
+    /// `total_amount_transferred` and carrying its own share in
+    /// `transferred_amount` (the shape of every H3 group in the 45
+    /// state-party reports the rules were checked against). 18(a) is the
+    /// sum of the shares; summing the totals would double-count.
+    #[test]
+    fn h3_line_18a_sums_transferred_amount_not_the_repeated_total() {
+        let h3 = |tid: &str, back: &str, event: &str, total: &str, share: &str| {
+            ParsedLine::from_pairs(
+                Table::H3,
+                SpecVersion::electronic(8, 5),
+                3,
+                [
+                    ("form_type", "H3"),
+                    ("filer_committee_id_number", "C00123456"),
+                    ("transaction_id", tid),
+                    ("back_reference_tran_id", back),
+                    ("account_name", "STATE CHECKING"),
+                    ("event_type", event),
+                    ("total_amount_transferred", total),
+                    ("transferred_amount", share),
+                ],
+            )
+            .unwrap()
+        };
+        // 46102.21 = 44060.51 administrative + 2041.70 direct fundraising
+        // (a real MN DFL transfer), plus a 2605.25 transfer that is all AD.
+        let filing = f3x_with(
+            &[
+                ("col_a_transfers_from_nonfederal_h3", "48707.46"),
+                ("col_a_levin_funds", "0"),
+                ("col_a_total_nonfederal_transfers", "48707.46"),
+            ],
+            vec![
+                h3("4948AD", "4948AD", "AD", "46102.21", "44060.51"),
+                h3("11388Q", "4948AD", "DF", "46102.21", "2041.70"),
+                h3("4918AD", "4918AD", "AD", "2605.25", "2605.25"),
+            ],
+        );
+        let r = filing.reconcile().unwrap();
+        let c = r.line(Column::A, "18(a)").unwrap();
+        assert_eq!(c.expected, dec!(48707.46));
+        assert_eq!(c.lines_summed, 3);
+        assert!(c.matches(), "{c}");
+        assert!(r.line(Column::A, "18(c)").unwrap().matches());
+    }
+
+    /// 21(a)(i)/(ii) sum H4's federal and nonfederal shares with memo
+    /// entries (payroll and credit-card breakdowns back-referencing a
+    /// parent H4) excluded, and 36 = 21(a)(i) + 21(b) carries only the
+    /// federal share forward.
+    #[test]
+    fn h4_lines_21a_split_the_shares_and_skip_memos() {
+        let h4 = |tid: &str, total: &str, fed: &str, nonfed: &str, memo: bool| {
+            let mut pairs = vec![
+                ("form_type", "H4"),
+                ("filer_committee_id_number", "C00123456"),
+                ("transaction_id", tid),
+                ("total_amount", total),
+                ("federal_share", fed),
+                ("nonfederal_share", nonfed),
+            ];
+            if memo {
+                pairs.push(("memo_code", "X"));
+            }
+            ParsedLine::from_pairs(Table::H4, SpecVersion::electronic(8, 5), 3, pairs).unwrap()
+        };
+        let filing = f3x_with(
+            &[
+                ("col_a_shared_operating_expenditures_federal", "330.00"),
+                ("col_a_shared_operating_expenditures_nonfederal", "670.00"),
+                ("col_a_other_federal_operating_expenditures", "10.00"),
+                ("col_a_total_operating_expenditures", "1010.00"),
+                ("col_a_total_federal_operating_expenditures", "340.00"),
+            ],
+            vec![
+                h4("H4.1", "1000.00", "330.00", "670.00", false),
+                h4("H4.1a", "600.00", "198.00", "402.00", true),
+                h4("H4.1b", "400.00", "132.00", "268.00", true),
+            ],
+        );
+        let r = filing.reconcile().unwrap();
+        for (line, want) in [("21(a)(i)", dec!(330.00)), ("21(a)(ii)", dec!(670.00))] {
+            let c = r.line(Column::A, line).unwrap();
+            assert_eq!(c.expected, want, "{c}");
+            assert_eq!(c.lines_summed, 1, "{c}");
+            assert!(c.matches(), "{c}");
+        }
+        assert!(r.line(Column::A, "21(c)").unwrap().matches());
+        assert!(r.line(Column::A, "36").unwrap().matches());
+    }
+
+    /// The $200 itemization threshold makes 24 (independent expenditures)
+    /// and 30(b) (100%-federal election activity) floors on Form 3X, and
+    /// contributions from the candidate floors on Forms 3 and 3P: a cover
+    /// total above the itemized sum is normal, below it is a discrepancy.
+    #[test]
+    fn threshold_lines_are_floors() {
+        let filing = f3x_with(
+            &[
+                ("col_a_independent_expenditures", "250.00"),
+                ("col_a_federal_election_activity_all_federal", "79762.86"),
+            ],
+            vec![
+                body(Table::SchE, "SE", "expenditure_amount", "201.00", false),
+                body(
+                    Table::SchB,
+                    "SB30B",
+                    "expenditure_amount",
+                    "79588.67",
+                    false,
+                ),
+            ],
+        );
+        let r = filing.reconcile().unwrap();
+        for line in ["24", "30(b)"] {
+            let c = r.line(Column::A, line).unwrap();
+            assert_eq!(c.relation, Relation::AtLeast, "{c}");
+            assert!(c.delta > Decimal::ZERO, "{c}");
+            assert!(c.matches(), "{c}");
+            assert!(c.rule.starts_with(">= sum of"), "{c}");
+        }
+        // Below the itemized sum is still a violation.
+        let filing = f3x_with(
+            &[("col_a_independent_expenditures", "100.00")],
+            vec![body(
+                Table::SchE,
+                "SE",
+                "expenditure_amount",
+                "201.00",
+                false,
+            )],
+        );
+        let c = filing.reconcile().unwrap();
+        let c = c.line(Column::A, "24").unwrap();
+        assert!(!c.matches());
+        assert_eq!(c.violation(), dec!(101.00));
+
+        let source = |rules: &'static [LineRule], line: &str| {
+            rules
+                .iter()
+                .find(|r| r.column == Column::A && r.line == line)
+                .map(|r| r.source)
+        };
+        assert!(matches!(
+            source(F3_RULES, "11(d)"),
+            Some(Source::Schedules(Relation::AtLeast, _))
+        ));
+        assert!(matches!(
+            source(F3P_RULES, "17(d)"),
+            Some(Source::Schedules(Relation::AtLeast, _))
+        ));
+        // Their committee counterparts stay exact.
+        assert!(matches!(
+            source(F3_RULES, "11(c)"),
+            Some(Source::Schedules(Relation::Equal, _))
+        ));
+        assert!(matches!(
+            source(F3P_RULES, "16"),
+            Some(Source::Schedules(Relation::Equal, _))
+        ));
+    }
+
+    /// Every form has a Column B table, and every Column B rule names a
+    /// field the 8.5 layout has (the spec's labels differ between columns,
+    /// e.g. F3P 17(e) is "Total contributions (Other than Loans)" in B).
+    #[test]
+    fn column_b_rules_exist_and_resolve_for_every_form() {
+        let v85 = SpecVersion::electronic(8, 5);
+        for (form, rules) in [
+            (Table::F3X, F3X_RULES),
+            (Table::F3, F3_RULES),
+            (Table::F3P, F3P_RULES),
+        ] {
+            let layout = form.layout(v85).unwrap();
+            let b: Vec<&LineRule> = rules.iter().filter(|r| r.column == Column::B).collect();
+            assert!(b.len() >= 20, "{form}: only {} Column B rules", b.len());
+            for r in b {
+                assert!(
+                    layout.field(r.field).is_some(),
+                    "{form} col B line {}: no field {}",
+                    r.line,
+                    r.field
+                );
+                assert!(
+                    r.field.starts_with("col_b_"),
+                    "{form} col B line {}: {}",
+                    r.line,
+                    r.field
+                );
+            }
+            for r in rules.iter().filter(|r| r.column == Column::A) {
+                assert!(
+                    r.field.starts_with("col_a_"),
+                    "{form} col A line {}: {}",
+                    r.line,
+                    r.field
+                );
+            }
+        }
     }
 
     #[test]
@@ -1055,8 +1361,8 @@ mod tests {
         let mut cover = vec![
             ("col_a_individuals_itemized", "10000.23"),
             ("col_a_individuals_unitemized", "3.77"),
-            ("col_a_political_party_committees", "444.44"),
-            ("col_a_other_political_committees_pacs", "555.55"),
+            ("col_a_political_party_contributions", "444.44"),
+            ("col_a_pac_contributions", "555.55"),
             ("col_a_individual_contribution_total", "10004.00"),
             ("col_a_total_contributions", "11003.99"),
             ("col_a_transfers_from_aff_other_party_cmttees", "1212.12"),

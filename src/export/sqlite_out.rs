@@ -85,7 +85,7 @@ impl SqliteSink {
         let committee_id = preamble
             .summary
             .get_non_empty("filer_committee_id_number")
-            .or_else(|| preamble.summary.get_non_empty("filer_candidate_id_number"));
+            .or_else(|| preamble.summary.get_non_empty("candidate_id_number"));
         conn.execute(
             "INSERT INTO filings (filing_id, form_type, version, committee_id, path, exported_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",

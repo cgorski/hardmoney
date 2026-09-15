@@ -10,9 +10,9 @@ use crate::api::pagination::Pagination;
 /// A row from the `independent_expenditures` view (created per namespace by
 /// `hardmoney::db::ensure_views`), which -- when present -- is backed by the FEC's
 /// own official, weekly-updated `fec_fitem_sched_e.dump` pg_dump archive
-/// (restored via `hardmoney bulk-restore-dump schedule_e`), not an
-/// approximation derived from another bulk file. If that dump hasn't been
-/// restored yet, this endpoint returns a 503 explaining so.
+/// (restored via `hardmoney dumps import independent-expenditures`), not
+/// an approximation derived from another bulk file. If that dump hasn't
+/// been restored yet, this endpoint returns a 503 explaining so.
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct IndependentExpenditure {
     pub sub_id: i64,
@@ -62,7 +62,7 @@ pub async fn search(
          WHERE ($1::text IS NULL OR candidate_id = $1) \
            AND ($2::text IS NULL OR cmte_id = $2) \
            AND ($3::text IS NULL OR support_oppose_code = $3) \
-         ORDER BY expenditure_date DESC NULLS LAST \
+         ORDER BY expenditure_date DESC NULLS LAST, sub_id DESC \
          LIMIT $4 OFFSET $5",
     )
     .bind(params.candidate_id)
@@ -76,8 +76,9 @@ pub async fn search(
         crate::api::error::missing_relation(
             e,
             "independent_expenditures",
-            "run `hardmoney bulk-restore-dump schedule_e` to load the FEC's official \
-             Schedule E pg_dump archive, then `hardmoney schema-init`",
+            "run `hardmoney dumps import independent-expenditures` to load the FEC's \
+             official Schedule E pg_dump archive (then `hardmoney schema-init` in any \
+             other namespace that should see it)",
         )
     })?;
     Ok(Json(rows))

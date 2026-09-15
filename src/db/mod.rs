@@ -237,7 +237,17 @@ impl MigrationStatus {
 /// Idempotent: uses `DROP VIEW` + `CREATE VIEW` because Postgres refuses
 /// `CREATE OR REPLACE` when a column's type changes. A table dropped by a
 /// concurrent restore between the existence check and the `CREATE` is
-/// tolerated (the view is simply not created; the restore recreates it).
+/// tolerated (the view is simply not created; the restore recreates its
+/// own namespace's views, and this namespace's come back the next time
+/// this runs -- `serve` and `schema-init` both call it).
+///
+/// Each block locks `disclosure.<table>` in `ACCESS SHARE` mode *before*
+/// dropping the old view. A restore's `DROP TABLE ... CASCADE` takes the
+/// table exclusively and then every dependent view, in every namespace;
+/// dropping our view first and then touching the table would lock in the
+/// opposite order and deadlock against it (observed when the integration
+/// tests ran in parallel). Same order on both sides means this simply
+/// waits for the restore's `DROP` to finish.
 ///
 /// Lives outside the migration set because it depends on out-of-band state
 /// (whether the dump has been restored) and must be re-run after a restore.
@@ -292,6 +302,7 @@ fn dump_view_sql(view: &str, table: &str, cycle_expr: Option<&str>) -> String {
         "DO $$\n\
          BEGIN\n\
              IF to_regclass('disclosure.{table}') IS NOT NULL THEN\n\
+                 EXECUTE 'LOCK TABLE disclosure.{table} IN ACCESS SHARE MODE';\n\
                  EXECUTE 'DROP VIEW IF EXISTS {view}';\n\
                  EXECUTE 'CREATE VIEW {view} AS {select}';\n\
              END IF;\n\
@@ -306,6 +317,7 @@ const INDEPENDENT_EXPENDITURES_VIEW_SQL: &str = r#"
 DO $$
 BEGIN
     IF to_regclass('disclosure.fec_fitem_sched_e') IS NOT NULL THEN
+        EXECUTE 'LOCK TABLE disclosure.fec_fitem_sched_e IN ACCESS SHARE MODE';
         EXECUTE 'DROP VIEW IF EXISTS independent_expenditures';
         EXECUTE '
             CREATE VIEW independent_expenditures AS
@@ -450,6 +462,15 @@ const RESOLVE_ALL_CHAINS_SQL: &str = resolve_chain_sql!("", "");
 /// ([`crate::bulk::ingest_filing`] calls this after every insert), so the
 /// result does not depend on the order filings arrive in.
 ///
+/// # Concurrency
+///
+/// Resolutions of the same chain are serialised with a transaction-scoped
+/// advisory lock on `original_id` (`pg_advisory_xact_lock`). Without it
+/// two ingests of amendments to one original, running at the same time
+/// under `READ COMMITTED`, each compute the chain from a snapshot that
+/// lacks the other's uncommitted row and both end up `most_recent`; with
+/// it the second waits for the first to commit and then sees its row.
+///
 /// # Errors
 ///
 /// Any database error, including a namespace whose schema predates
@@ -465,16 +486,36 @@ pub async fn resolve_amendment_chain(
 }
 
 /// [`resolve_amendment_chain`] on an existing connection or transaction,
-/// so an ingester can make the insert and the resolution atomic.
+/// so an ingester can make the insert and the resolution atomic. Takes
+/// `chain_lock` on `original_id` first; a caller that will resolve two
+/// chains in one transaction should take both locks up front, in
+/// ascending order, so two such transactions cannot deadlock.
 pub(crate) async fn resolve_amendment_chain_in(
     conn: &mut PgConnection,
     original_id: i64,
 ) -> Result<usize, sqlx::Error> {
+    chain_lock(&mut *conn, original_id).await?;
     let done = sqlx::query(RESOLVE_ONE_CHAIN_SQL)
         .bind(original_id)
         .execute(conn)
         .await?;
     Ok(usize::try_from(done.rows_affected()).unwrap_or(usize::MAX))
+}
+
+/// Takes the transaction-scoped advisory lock that serialises chain
+/// resolution for `original_id` (released at commit or rollback; taking it
+/// again in the same transaction is a no-op). The key is the filing id
+/// itself, so two namespaces in one database that hold the same filing id
+/// contend with each other -- harmless, since a resolution is milliseconds.
+pub(crate) async fn chain_lock(
+    conn: &mut PgConnection,
+    original_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(original_id)
+        .execute(conn)
+        .await?;
+    Ok(())
 }
 
 /// Recomputes the amendment-chain columns for **every** row of `filings`

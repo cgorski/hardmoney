@@ -268,8 +268,16 @@ pub async fn ingest_filing_with(
     let chain_rows_resolved = match resolution {
         ChainResolution::Resolve => {
             let key = chain_key(filing_id, filing.is_amendment, amends_filing_id);
+            let old = previous_key.filter(|k| *k != key);
+            // Both chain locks up front, in ascending order, so two
+            // concurrent moves between the same pair of chains cannot
+            // deadlock (see `db::chain_lock`).
+            if let Some(old) = old {
+                crate::db::chain_lock(&mut tx, key.min(old)).await?;
+                crate::db::chain_lock(&mut tx, key.max(old)).await?;
+            }
             let mut rows = crate::db::resolve_amendment_chain_in(&mut tx, key).await?;
-            if let Some(old) = previous_key.filter(|k| *k != key) {
+            if let Some(old) = old {
                 rows =
                     rows.saturating_add(crate::db::resolve_amendment_chain_in(&mut tx, old).await?);
             }
@@ -295,29 +303,16 @@ pub async fn ingest_filing_with(
 /// fixtures are `<FORM>_<id>[_v<spec>].fec`. The id is the **last** run of
 /// digits in the stem that is at least 4 digits long, so `F24N_2011823.fec`
 /// is 2011823 (not 242011823, which is what "all the digits" produced) and
-/// `F3XA_27789_v3.fec` is 27789. Returns `None` if there is no such run,
-/// rather than silently defaulting to 0.
+/// `F3XA_27789_v3.fec` is 27789. Returns `None` if there is no such run
+/// (or the run does not fit an `i64`), rather than silently defaulting
+/// to 0. The same rule as `export::filing_id_from_path`, which returns
+/// `u64`; the two are kept separate so neither feature depends on the
+/// other.
 pub fn filing_id_from_path(path: &std::path::Path) -> Option<i64> {
     let stem = path.file_stem()?.to_str()?;
-    let mut best: Option<&str> = None;
-    let mut start: Option<usize> = None;
-    for (i, ch) in stem
-        .char_indices()
-        .chain(std::iter::once((stem.len(), ' ')))
-    {
-        match (ch.is_ascii_digit(), start) {
-            (true, None) => start = Some(i),
-            (false, Some(s)) => {
-                let run = &stem[s..i];
-                if run.len() >= 4 {
-                    best = Some(run);
-                }
-                start = None;
-            }
-            _ => {}
-        }
-    }
-    best.and_then(|r| r.parse().ok())
+    stem.split(|c: char| !c.is_ascii_digit())
+        .rfind(|run| run.len() >= 4)
+        .and_then(|run| run.parse().ok())
 }
 
 #[cfg(test)]

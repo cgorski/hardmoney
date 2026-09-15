@@ -60,7 +60,7 @@ Every output table has the same column set, in this order:
 ```text
 $ hardmoney export tests/fixtures/F3XA_2011821.fec --out /tmp/x.csv >/dev/null
 $ head -c 200 /tmp/x.csv/SchB.csv
-line_no,form_type,filer_committee_id_number,transaction_id_number,back_reference_tran_id_number,back_reference_sched_name,entity_type,payee_organization_name,payee_last_name,payee_first_name,payee_mid
+line_no,form_type,filer_committee_id_number,transaction_id,back_reference_tran_id,back_reference_sched_name,entity_type,payee_organization_name,payee_last_name,payee_first_name,payee_mid
 ```
 
 All lines of one table in one filing share a layout (a filing has one

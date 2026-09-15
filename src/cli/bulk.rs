@@ -7,6 +7,7 @@ use hardmoney::Cycle;
 use hardmoney::bulk::{self, Input, LoadMode, LoadOptions, LoadReport, dump};
 
 use super::db_args::DbArgs;
+use super::shared::{columns, default_dump_cache_dir};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum ModeArg {
@@ -182,17 +183,8 @@ pub struct BulkRestoreDumpArgs {
     pub jobs: u8,
     /// Where to keep downloaded dumps (re-used across runs; an interrupted
     /// download resumes from its .partial file).
-    #[arg(long, env = "HARDMONEY_CACHE_DIR", default_value_os_t = default_cache_dir())]
+    #[arg(long, env = "HARDMONEY_CACHE_DIR", default_value_os_t = default_dump_cache_dir())]
     pub cache_dir: PathBuf,
-}
-
-fn default_cache_dir() -> PathBuf {
-    std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-        .unwrap_or_else(std::env::temp_dir)
-        .join("hardmoney")
-        .join("dumps")
 }
 
 pub async fn restore_dump(args: BulkRestoreDumpArgs) -> super::CliResult {
@@ -284,7 +276,7 @@ pub struct BulkDumpInfoArgs {
     #[arg(long)]
     pub offline: bool,
     /// Where downloaded dumps are kept.
-    #[arg(long, env = "HARDMONEY_CACHE_DIR", default_value_os_t = default_cache_dir())]
+    #[arg(long, env = "HARDMONEY_CACHE_DIR", default_value_os_t = default_dump_cache_dir())]
     pub cache_dir: PathBuf,
 }
 
@@ -566,27 +558,7 @@ fn list_or_none(items: &[String]) -> String {
 /// Prints `rows` under `header` with each column padded to its widest
 /// cell.
 fn print_columns<const N: usize>(header: &[&str; N], rows: &[[String; N]]) {
-    let mut widths: Vec<usize> = header.iter().map(|h| h.chars().count()).collect();
-    for row in rows {
-        for (w, cell) in widths.iter_mut().zip(row.iter()) {
-            *w = (*w).max(cell.chars().count());
-        }
-    }
-    let line = |cells: &[&str]| -> String {
-        cells
-            .iter()
-            .zip(widths.iter())
-            .map(|(c, w)| format!("{c:<w$}"))
-            .collect::<Vec<_>>()
-            .join("  ")
-            .trim_end()
-            .to_string()
-    };
-    println!("{}", line(header));
-    for row in rows {
-        let cells: Vec<&str> = row.iter().map(String::as_str).collect();
-        println!("{}", line(&cells));
-    }
+    println!("{}", columns(header, rows));
 }
 
 #[derive(Args, Debug)]
@@ -651,7 +623,10 @@ pub async fn load_filing(args: BulkLoadFilingArgs) -> super::CliResult {
             .await?;
     let chain = match report.chain_rows_resolved {
         Some(n) => format!(", amendment chain resolved ({n} filing(s))"),
-        None => ", amendment chain not resolved (--no-resolve)".to_string(),
+        None => {
+            ", amendment chain not resolved (--no-resolve; run `hardmoney bulk-resolve-chains` when the batch is done)"
+                .to_string()
+        }
     };
     println!(
         "ingested filing {} ({}): {} Schedule E line(s), {} skipped{chain}",
@@ -663,5 +638,29 @@ pub async fn load_filing(args: BulkLoadFilingArgs) -> super::CliResult {
     for s in report.skipped.iter().take(10) {
         eprintln!("  skipped {s}");
     }
+    Ok(())
+}
+
+#[derive(Args, Debug)]
+pub struct BulkResolveChainsArgs {
+    #[command(flatten)]
+    pub db: DbArgs,
+}
+
+/// `bulk-resolve-chains`: recompute the amendment-chain columns of every
+/// ingested filing in one statement. The follow-up to a batch of
+/// `bulk-load-filing --no-resolve`, and the fix-up for a namespace that
+/// held filings before migration 0003 (their chain columns are NULL until
+/// this runs).
+pub async fn resolve_chains(args: BulkResolveChainsArgs) -> super::CliResult {
+    let pool = args.db.connect_current().await?;
+    let rows = hardmoney::db::resolve_all_amendment_chains(&pool).await?;
+    let unresolved: i64 = sqlx::query_scalar("SELECT count(*) FROM filings WHERE chain_unresolved")
+        .fetch_one(&pool)
+        .await?;
+    println!(
+        "namespace '{}': amendment chains recomputed for {rows} filing(s); {unresolved} amendment(s) still name an original that is not ingested (chain_unresolved)",
+        args.db.schema
+    );
     Ok(())
 }

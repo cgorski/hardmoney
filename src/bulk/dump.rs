@@ -887,7 +887,30 @@ pub(crate) fn download_resumable(
         _ => 0,
     };
 
-    let resp = fetch.fetch(existing, validator.as_deref())?;
+    let mut resp = fetch.fetch(existing, validator.as_deref())?;
+    // `If-Range` obliges a compliant server to answer 200 with the whole
+    // new file when the validator no longer matches. A server that
+    // honours `Range` but ignores `If-Range` would splice a new week's
+    // bytes onto last week's partial; catching a changed ETag here and
+    // starting over is the belt to that suspender.
+    if resp.start > 0
+        && let (Some(now), Some(then)) = (&resp.etag, &saved.etag)
+        && now != then
+    {
+        drop(resp);
+        let _ = std::fs::remove_file(&partial);
+        let _ = std::fs::remove_file(&meta_file);
+        resp = fetch.fetch(0, None)?;
+        if resp.start != 0 {
+            return Err(DumpError::Http {
+                url: url.to_string(),
+                detail: format!(
+                    "the file changed on the server since the partial download began, and a fresh request was answered from byte {} instead of 0",
+                    resp.start
+                ),
+            });
+        }
+    }
     let (mut file, position) = if resp.start == 0 {
         (std::fs::File::create(&partial)?, 0)
     } else if resp.start == existing {
@@ -1920,12 +1943,12 @@ pub async fn compare_filing(pool: &PgPool, filing_id: i64) -> Result<CompareRepo
     .await?;
 
     let only_raw: Vec<(String,)> = sqlx::query_as(
-        "SELECT coalesce(r.raw->>'transaction_id_number', '(line ' || r.line_index || ')') \
+        "SELECT coalesce(r.raw->>'transaction_id', '(line ' || r.line_index || ')') \
          FROM schedule_e_lines r \
          WHERE r.filing_id = $1 \
            AND NOT EXISTS (SELECT 1 FROM disclosure.fec_fitem_sched_e d \
                            WHERE d.file_num = $1 \
-                             AND d.tran_id = r.raw->>'transaction_id_number') \
+                             AND d.tran_id = r.raw->>'transaction_id') \
          ORDER BY r.line_index",
     )
     .bind(filing_id)
@@ -1937,7 +1960,7 @@ pub async fn compare_filing(pool: &PgPool, filing_id: i64) -> Result<CompareRepo
          WHERE d.file_num = $1 \
            AND NOT EXISTS (SELECT 1 FROM schedule_e_lines r \
                            WHERE r.filing_id = $1 \
-                             AND r.raw->>'transaction_id_number' = d.tran_id) \
+                             AND r.raw->>'transaction_id' = d.tran_id) \
          ORDER BY d.sub_id",
     )
     .bind(filing_id)
@@ -1947,7 +1970,7 @@ pub async fn compare_filing(pool: &PgPool, filing_id: i64) -> Result<CompareRepo
         "SELECT d.tran_id, r.expenditure_amt, d.exp_amt \
          FROM schedule_e_lines r \
          JOIN disclosure.fec_fitem_sched_e d \
-           ON d.file_num = $1 AND d.tran_id = r.raw->>'transaction_id_number' \
+           ON d.file_num = $1 AND d.tran_id = r.raw->>'transaction_id' \
          WHERE r.filing_id = $1 AND r.expenditure_amt IS DISTINCT FROM d.exp_amt \
          ORDER BY d.tran_id",
     )
@@ -2444,12 +2467,15 @@ mod tests {
 
     /// A server holding `bytes`; `honor_range` false makes it answer every
     /// request with the whole body (a server that ignores `Range`, or a
-    /// changed file failing `If-Range`); `cut_after` truncates the body
-    /// it sends to simulate a dropped connection.
+    /// changed file failing `If-Range`); `ignore_if_range` makes it serve
+    /// the range even when the validator does not match (a server that
+    /// implements `Range` but not `If-Range`); `cut_after` truncates the
+    /// body it sends to simulate a dropped connection.
     struct FakeServer {
         bytes: Vec<u8>,
         etag: &'static str,
         honor_range: bool,
+        ignore_if_range: bool,
         cut_after: Option<usize>,
         requests: Vec<(u64, Option<String>)>,
     }
@@ -2459,7 +2485,8 @@ mod tests {
             self.requests.push((from, if_range.map(str::to_string)));
             let total = self.bytes.len() as u64;
             let quoted = format!("\"{}\"", self.etag);
-            let start = if from > 0 && self.honor_range && if_range == Some(quoted.as_str()) {
+            let validator_ok = self.ignore_if_range || if_range == Some(quoted.as_str());
+            let start = if from > 0 && self.honor_range && validator_ok {
                 from
             } else {
                 0
@@ -2503,6 +2530,7 @@ mod tests {
             bytes: payload.clone(),
             etag: "abc-6",
             honor_range: true,
+            ignore_if_range: false,
             cut_after: Some(4_000),
             requests: Vec::new(),
         };
@@ -2540,6 +2568,7 @@ mod tests {
             bytes: b"this week's file".to_vec(),
             etag: "w2",
             honor_range: true,
+            ignore_if_range: false,
             cut_after: None,
             requests: Vec::new(),
         };
@@ -2586,6 +2615,7 @@ mod tests {
             bytes: b"fresh file".to_vec(),
             etag: "new",
             honor_range: true,
+            ignore_if_range: false,
             cut_after: None,
             requests: Vec::new(),
         };
@@ -2594,6 +2624,48 @@ mod tests {
         assert_eq!(std::fs::read(&dest).unwrap(), b"fresh file");
         // Asked to resume with the old tag; the 200 answer replaced the partial.
         assert_eq!(server.requests[0], (26, Some("\"old\"".to_string())));
+        assert_eq!(
+            RemoteDump::read_meta(&meta_path(&dest))
+                .unwrap()
+                .etag
+                .as_deref(),
+            Some("new")
+        );
+        let _ = std::fs::remove_dir_all(dest.parent().unwrap());
+    }
+
+    /// A server that serves the requested range but ignores `If-Range`
+    /// would splice a new file onto an old partial; the changed ETag on
+    /// its 206 is caught and the download starts over.
+    #[test]
+    fn resume_restarts_when_the_etag_changed_under_a_206() {
+        let dest = scratch("etag206");
+        std::fs::write(partial_path(&dest), b"stale bytes from last week").unwrap();
+        RemoteDump {
+            size: None,
+            etag: Some("old".into()),
+            last_modified: None,
+        }
+        .write_meta(&meta_path(&dest))
+        .unwrap();
+        let mut server = FakeServer {
+            bytes: b"fresh file that is longer than the stale partial".to_vec(),
+            etag: "new",
+            honor_range: true,
+            ignore_if_range: true,
+            cut_after: None,
+            requests: Vec::new(),
+        };
+        let remote = download_resumable(&mut server, "u", &dest, false).unwrap();
+        assert_eq!(remote.etag.as_deref(), Some("new"));
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            b"fresh file that is longer than the stale partial"
+        );
+        // The 206 with the wrong tag was abandoned for a fresh request.
+        assert_eq!(server.requests.len(), 2);
+        assert_eq!(server.requests[0], (26, Some("\"old\"".to_string())));
+        assert_eq!(server.requests[1], (0, None));
         assert_eq!(
             RemoteDump::read_meta(&meta_path(&dest))
                 .unwrap()
@@ -2619,6 +2691,7 @@ mod tests {
             bytes: b"all here".to_vec(),
             etag: "t",
             honor_range: true,
+            ignore_if_range: false,
             cut_after: None,
             requests: Vec::new(),
         };
@@ -2643,6 +2716,7 @@ mod tests {
             bytes: b"short".to_vec(),
             etag: "t",
             honor_range: true,
+            ignore_if_range: false,
             cut_after: None,
             requests: Vec::new(),
         };

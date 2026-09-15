@@ -20,7 +20,7 @@ contribution_date,17,CONTRIBUTION DATE,12,DATE (Of Contribution)
 contribution_amount,18,CONTRIBUTION AMOUNT,13,AMOUNT
 contributor_employer,19,CONTRIBUTOR EMPLOYER,10,INDEMP
 contributor_occupation,20,CONTRIBUTOR_OCCUPATION,11,INDOCC
-candidate_id,,,15,FEC CANDIDATE ID NUMBER
+candidate_id_number,,,15,FEC CANDIDATE ID NUMBER
 candidate_name,,,16,CANDIDATE NAME
 candidate_office,,,17,CAN/OFFICE
 candidate_state,,,18,CAN/STATE
@@ -31,3 +31,4 @@ conduit_street_2,,,22,CONDUIT STREET 2
 conduit_city,,,23,CONDUIT CITY
 conduit_state,,,24,CONDUIT STATE
 conduit_zip_code,,,25,CONDUIT ZIP
+amended_cd,,,26,AMENDED CD

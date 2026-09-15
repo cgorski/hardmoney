@@ -103,18 +103,33 @@ for those lines the schedule sum is a floor, not an identity: a cover
 total below its itemized sum is a discrepancy (money on the schedule
 that is not in the total), a cover total above it is normal.
 
-Lines that must be fully itemized regardless of size (contributions
-from committees, transfers, loans and repayments, independent and
-coordinated expenditures, refunds to committees, debts) must match
-exactly. `Relation` is that distinction:
+Lines that must be itemized regardless of size (contributions from
+committees, transfers, loans and repayments, coordinated party
+expenditures, refunds to committees, debts, the allocation schedules)
+must match exactly. `Relation` is that distinction, and which line is
+which is taken from the FEC's own Form 3X, 3, and 3P instructions,
+whose text for each line says either "must be itemized ... regardless
+of the amount" or "aggregating in excess of $200":
 
 | `Relation` | Check | Written as | Form 3X lines |
 |---|---|---|---|
-| `Equal` | `reported == expected` | `= sum of ...` | 9, 10, 11(a)(i), 11(b), 11(c), 12, 13, 14, 16, 18(a), 18(b), 21(a)(i), 21(a)(ii), 22-27, 28(b), 28(c), 30(a)(i), 30(a)(ii), 30(b) |
-| `AtLeast` | `reported >= expected` | `>= sum of ...` | 15 (offsets to expenditures), 17 (other receipts), 21(b) (operating expenditures), 28(a) (refunds to individuals), 29 (other disbursements) |
+| `Equal` | `reported == expected` | `= sum of ...` | 9, 10, 11(a)(i), 11(b), 11(c), 12, 13, 14, 16, 18(a), 18(b), 21(a)(i), 21(a)(ii), 22, 23, 25, 26, 27, 28(b), 28(c), 30(a)(i), 30(a)(ii) |
+| `AtLeast` | `reported >= expected` | `>= sum of ...` | 15 (offsets to expenditures), 17 (other receipts), 21(b) (operating expenditures), 24 (independent expenditures), 28(a) (refunds to individuals), 29 (other disbursements), 30(b) (100%-federal election activity) |
 
-Form 3 has five floors (14, 15, 17, 20(a), 21) and Form 3P nine (20(a),
-20(b), 20(c), 21, 23, 25, 26, 28(a), 29). Every formula is `Equal`.
+Two of those floors are easy to get wrong. Line 24: Schedule E itemizes
+payees "aggregating in excess of $200", and the paper form has a
+"Line (b)" for the unitemized remainder that the electronic `SE` record
+has no field for, so the cover total legitimately exceeds the `SE` sum.
+Line 30(b): "Itemize all such disbursements of $200 or more on Schedule
+B for Line 30(b)" (and 11 CFR 300.36(b)(2)(iv)); seven of the 45
+state-party reports described below have a 30(b) total above their
+`SB30B` sum, by $5 to $336.
+
+Form 3 has six floors (11(d) contributions from the candidate, 14, 15,
+17, 20(a), 21) and Form 3P ten (17(d) contributions from the candidate,
+20(a), 20(b), 20(c), 21, 23, 25, 26, 28(a), 29): a candidate is a
+"person" under 11 CFR 104.3(a)(4)(i), itemized only above $200, unlike
+the candidate's loans. Every formula is `Equal`.
 
 `LineCheck::violation()` folds the relation in: it is `|delta|` for an
 `Equal` line and `max(0, -delta)` for an `AtLeast` line, so `matches()`
@@ -202,7 +217,7 @@ $ hardmoney reconcile --json --lenient tmp/agent-misc/filings/2011912.fec
   "lines": [
     {
       "line": "11(c)",
-      "field": "col_a_other_political_committees_pacs",
+      "field": "col_a_pac_contributions",
       "column": "A",
       "rule": "= sum of SchA.contribution_amount on SA11C",
       "reported": "2045.00",
@@ -293,14 +308,76 @@ federal/non-federal allocation lines fed by Schedules H3-H6), hardmoney
 implements the spec's rule text instead. FECfile+ computes Form 3 as all
 zeros, so those rules come from the spec alone.
 
+The third is the FEC's form instructions, for the exact-versus-floor
+decision on each line, as the table above describes.
+
+## The allocation schedules, checked against party committees
+
+The H-schedule lines were the one part of the tables written from the
+spec text alone, because no filing in the original corpus carried a
+Schedule H. Party committees with a nonfederal account do: in September
+2026, 45 recent Form 3X reports from 24 state parties (both parties;
+Ohio, Florida, Michigan, Wisconsin, Pennsylvania, North Carolina,
+Arizona, Nevada, Georgia, California, Texas, Minnesota, Virginia, Iowa,
+Colorado, New Hampshire, Maine), with between 3 and 648 H4 records each
+and up to 33 H3 records, were fetched with `hardmoney filings --fetch`
+and reconciled. All 45 balance on every line. (With 30(b) still coded
+as an identity, seven had differed there, each with a cover total above
+its itemized sum -- the shape of a $200 threshold, and the evidence that
+made it a floor.) What the records settled:
+
+- **18(a) sums H3's `transferred_amount`, not
+  `total_amount_transferred`.** A transfer from the nonfederal account
+  is one `AD` (administrative) record plus a record per other event
+  type (`DF` direct fundraising, `DC` direct candidate support, ...)
+  back-referencing it. Every record in the group repeats the transfer's
+  total; each carries its own share. From the Minnesota DFL's May 2026
+  report:
+
+  ```text
+  H3 | 4948AD | 4948AD | MN DFL State Checking | AD |                             | 20260527 | 46102.21 | 44060.51
+  H3 | 11388Q | 4948AD | MN DFL State Checking | DF | 2026 Humphrey Mondale Dinner | 20260527 | 46102.21 |  2041.70
+  ```
+
+  Summing the totals would count that $46,102.21 twice.
+- **21(a)(i) and 21(a)(ii) sum H4's `federal_share` and
+  `nonfederal_share` with memo entries excluded.** 4,065 of the H4
+  records in the sample were memos (credit-card and payroll breakdowns
+  back-referencing a parent record). No report carried an `SB21A`
+  line: Schedule H4 is the only itemization of 21(a).
+- **30(b) is a floor** (above).
+- **H5 and H6 appear in none of the 45 reports**, nor in the 24 national
+  party reports (RNC, DNC, NRCC, DCCC, DSCC, NRSC), which carry no H
+  schedules at all: BCRA bars national parties from nonfederal accounts,
+  and Levin funds have all but vanished since 2002. Lines 18(b),
+  30(a)(i), and 30(a)(ii) therefore rest on the workbook's layout: H5 is
+  one record per transfer with a total and four category breakdowns (the
+  FEC's warning #49 is the check that they agree), and H6 mirrors H4 with
+  `federal_share` / `levin_share`.
+
+Three of the party reports are now fixtures (`F3XA_2011814.fec`,
+`F3XN_1998773.fec`, `F3XA_2008083.fec`) with tests that assert the
+H3/H4 sums are non-zero, summed over the right number of records, and
+exact -- and that 30(b) is a floor on real data.
+
 ## How real filings fare
 
 Every Form 3X, 3, and 3P fixture in `tests/fixtures/` (all accepted by
-the FEC, spec 3.00 through 8.5) satisfies every Column A rule and every
-Column B formula (`tests/reconcile_fixtures.rs`). Across the wider local
-corpus of 109 real periodic reports, 95 satisfy every rule. The other 14
-are either truncated third-party samples (a filing cut off mid-schedule
-cannot balance) or filer discrepancies of the kind shown above. The rule
+the FEC, spec 3.00 through 8.5, now including a House amendment with 58
+Schedule C loans and 3 Schedule D debts, a joint fundraising committee
+with 106 `SB22` transfers out, and a 2026 presidential amendment at
+spec 8.5) satisfies every Column A rule and every Column B formula
+(`tests/reconcile_fixtures.rs`). Across the wider local corpus of 124
+real periodic reports, 102 satisfy every rule; 17 of the other 22 are
+truncated or hand-edited third-party samples (a filing cut off
+mid-schedule cannot balance) and five are single-line filer
+discrepancies of the kind shown above. Of the 98 reports fetched fresh
+from the FEC for this check -- national and state parties, House and
+Senate candidates with debts, joint fundraising committees, presidential
+campaigns -- 96 balance on every line; the two that do not are a
+twelve-cent gap on the NRSC's line 12 across 57,152 `SA12` records and a
+$91.96 shortfall on a termination report's operating expenditures. Every
+disagreement is written up in `tests/fixtures/ORACLE_NOTES.md`. The rule
 set is tight enough that when it flags a line, the line is worth a look.
 
 ## From Rust

@@ -12,6 +12,7 @@ pub mod query;
 pub mod reconcile;
 pub mod schema;
 pub mod serve;
+pub mod shared;
 pub mod spec;
 pub mod validate;
 pub mod write;
@@ -70,6 +71,8 @@ enum Command {
     BulkDumpCompare(bulk::BulkDumpCompareArgs),
     /// Ingest a single raw `.fec` filing directly.
     BulkLoadFiling(bulk::BulkLoadFilingArgs),
+    /// Recompute every ingested filing's amendment chain (after a batch of `bulk-load-filing --no-resolve`).
+    BulkResolveChains(bulk::BulkResolveChainsArgs),
     /// Import the FEC's Postgres dump files (guided).
     Dumps(dumps::DumpsArgs),
     /// Find filings via the FEC's API and fetch, validate, or ingest them.
@@ -103,6 +106,7 @@ pub async fn run() -> CliResult {
         Command::BulkDumpIndex(a) => bulk::dump_index(a).await,
         Command::BulkDumpCompare(a) => bulk::dump_compare(a).await,
         Command::BulkLoadFiling(a) => bulk::load_filing(a).await,
+        Command::BulkResolveChains(a) => bulk::resolve_chains(a).await,
         Command::Dumps(a) => dumps::run(a).await,
         Command::Filings(a) => filings::run(a).await,
         Command::Efile(a) => efile::run(a).await,

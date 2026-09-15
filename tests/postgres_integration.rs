@@ -397,11 +397,10 @@ async fn api_serves_loaded_data_with_hardening() {
         "{s} {body}"
     );
     if s == StatusCode::SERVICE_UNAVAILABLE {
+        let msg = body["error"].as_str().unwrap();
         assert!(
-            body["error"]
-                .as_str()
-                .unwrap()
-                .contains("bulk-restore-dump")
+            msg.contains("hardmoney dumps import independent-expenditures"),
+            "{msg}"
         );
     }
 
@@ -648,6 +647,72 @@ async fn amendment_chain_matches_openfec_and_is_served_by_the_api() {
     let (s, body) = get_json(&app, "/filings?committee_id=C00000000&api_key=k").await;
     assert_eq!(s, StatusCode::OK, "{body}");
     assert_eq!(body.as_array().unwrap().len(), 0);
+
+    // The Schedule E sub-resource: `[]` for an ingested filing without
+    // any, 404 for an id that was never ingested (like the parent route).
+    let (s, body) = get_json(&app, "/filings/1151343/schedule-e?api_key=k").await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body, serde_json::json!([]));
+    let (s, body) = get_json(&app, "/filings/1/schedule-e?api_key=k").await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["error"], "no filing with filing_id 1");
+
+    t.drop().await;
+}
+
+/// Several amendments to one original ingested at the same time must end
+/// with exactly one `most_recent` member. Under `READ COMMITTED` each
+/// ingest's chain `UPDATE` runs against a snapshot that lacks the others'
+/// uncommitted rows; the advisory lock in the resolver serialises them so
+/// the last one to run sees every committed row.
+#[tokio::test]
+async fn concurrent_amendments_to_one_original_leave_one_most_recent() {
+    let url = require_db!();
+    let t = TestNs::new(&url, "amend_conc").await;
+    ingest_text(&t.pool, OPENFEC_ORIGINAL, &f3_text("F3N", "", "")).await;
+
+    const N: i64 = 12;
+    let mut tasks = tokio::task::JoinSet::new();
+    for i in 1..=N {
+        let pool = t.pool.clone();
+        tasks.spawn(async move {
+            let text = f3_text("F3A", "FEC-1118027", &i.to_string());
+            bulk::ingest_filing_bytes(
+                &pool,
+                OPENFEC_ORIGINAL + i,
+                text.as_bytes(),
+                &hardmoney::ParseOptions::STRICT,
+            )
+            .await
+            .map(|r| r.chain_rows_resolved)
+        });
+    }
+    while let Some(joined) = tasks.join_next().await {
+        joined.unwrap().unwrap();
+    }
+
+    let rows = chains(&t.pool).await;
+    assert_eq!(rows.len(), usize::try_from(N + 1).unwrap());
+    let most_recent: Vec<i64> = rows
+        .iter()
+        .filter(|c| c.most_recent == Some(true))
+        .map(|c| c.filing_id)
+        .collect();
+    assert_eq!(most_recent, vec![OPENFEC_ORIGINAL + N], "{rows:#?}");
+    let versions: Vec<i32> = rows.iter().filter_map(|c| c.amendment_version).collect();
+    assert_eq!(
+        versions,
+        (0..=i32::try_from(N).unwrap()).collect::<Vec<_>>()
+    );
+    assert!(
+        rows.iter()
+            .all(|c| c.most_recent_filing_id == Some(OPENFEC_ORIGINAL + N)),
+        "{rows:#?}"
+    );
+    assert_eq!(
+        count(&t.pool, "SELECT count(*) FROM filings_current").await,
+        1
+    );
 
     t.drop().await;
 }

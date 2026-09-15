@@ -18,6 +18,7 @@
   - [Streaming large filings](./streaming.md)
 - [Tables and typed views](./typed-views.md)
 - [The schema: versions, layouts, and compile-time-checked fields](./library-schema.md)
+- [Field names](./field-names.md)
 - [Writing `.fec` files](./writing-fec.md)
 - [Exporting a filing](./exporting.md)
 - [Reconciling a filing](./reconciling.md)

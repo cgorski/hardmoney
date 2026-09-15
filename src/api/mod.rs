@@ -39,7 +39,8 @@
 //! static API key (`X-Api-Key` header or `?api_key=`), and a request body
 //! cap. Defaults are suitable for local development (permissive CORS, no
 //! key); set an allow-list and a key before exposing the server publicly.
-//! Database errors are never echoed to clients (see [`error::ApiError`]).
+//! Database errors are never echoed to clients (see [`error::ApiError`]),
+//! and the request log records `?api_key=` as `api_key=REDACTED`.
 
 pub mod error;
 pub mod pagination;
@@ -50,7 +51,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::Request;
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::{HeaderValue, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -193,9 +194,47 @@ pub fn router(pool: PgPool, config: &ApiConfig) -> Router {
         config.request_timeout,
     ))
     .layer(RequestBodyLimitLayer::new(config.max_body_bytes))
-    .layer(TraceLayer::new_for_http())
+    .layer(TraceLayer::new_for_http().make_span_with(request_span))
     .layer(cors)
     .with_state(pool)
+}
+
+/// The per-request tracing span: what `TraceLayer`'s default records
+/// (method, URI, HTTP version), except that an `api_key` query value is
+/// replaced with `REDACTED`, so `RUST_LOG=debug` never writes the key.
+fn request_span<B>(request: &axum::http::Request<B>) -> tracing::Span {
+    tracing::debug_span!(
+        "request",
+        method = %request.method(),
+        uri = %redact_api_key(request.uri()),
+        version = ?request.version(),
+    )
+}
+
+/// `uri` as a string with the value of any `api_key` query parameter
+/// replaced by `REDACTED`. Only whole parameters named `api_key` are
+/// touched (`x_api_key=` is left alone).
+fn redact_api_key(uri: &Uri) -> String {
+    let Some(query) = uri.query() else {
+        return uri.to_string();
+    };
+    if !query.contains("api_key=") {
+        return uri.to_string();
+    }
+    let redacted: Vec<&str> = query
+        .split('&')
+        .map(|kv| {
+            if kv.starts_with("api_key=") {
+                "api_key=REDACTED"
+            } else {
+                kv
+            }
+        })
+        .collect();
+    let mut out = uri.path().to_string();
+    out.push('?');
+    out.push_str(&redacted.join("&"));
+    out
 }
 
 /// Rejects requests lacking the configured key. No-op when no key is set.
@@ -286,6 +325,23 @@ mod tests {
         assert!(!constant_time_eq("abc", "abd"));
         assert!(!constant_time_eq("abc", "abcd"));
         assert!(constant_time_eq("", ""));
+    }
+
+    #[test]
+    fn request_log_redacts_the_api_key_query_value() {
+        let uri: Uri = "/candidates?limit=1&api_key=s3cret&cycle=2026"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            redact_api_key(&uri),
+            "/candidates?limit=1&api_key=REDACTED&cycle=2026"
+        );
+        let uri: Uri = "/candidates?api_key=s3cret".parse().unwrap();
+        assert_eq!(redact_api_key(&uri), "/candidates?api_key=REDACTED");
+        let uri: Uri = "/candidates?x_api_key=keep&limit=2".parse().unwrap();
+        assert_eq!(redact_api_key(&uri), "/candidates?x_api_key=keep&limit=2");
+        let uri: Uri = "/health".parse().unwrap();
+        assert_eq!(redact_api_key(&uri), "/health");
     }
 
     #[test]

@@ -1,12 +1,11 @@
 # CLI reference
 
-This is the full `--help` output for `hardmoney` 2.0.0 and every
+This is the full `--help` output for `hardmoney` 2.2.0 and every
 subcommand, captured directly from the built binary. Run
 `hardmoney <subcommand> --help` yourself at any time to see this same
 text; it is generated from the same argument definitions the program
-runs with. (`bulk-load`
-and `bulk-load-all` have long-form help; the others print the same text
-for `-h` and `--help`.)
+runs with. (`bulk-load`, `bulk-load-all`, `validate`, and `export` have
+long-form help; the others print the same text for `-h` and `--help`.)
 
 ## Top level
 
@@ -17,26 +16,30 @@ FEC campaign-finance data: parse .fec filings, load bulk data, serve a REST API
 Usage: hardmoney <COMMAND>
 
 Commands:
-  parse              Parse a single `.fec` filing and print a JSON summary
-  write              Parse a `.fec` filing and write it back out in canonical form
-  reconcile          Recompute a report's cover-page totals from its schedules and show every line that disagrees
-  validate           Check a .fec file against the FEC's acceptance rules
-  export             Export a .fec filing's records as CSV, JSON Lines, Parquet, or SQLite
-  schema-init        Create or upgrade the Postgres schema in the target namespace
-  schema-status      Show migration state and recorded loads for the target namespace
-  schema-list        List hardmoney namespaces (schemas) in the database
-  schema-drop        Drop a namespace and all data in it
-  bulk-load          Load one bulk-data source into Postgres
-  bulk-load-all      Load every bulk source for one cycle
-  bulk-restore-dump  Restore one of the FEC's own official pg_dump archives
-  bulk-load-filing   Ingest a single raw `.fec` filing directly
-  dumps              Import the FEC's Postgres dump files (guided)
-  filings            Find filings via the FEC's API and fetch, validate, or ingest them
-  efile              Follow the FEC's electronic filing feed
-  serve              Run the REST API server
-  query              Search loaded data from the terminal (same results as the REST API)
-  spec               Export or diff the machine-readable FEC format specification
-  help               Print this message or the help of the given subcommand(s)
+  parse                Parse a single `.fec` filing and print a JSON summary
+  write                Parse a `.fec` filing and write it back out in canonical form
+  reconcile            Recompute a report's cover-page totals from its schedules and show every line that disagrees
+  validate             Check a .fec file against the FEC's acceptance rules
+  export               Export a .fec filing's records as CSV, JSON Lines, Parquet, or SQLite
+  schema-init          Create or upgrade the Postgres schema in the target namespace
+  schema-status        Show migration state and recorded loads for the target namespace
+  schema-list          List hardmoney namespaces (schemas) in the database
+  schema-drop          Drop a namespace and all data in it
+  bulk-load            Load one bulk-data source into Postgres
+  bulk-load-all        Load every bulk source for one cycle
+  bulk-restore-dump    Restore one of the FEC's own official pg_dump archives
+  bulk-dump-info       Show the FEC's dump files: remote size and date, cache, database state, restores
+  bulk-dump-index      Create hardmoney's indexes on a restored dump table
+  bulk-dump-compare    Compare an ingested filing's raw Schedule E lines with the FEC's processed dump rows
+  bulk-load-filing     Ingest a single raw `.fec` filing directly
+  bulk-resolve-chains  Recompute every ingested filing's amendment chain (after a batch of `bulk-load-filing --no-resolve`)
+  dumps                Import the FEC's Postgres dump files (guided)
+  filings              Find filings via the FEC's API and fetch, validate, or ingest them
+  efile                Follow the FEC's electronic filing feed
+  serve                Run the REST API server
+  query                Search loaded data from the terminal (same results as the REST API)
+  spec                 Export or diff the machine-readable FEC format specification
+  help                 Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help     Print help
@@ -244,12 +247,37 @@ Check a .fec file against the FEC's acceptance rules
 Usage: hardmoney validate [OPTIONS] <PATH>
 
 Arguments:
-  <PATH>  Path to a `.fec` file
+  <PATH>
+          Path to a `.fec` file
 
 Options:
-      --json             Print the findings as a JSON document instead of one line each
-      --strict-warnings  Exit 1 on warnings too, not only on errors
-  -h, --help             Print help
+      --json
+          Print the findings as a JSON document instead of one line each
+
+      --strict-warnings
+          Exit 1 on warnings too, not only on errors
+
+      --oracle <ORACLE>
+          Also submit the file to an external validator and diff its findings against ours. Sends the file over the network
+
+          Possible values:
+          - webcheck: The FEC's WebCheck (<https://efoservices.fec.gov/webcheck/>). The public upload channel needs no credentials; with `--webcheck-api-key` the vendor SOAP service is used instead
+
+      --strict-oracle
+          With `--oracle`, exit 1 if the oracle and hardmoney disagree on any finding
+
+      --webcheck-api-key <WEBCHECK_API_KEY>
+          FEC vendor API key for WebCheck's SOAP service. Without it the credential-free upload channel (what the WebCheck web page uses) is taken. Ignored without `--oracle webcheck`
+
+          [env: WEBCHECK_API_KEY]
+
+      --webcheck-email <WEBCHECK_EMAIL>
+          Contact e-mail to pass WebCheck's SOAP service (it e-mails results for files over 20 MB). Ignored without `--webcheck-api-key`
+
+          [env: WEBCHECK_EMAIL]
+
+  -h, --help
+          Print help (see a summary with '-h')
 ```
 
 Parses the file leniently (a line the FEC would ignore is a finding, not
@@ -282,10 +310,14 @@ error(s), 0 warning(s)`, and exits 0. Exit status is 1 if there is any
 all (bad header, no cover line) is also exit 1, reported on stderr.
 `--json` emits `{file, form_type, version, line_count, acceptable,
 errors, warnings, findings_by_rule, findings: [{severity, rule,
-line_no, form_type, field, message}]}`. The full rule table, the
-deliberate deviations from the FEC's validator, and the library API are
-in [Validating a filing](./validating.md); the `FieldSpec` data the
-per-field rules read is described in
+line_no, form_type, field, message}]}`; with `--oracle` it gains
+`oracle` (WebCheck's own report) and `oracle_diff` (`matched`,
+`only_ours`, `only_theirs`). `--oracle webcheck` sends the file to the
+FEC's validator and prints its findings and the diff after ours; it never
+changes the exit status unless `--strict-oracle`. The full rule table,
+the deliberate deviations from the FEC's validator, the oracle, and the
+library API are in [Validating a filing](./validating.md); the
+`FieldSpec` data the per-field rules read is described in
 [The schema](./library-schema.md#fieldspec-what-the-fec-says-about-a-field).
 
 ## `schema-init`
@@ -488,8 +520,12 @@ Arguments:
 Options:
       --database-url <DATABASE_URL>  Postgres connection URL. Include a username: postgres://user@host/db [env: DATABASE_URL=]
       --schema <SCHEMA>              Namespace (Postgres schema) to operate in. Each namespace is a fully isolated set of hardmoney tables: use one per cycle, per snapshot, per investigation, or per CI run. Default: public [env: HARDMONEY_SCHEMA=] [default: public]
-      --allow-large                  Required for the multi-gigabyte schedule_a_full / schedule_b_full
-      --cache-dir <CACHE_DIR>        Where to keep downloaded dumps (re-used across runs) [env: HARDMONEY_CACHE_DIR=] [default: /Users/chris.gorski/.cache/hardmoney/dumps]
+      --cycles <CYCLES>              Restore only these two-year periods of a cycle-split dump (schedule_a_full, schedule_b_full), e.g. `--cycles 2024,2026`: the parent table plus the named child tables, data only. Repeat with other cycles later to add them
+      --no-indexes                   Skip the archive's indexes, primary keys, and triggers (the FEC's figures for Schedule A: about 5 hours instead of 35). Add hardmoney's indexes afterwards with `bulk-dump-index`
+      --allow-large                  Required to restore all of schedule_a_full / schedule_b_full (tens of gigabytes); not needed with --cycles
+      --dump-file <DUMP_FILE>        Restore from an already-downloaded .dump file instead of the cache
+      --jobs <JOBS>                  pg_restore parallel workers (helps when restoring several cycles) [default: 1]
+      --cache-dir <CACHE_DIR>        Where to keep downloaded dumps (re-used across runs; an interrupted download resumes from its .partial file) [env: HARDMONEY_CACHE_DIR=] [default: /Users/chris.gorski/.cache/hardmoney/dumps]
   -h, --help                         Print help
 ```
 
@@ -498,8 +534,79 @@ The `--cache-dir` default shown is `$XDG_CACHE_HOME/hardmoney/dumps` if
 system temp directory; it will read differently on your machine. Needs
 `pg_restore` on `PATH`. The dump always restores into the shared
 `disclosure` schema; `--schema` controls where the
-`independent_expenditures` view is refreshed. See
-[Bulk ETL](./bulk-etl.md#an-alternative-restoring-the-fecs-own-database-dumps).
+`independent_expenditures` and `dump_*` views are refreshed. A download
+that stops early leaves `<name>.dump.partial` and `<name>.dump.meta`
+(the server's ETag) in the cache and resumes on the next run with
+`If-Range`; a changed ETag, whether the server answers it with a 200 or
+with a 206, restarts the download from zero. The guided
+[`dumps`](#dumps) commands wrap this one; see
+[The FEC's Postgres dump files](./pg-dumps.md).
+
+## `bulk-dump-info`
+
+```text
+$ hardmoney bulk-dump-info --help
+Show the FEC's dump files: remote size and date, cache, database state, restores
+
+Usage: hardmoney bulk-dump-info [OPTIONS] --database-url <DATABASE_URL>
+
+Options:
+      --database-url <DATABASE_URL>  Postgres connection URL. Include a username: postgres://user@host/db [env: DATABASE_URL=]
+      --schema <SCHEMA>              Namespace (Postgres schema) to operate in. Each namespace is a fully isolated set of hardmoney tables: use one per cycle, per snapshot, per investigation, or per CI run. Default: public [env: HARDMONEY_SCHEMA=] [default: public]
+      --offline                      Skip the HEAD requests to fec.gov (sizes and dates come from the cache's sidecar files only)
+      --cache-dir <CACHE_DIR>        Where downloaded dumps are kept [env: HARDMONEY_CACHE_DIR=] [default: /Users/chris.gorski/.cache/hardmoney/dumps]
+  -h, --help                         Print help
+```
+
+One row per dump (remote size and `Last-Modified`, what is cached, what
+is in `disclosure`), then the restores recorded in this namespace's
+`loads` table. `dumps status` is the plain-language version.
+
+## `bulk-dump-index`
+
+```text
+$ hardmoney bulk-dump-index --help
+Create hardmoney's indexes on a restored dump table
+
+Usage: hardmoney bulk-dump-index [OPTIONS] --database-url <DATABASE_URL> <NAME>
+
+Arguments:
+  <NAME>  One of: schedule_e, committee_history, schedule_a_full, schedule_b_full
+
+Options:
+      --database-url <DATABASE_URL>  Postgres connection URL. Include a username: postgres://user@host/db [env: DATABASE_URL=]
+      --schema <SCHEMA>              Namespace (Postgres schema) to operate in. Each namespace is a fully isolated set of hardmoney tables: use one per cycle, per snapshot, per investigation, or per CI run. Default: public [env: HARDMONEY_SCHEMA=] [default: public]
+      --cycles <CYCLES>              Index only these cycles' child tables (default: every restored one)
+  -h, --help                         Print help
+```
+
+Idempotent: an index that exists is reported, not rebuilt; a unique
+index the archive's own primary key already provides, and a trigram
+index on a server without `pg_trgm`, are skipped with the reason. The
+index list per dump is `hardmoney::bulk::dump::DumpSource::indexes`.
+
+## `bulk-dump-compare`
+
+```text
+$ hardmoney bulk-dump-compare --help
+Compare an ingested filing's raw Schedule E lines with the FEC's processed dump rows
+
+Usage: hardmoney bulk-dump-compare [OPTIONS] --database-url <DATABASE_URL> <FILING_ID>
+
+Arguments:
+  <FILING_ID>  A filing already ingested with `bulk-load-filing`
+
+Options:
+      --database-url <DATABASE_URL>  Postgres connection URL. Include a username: postgres://user@host/db [env: DATABASE_URL=]
+      --schema <SCHEMA>              Namespace (Postgres schema) to operate in. Each namespace is a fully isolated set of hardmoney tables: use one per cycle, per snapshot, per investigation, or per CI run. Default: public [env: HARDMONEY_SCHEMA=] [default: public]
+  -h, --help                         Print help
+```
+
+Counts, amount totals, transaction ids on one side only, and amount
+disagreements between `schedule_e_lines` (the filing's own bytes) and
+`disclosure.fec_fitem_sched_e` (the FEC's weekly snapshot) for one
+`file_num`. Differences are expected, not errors: exits 1 only if the
+filing is not ingested or the Schedule E dump is not restored.
 
 ## `bulk-load-filing`
 
@@ -527,6 +634,28 @@ the command exits 1 asking for `--filing-id`. For a numeric argument,
 the filing is downloaded from `docquery.fec.gov` and that number is the
 id unless `--filing-id` overrides it. See
 [Bulk ETL](./bulk-etl.md#ingesting-a-single-filing-directly-for-precise-schedule-e-data).
+
+## `bulk-resolve-chains`
+
+```text
+$ hardmoney bulk-resolve-chains --help
+Recompute every ingested filing's amendment chain (after a batch of `bulk-load-filing --no-resolve`)
+
+Usage: hardmoney bulk-resolve-chains [OPTIONS] --database-url <DATABASE_URL>
+
+Options:
+      --database-url <DATABASE_URL>  Postgres connection URL. Include a username: postgres://user@host/db [env: DATABASE_URL=]
+      --schema <SCHEMA>              Namespace (Postgres schema) to operate in. Each namespace is a fully isolated set of hardmoney tables: use one per cycle, per snapshot, per investigation, or per CI run. Default: public [env: HARDMONEY_SCHEMA=] [default: public]
+  -h, --help                         Print help
+```
+
+One set-based `UPDATE` over the whole `filings` table
+(`hardmoney::db::resolve_all_amendment_chains`). Run it once after a
+batch of `bulk-load-filing --no-resolve`, or after `schema-init` applied
+migration `0003` to a namespace that already held filings (their chain
+columns are NULL until then). Prints the rows recomputed and how many
+amendments still name an original that is not ingested. See
+[Amendments](./amendments.md#batch-loads---no-resolve-and-bulk-resolve-chains).
 
 ## `dumps`
 
@@ -1092,7 +1221,7 @@ col  field                          kind           len  required     description
 1    form_type                      alpha_numeric  8    error        FORM TYPE                      Appendix C. SA3L must be used with the F3L
 2    filer_committee_id_number      alpha_numeric  9    error        FILER COMMITTEE ID NUMBER
 3    transaction_id                 alpha_numeric  20   error        TRANSACTION ID                 must be unique and UPPER CASE for the life of the report (original + all amendments)
-4    back_reference_tran_id_number  alpha_numeric  20                BACK REFERENCE TRAN ID NUMBER  Reference to the Tran ID of a Related Record
+4    back_reference_tran_id         alpha_numeric  20                BACK REFERENCE TRAN ID NUMBER  Reference to the Tran ID of a Related Record
 5    back_reference_sched_name      alpha_numeric  8                 BACK REFERENCE SCHED NAME      Ref to the Schedule that has the Related Record. SA3L must be used with the F3L
 6    entity_type                    alpha_numeric  3    error        ENTITY TYPE                    [CAN|CCM|COM|IND|ORG|PAC|PTY]
 7    contributor_organization_name  alpha_numeric  200  error        CONTRIBUTOR ORGANIZATION NAME  Required if NOT [IND|CAN]

@@ -472,7 +472,7 @@ amendment_missing_ids.fec,F3XA,8.5,error,amendment_needs_number,1,HDR,report_num
 amendment_missing_ids.fec,F3XA,8.5,warning,embedded_double_quote,4,SB21B,payee_organization_name,"Embedded double-quotes ("") not allowed in PAYEE ORGANIZATION NAME"
 bad_dates_and_amounts.fec,F3XA,8.5,error,not_a_real_date,2,F3XA,date_signed,20261301 is not a Real Date
 bad_filer_id.fec,F3XA,8.5,error,filer_id_format,2,F3XA,filer_committee_id_number,ID# C0094412 NOT Correct FEC ID# Format
-duplicate_tran_id.fec,F3XA,8.5,error,duplicate_transaction_id,5,SB21B,transaction_id_number,Tran ID SB21B.4120 is NOT UNIQUE - This one is same as other(s) (first used on line 4)
+duplicate_tran_id.fec,F3XA,8.5,error,duplicate_transaction_id,5,SB21B,transaction_id,Tran ID SB21B.4120 is NOT UNIQUE - This one is same as other(s) (first used on line 4)
 illegal_character.fec,F3XA,8.5,error,illegal_character,7,SB21B,payee_organization_name,Illegal character(s) found in text field: U+017E (ž)
 wrong_schedule_for_form.fec,F24N,8.5,error,schedule_not_allowed_with_form,5,SA11AI,form_type,"Schedule does not belong with Form F24 (SchA is filed with F3, F3X, F3P, F3L)"
 ```
@@ -502,7 +502,7 @@ return 1 if results.count(False) else 0
 ```text
 ok   /Users/chris.gorski/repos/hardmoney/tests/fixtures/F3XA_2011827.fec: F3XA v8.5, 0 error(s), 0 warning(s)
 FAIL /Users/chris.gorski/repos/hardmoney/tests/fixtures/invalid/duplicate_tran_id.fec: F3XA v8.5, 1 error(s), 0 warning(s)
-       ERROR line 5 SB21B transaction_id_number: Tran ID SB21B.4120 is NOT UNIQUE - This one is same as other(s) (first used on line 4)
+       ERROR line 5 SB21B transaction_id: Tran ID SB21B.4120 is NOT UNIQUE - This one is same as other(s) (first used on line 4)
 
 1 of 2 file(s) pass
 ```
@@ -652,7 +652,7 @@ F3A_2011812.fec: F3A
   SA11AI lines: 96 counted, 41 memo (skipped)
   by-hand sum of non-memo contribution_amount: 44776.25
   memo entries would have added:               23642.20
-  cover page 11(a)(i) (col_a_individual_contributions_itemized): 44776.25
+  cover page 11(a)(i) (col_a_individuals_itemized): 44776.25
 
 reconciler: ok   col A line 11(a)(i)   reported        44776.25 expected        44776.25 delta         0.00  = sum of SchA.contribution_amount on SA11AI/SA11A1
   rule:         = sum of SchA.contribution_amount on SA11AI/SA11A1
@@ -662,9 +662,8 @@ reconciler: ok   col A line 11(a)(i)   reported        44776.25 expected        
 ```
 
 The 41 memo lines are redesignations and reattributions of earlier
-contributions. Note the field name: Form 3 calls 11(a)(i)
-`col_a_individual_contributions_itemized`, Form 3X and 3P
-`col_a_individuals_itemized`. `LineCheck.field` tells you which.
+contributions. The field is `col_a_individuals_itemized` on Forms 3, 3X,
+and 3P alike; `LineCheck.field` names it for any line.
 
 ### 17: reconcile a batch
 
@@ -871,7 +870,7 @@ SchA layout at 8.5 (45 fields), first 12:
     0 form_type
     1 filer_committee_id_number
     2 transaction_id
-    3 back_reference_tran_id_number
+    3 back_reference_tran_id
     4 back_reference_sched_name
     5 entity_type
     6 contributor_organization_name
@@ -890,7 +889,7 @@ SchA: 46 fields in 7.0, 45 in 8.5
 SchA: 44 fields in 5.3, 45 in 8.5
   added in 8.5:   donor_committee_name (col 26), donor_candidate_last_name (col 28), donor_candidate_first_name (col 29), donor_candidate_middle_name (col 30), donor_candidate_prefix (col 31), donor_candidate_suffix (col 32)
   removed in 8.5: contributor_name (col 3), contribution_purpose_code (col 16), donor_candidate_name (col 20), amended_cd (col 32), increased_limit_code (col 37)
-  moved: 37 field(s), e.g. transaction_id 33->2, back_reference_tran_id_number 34->3, back_reference_sched_name 35->4, entity_type 2->5
+  moved: 37 field(s), e.g. transaction_id 33->2, back_reference_tran_id 34->3, back_reference_sched_name 35->4, entity_type 2->5
 
 versions that have no layout raise FecError:
   no column layout for table SchA at spec version 9.9
@@ -920,7 +919,7 @@ for name, col in hardmoney.layout(table, hardmoney.BUNDLED_SPEC_VERSION):
 |---|---|---|---|---|---|---|
 | 0 | `form_type` | alpha_numeric(8) | yes | FORM TYPE | Appendix C. SB3L must be used with the F3L | SB17 |
 | 1 | `filer_committee_id_number` | alpha_numeric(9) | yes | FILER COMMITTEE ID NUMBER |  | C00123456 |
-| 2 | `transaction_id_number` | alpha_numeric(20) | yes | TRANSACTION ID NUMBER | must be unique for the life of the report (original + all amendments) | B56123456789-1234 |
+| 2 | `transaction_id` | alpha_numeric(20) | yes | TRANSACTION ID NUMBER | must be unique for the life of the report (original + all amendments) | B56123456789-1234 |
 | 5 | `entity_type` | alpha_numeric(3) | yes | ENTITY TYPE | [CAN\|CCM\|COM\|IND\|ORG\|PAC\|PTY] | CCM |
 | 6 | `payee_organization_name` | alpha_numeric(200) | yes | PAYEE ORGANIZATION NAME | Required if NOT [IND\|CAN] | John Smith & Co. |
 | 19 | `expenditure_date` | numeric(8) | recommended | EXPENDITURE DATE |  | 20120720 |
@@ -1352,7 +1351,7 @@ HTTP 422
       "rule": "duplicate_transaction_id",
       "line": 5,
       "record": "SB21B",
-      "field": "transaction_id_number",
+      "field": "transaction_id",
       "message": "Tran ID SB21B.4120 is NOT UNIQUE - This one is same as other(s) (first used on line 4)"
     }
   ],
@@ -1401,9 +1400,8 @@ $ pytest -q examples/34_pytest_fixture_pattern.py
 
 [`35_compare_amendment.py`](https://github.com/cgorski/hardmoney/blob/main/python/examples/35_compare_amendment.py).
 Cover pages are compared by field name; schedules are matched on
-transaction id, which the FEC requires to be stable across amendments.
-Schedule A calls it `transaction_id`, the other schedules
-`transaction_id_number`. The repository has no real pair, so the script
+transaction id (`transaction_id` on every schedule), which the FEC
+requires to be stable across amendments. The repository has no real pair, so the script
 derives an amendment from a filing (one line removed, one added, one
 amount changed by $5.00 with the cover adjusted) and diffs the two.
 

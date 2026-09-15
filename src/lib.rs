@@ -34,7 +34,7 @@
 //! | `cli` | the `hardmoney` binary | on |
 //!
 //! A crate that only needs the parser can depend on
-//! `hardmoney = { version = "2", default-features = false, features = ["fetch"] }`,
+//! `hardmoney = { version = "3", default-features = false, features = ["fetch"] }`,
 //! which leaves out `sqlx`, `axum`, `tokio`, `arrow`, and `rusqlite`.
 //!
 //! # Quick start (library)

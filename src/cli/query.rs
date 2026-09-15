@@ -63,7 +63,7 @@ pub struct QueryArgs {
     pub limit: i64,
 
     /// Skip this many rows (for paging).
-    #[arg(global = true, long, default_value_t = 0)]
+    #[arg(global = true, long, default_value_t = 0, value_parser = clap::value_parser!(i64).range(0..))]
     pub offset: i64,
 
     #[command(subcommand)]
@@ -204,7 +204,7 @@ impl What {
                 push(&mut q, "office", office);
                 "/candidates".to_string()
             }
-            What::Candidate { cand_id } => format!("/candidates/{cand_id}"),
+            What::Candidate { cand_id } => format!("/candidates/{}", urlencode(cand_id)),
             What::Committees {
                 name,
                 cycle,
@@ -215,7 +215,7 @@ impl What {
                 push(&mut q, "cmte_tp", cmte_tp);
                 "/committees".to_string()
             }
-            What::Committee { cmte_id } => format!("/committees/{cmte_id}"),
+            What::Committee { cmte_id } => format!("/committees/{}", urlencode(cmte_id)),
             What::Contributions {
                 committee,
                 cycle,
@@ -417,11 +417,11 @@ pub async fn run(args: QueryArgs) -> super::CliResult {
     print!("{}", render_table(&rows, args.what.columns()));
     if rows.is_empty() {
         eprintln!("(no rows)");
-    } else if rows.len() as i64 == args.limit {
+    } else if i64::try_from(rows.len()).is_ok_and(|n| n == args.limit) {
         eprintln!(
             "(showing {} rows; use --limit / --offset {} for more, or --json)",
             rows.len(),
-            args.offset + args.limit
+            args.offset.saturating_add(args.limit)
         );
     }
     Ok(())

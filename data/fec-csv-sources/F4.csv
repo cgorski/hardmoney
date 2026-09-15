@@ -18,7 +18,7 @@ treasurer_middle_name,16,TREASURER MIDDLE NAME,,
 treasurer_prefix,17,TREASURER PREFIX,,
 treasurer_suffix,18,TREASURER SUFFIX,,
 date_signed,19,DATE SIGNED,80,DATE (Signed)
-col_a_cash_on_hand_beginning_reporting_period,20,6.(b) cash on hand beg. report per.,14,6.(b) cash on hand beg. report per.
+col_a_cash_on_hand_beginning_period,20,6.(b) cash on hand beg. report per.,14,6.(b) cash on hand beg. report per.
 col_a_total_receipts,21,6.(c) Total receipts,15,6.(c) Total receipts
 col_a_subtotal,22,6.(d) Subtotal,16,6.(d) Subtotal
 col_a_total_disbursements,23,7. Total disbursements,17,7. Total disbursements
@@ -68,7 +68,7 @@ col_b_cash_on_hand_close_of_period,65,8. COH CLOSE (COL B),60,8. COH CLOSE
 col_b_convention_expenditures,66,11. Convention expenditures,61,11. Convention expenditures
 col_b_convention_refunds,67,12. refunds/rebates/returns relating to conv exp.,62,12. refunds/rebates/returns relating to conv exp.
 col_b_expenditures_subject_to_limits,68,12(a) Expenditures subject to limits,63,12(a) Expenditures subject to limits
-col_b_prior_expendiutres_subject_to_limits,69,12(b) expend. from prior years subject to limits,64,12(b) expend. from prior years subject to limits
+col_b_prior_expenditures_subject_to_limits,69,12(b) expend. from prior years subject to limits,64,12(b) expend. from prior years subject to limits
 col_b_total_expenditures_subject_to_limits,70,12(c) total expenditures subject to limits,65,12(c) total expenditures subject to limits
 col_b_federal_funds,71,13. Federal Funds,66,13. Federal Funds
 col_b_contributions_subtotal,72,14(c) subtotal,67,14(c) subtotal

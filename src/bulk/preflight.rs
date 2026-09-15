@@ -712,7 +712,14 @@ pub async fn check_extensions(pool: &PgPool) -> Check {
 pub fn free_disk_space(path: &Path) -> Option<u64> {
     let mut probe = path;
     while !probe.exists() {
-        probe = probe.parent()?;
+        probe = match probe.parent() {
+            // A relative path whose every component is missing (`cache/dumps`
+            // before the first download) bottoms out at "", which is the
+            // current directory as far as the file system is concerned.
+            Some(p) if p.as_os_str().is_empty() => Path::new("."),
+            Some(p) => p,
+            None => return None,
+        };
     }
     let output = std::process::Command::new("df")
         .arg("-Pk")
@@ -1334,6 +1341,10 @@ mod tests {
         // A path that does not exist yet is measured at its nearest
         // existing ancestor.
         assert!(free_disk_space(&std::env::temp_dir().join("hm/does/not/exist")).is_some());
+        // ... including a relative one with no existing component, which
+        // is measured at the current directory rather than reported as
+        // unmeasurable.
+        assert!(free_disk_space(Path::new("hm-relative-does-not-exist/dumps")).is_some());
     }
 
     #[test]

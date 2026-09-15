@@ -1,7 +1,7 @@
 canonical,^8.4|8.3|8.2|8.1|8.0|7|6,,^(3|5),
 form_type,1,FORM TYPE,1,FORM TYPE
 filer_committee_id_number,2,FILER COMMITTEE ID,2,FILER FEC CMTE ID
-transaction_id_number,3,TRANSACTION ID NUMBER,,
+transaction_id,3,TRANSACTION ID NUMBER,,
 record_id_number,4,RECORD ID NUMBER (for account name),,
 account_name,5,ACCOUNT NAME,4,NAME (Of Account)
 bank_account_id,6,Bank Account ID Number,3,Bank Account ID Number

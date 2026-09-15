@@ -29,6 +29,7 @@ use hardmoney::db::{self, Namespace};
 use sqlx::PgPool;
 
 use super::CliResult;
+use super::shared::{columns, default_dump_cache_dir};
 
 // ---------------------------------------------------------------------------
 // Arguments
@@ -67,7 +68,7 @@ pub struct Common {
     #[arg(
         long,
         env = "HARDMONEY_CACHE_DIR",
-        default_value_os_t = default_cache_dir(),
+        default_value_os_t = default_dump_cache_dir(),
         global = true,
         value_name = "DIR"
     )]
@@ -171,15 +172,6 @@ pub struct RemoveArgs {
     /// Drop the table but keep the downloaded file.
     #[arg(long)]
     pub keep_file: bool,
-}
-
-fn default_cache_dir() -> PathBuf {
-    std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-        .unwrap_or_else(std::env::temp_dir)
-        .join("hardmoney")
-        .join("dumps")
 }
 
 pub async fn run(args: DumpsArgs) -> CliResult {
@@ -650,30 +642,13 @@ fn psql_line(url: &str, ns: &Namespace, sql: &str) -> String {
     format!("psql {} -c \"{sql}\"", url_for_display(url))
 }
 
-/// Prints `rows` under `header`, each column padded to its widest cell.
+/// `rows` under `header`, each column padded to its widest cell, every
+/// line indented two spaces and newline-terminated.
 fn print_columns<const N: usize>(header: &[&str; N], rows: &[[String; N]]) -> String {
-    let mut widths: Vec<usize> = header.iter().map(|h| h.chars().count()).collect();
-    for row in rows {
-        for (w, cell) in widths.iter_mut().zip(row.iter()) {
-            *w = (*w).max(cell.chars().count());
-        }
-    }
-    let line = |cells: &[&str]| -> String {
-        cells
-            .iter()
-            .zip(widths.iter())
-            .map(|(c, w)| format!("{c:<w$}"))
-            .collect::<Vec<_>>()
-            .join("  ")
-            .trim_end()
-            .to_string()
-    };
-    let mut out = format!("  {}\n", line(header));
-    for row in rows {
-        let cells: Vec<&str> = row.iter().map(String::as_str).collect();
-        out.push_str(&format!("  {}\n", line(&cells)));
-    }
-    out
+    columns(header, rows)
+        .lines()
+        .map(|l| format!("  {l}\n"))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -2291,10 +2266,21 @@ async fn remove(common: &Common, args: RemoveArgs) -> CliResult {
         .iter()
         .any(|t| t.state.exists || file_bytes(&t.cache).is_some());
     if !anything {
-        out.say(format!(
-            "{} is not imported and not downloaded; nothing to remove.",
-            args.what
-        ));
+        let kept_file = args.keep_file
+            && targets
+                .iter()
+                .any(|t| t.cache.complete_bytes.or(t.cache.partial_bytes).is_some());
+        out.say(if kept_file {
+            format!(
+                "{} is not imported, and --keep-file leaves the downloaded file alone; nothing to remove.",
+                args.what
+            )
+        } else {
+            format!(
+                "{} is not imported and not downloaded; nothing to remove.",
+                args.what
+            )
+        });
         return out.emit(&serde_json::json!({ "ok": true, "removed": [] }));
     }
 

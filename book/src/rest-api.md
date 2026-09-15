@@ -176,6 +176,9 @@ $ curl -s -H 'X-Api-Key: demo-key' "http://127.0.0.1:18090/filings/2011832/sched
 ]
 ```
 
+An ingested filing with no Schedule E lines answers `[]`; a filing id
+that was never ingested is the same `404` as `GET /filings/{id}`.
+
 `"expenditure_amt":"11282.23"` is a JSON string, not a bare number.
 This is `rust_decimal::Decimal`'s serialization: it serializes as a
 string so that no JSON parser on the receiving end (many of which parse
@@ -436,7 +439,7 @@ Substring filters are case-insensitive `ILIKE '%term%'` matches;
 | `GET /independent-expenditures` | search the FEC's own Schedule E dump | `candidate_id`, `cmte_id`, `support_oppose_code` |
 | `GET /filings` | list ingested filings | `committee_id`, `most_recent` (`true`/`false`), `form_type` (base such as `F3X`, or exact such as `F3XA`) |
 | `GET /filings/{filing_id}` | one ingested filing's header/summary, its amendment chain (openFEC field names: `amendment_indicator`, `amendment_version`, `amendment_chain`, `most_recent`, `most_recent_file_number`, `previous_file_number`), `report_type`, coverage dates, `fec_url`, plus `skipped_lines` and `ingested_at` | none |
-| `GET /filings/{filing_id}/schedule-e` | that filing's own Schedule E line items | none |
+| `GET /filings/{filing_id}/schedule-e` | that filing's own Schedule E line items (`[]` if it has none; 404 for an id that was never ingested) | none |
 
 Exact field lists for each route's JSON response live in
 `src/api/routes/*.rs` in the repository; the table above covers the

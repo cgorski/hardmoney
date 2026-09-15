@@ -309,8 +309,8 @@ to the dump's columns, for the ones you will reach for:
 | raw `.fec` field (hardmoney) | dump column | notes |
 |---|---|---|
 | `filer_committee_id_number` | `cmte_id` | plus `cmte_nm`, looked up |
-| `transaction_id_number` | `tran_id` | the join key `bulk-dump-compare` uses |
-| `back_reference_tran_id_number`, `back_reference_sched_name` | `back_ref_tran_id`, `back_ref_sched_nm` | |
+| `transaction_id` | `tran_id` | the join key `bulk-dump-compare` uses |
+| `back_reference_tran_id`, `back_reference_sched_name` | `back_ref_tran_id`, `back_ref_sched_nm` | |
 | `entity_type` | `entity_tp`, `entity_tp_desc` | |
 | `payee_organization_name` / `payee_last_name`, ... | `pye_nm`, `payee_l_nm`, `payee_f_nm`, `payee_m_nm`, `payee_prefix`, `payee_suffix` | `pye_nm` is the single display name; `payee_name_text` is a `tsvector` of it |
 | `payee_street_1` ... `payee_zip_code` | `pye_st1`, `pye_st2`, `pye_city`, `pye_st`, `pye_zip` | |
@@ -323,9 +323,9 @@ to the dump's columns, for the ones you will reach for:
 | `support_oppose_code` | `s_o_ind`, `s_o_ind_desc` | |
 | `candidate_id_number`, `candidate_name`, ... | `s_o_cand_id`, `s_o_cand_nm`, `s_o_cand_nm_first`, `s_o_cand_nm_last`, `s_o_cand_m_nm`, `s_o_cand_prefix`, `s_o_cand_suffix`, `s_o_cand_office`, `s_o_cand_office_desc`, `s_o_cand_office_st`, `s_o_cand_office_st_desc`, `s_o_cand_office_district` | |
 | `completing_last_name` ... | `filer_l_nm`, `filer_f_nm`, `filer_m_nm`, `filer_prefix`, `filer_suffix` | |
-| `date_signed`, `ind_name_as_signed` | `indt_sign_dt`, `indt_sign_nm` | |
-| `date_notarized`, `ind_name_notary`, `date_notary_commission_expires` | `notary_sign_dt`, `notary_sign_nm`, `notary_commission_exprtn_dt` | |
-| `memo_code`, `memo_text_description` | `memo_cd`, `memo_cd_desc`, `memo_text` | |
+| `date_signed`, `completing_name` | `indt_sign_dt`, `indt_sign_nm` | |
+| `date_notarized`, `notary_name`, `date_notary_commission_expires` | `notary_sign_dt`, `notary_sign_nm`, `notary_commission_exprtn_dt` | |
+| `memo_code`, `memo_text` | `memo_cd`, `memo_cd_desc`, `memo_text` | |
 | `conduit_name` ... `conduit_zip_code` | `conduit_cmte_id`, `conduit_cmte_nm`, `conduit_cmte_st1`, ..., `conduit_cmte_zip` | |
 | `form_type` (`SE`) | `schedule_type` (`SE`), `schedule_type_desc`, `line_num` (`24`) | |
 
@@ -637,7 +637,7 @@ note: the FEC's Schedule E dump holds periodic reports only (F3X, F5, F3, F3P); 
 ```
 
 Rows are matched on the filer's transaction id (`raw ->>
-'transaction_id_number'` against `tran_id`); the report lists ids on one
+'transaction_id'` against `tran_id`); the report lists ids on one
 side only and matched ids whose amounts differ. It is SQL over the two
 tables and prints in well under a second.
 

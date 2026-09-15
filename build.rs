@@ -215,12 +215,17 @@ fn load_table(path: &Path, universe: &[Version]) -> Result<TableDef, String> {
                     ));
                 }
             };
-            let zero_based = u16::try_from(pos - 1).map_err(|_| "column position overflow")?;
+            // `pos >= 1` here (`parse_column_position` maps 0 to `Absent`),
+            // so the subtraction cannot underflow; `checked_sub` documents it.
+            let zero_based = pos
+                .checked_sub(1)
+                .and_then(|p| u16::try_from(p).ok())
+                .ok_or("column position overflow")?;
             match b.columns.get(canonical) {
                 Some(&existing) if existing != zero_based => {
                     return Err(format!(
                         "canonical field {canonical:?} is assigned to two columns ({} and {pos}) in bucket {:?}",
-                        existing + 1,
+                        u32::from(existing) + 1,
                         b.pattern
                     ));
                 }
@@ -239,7 +244,7 @@ fn load_table(path: &Path, universe: &[Version]) -> Result<TableDef, String> {
             if let Some(other) = seen.insert(col, name) {
                 return Err(format!(
                     "fields {other:?} and {name:?} both occupy column {} in bucket {:?}",
-                    col + 1,
+                    u32::from(col) + 1,
                     b.pattern
                 ));
             }
@@ -441,12 +446,13 @@ fn variant_name(table: &str) -> String {
 /// `F3X` -> `f3x`, `SchA3L` -> `sch_a3l`, `TEXT` -> `text`, `H1` -> `h1`.
 fn module_name(table: &str) -> String {
     let mut out = String::new();
-    let chars: Vec<char> = table.chars().collect();
-    for (i, &c) in chars.iter().enumerate() {
-        if c.is_ascii_uppercase() && i > 0 && chars[i - 1].is_ascii_lowercase() {
+    let mut previous: Option<char> = None;
+    for c in table.chars() {
+        if c.is_ascii_uppercase() && previous.is_some_and(|p| p.is_ascii_lowercase()) {
             out.push('_');
         }
         out.push(c.to_ascii_lowercase());
+        previous = Some(c);
     }
     out
 }
@@ -640,8 +646,8 @@ fn generate_table_module(o: &mut String, t: &TableDef, spec_rows: Option<&[SpecR
                         .iter()
                         .any(|v| !v.paper && v.major == 8 && v.minor == 5)
                 })?;
-                let col = *latest.columns.get(f)?;
-                rows.iter().find(|r| r.column == col + 1)
+                let col = u32::from(*latest.columns.get(f)?);
+                rows.iter().find(|r| u32::from(r.column) == col + 1)
             })
             .map(|r| r.description.clone());
         match label {
@@ -680,10 +686,26 @@ fn generate_table_module(o: &mut String, t: &TableDef, spec_rows: Option<&[SpecR
             .iter()
             .filter_map(|f| b.columns.get(f).map(|&c| (f, c)))
             .collect();
-        let max_column = present.iter().map(|(_, c)| *c).max().map_or(0, |c| c + 1);
-        // Indexes into `fields` sorted by name, for binary search.
-        let mut by_name: Vec<u16> = (0..present.len() as u16).collect();
-        by_name.sort_by(|&a, &b2| present[a as usize].0.cmp(present[b2 as usize].0));
+        // Columns are `u16` (checked when the CSV was read), so `+ 1` fits
+        // in the wider type; `width` is written back as a `u16` literal and
+        // the compiler rejects the generated code if it ever did not.
+        let max_column = present
+            .iter()
+            .map(|(_, c)| u32::from(*c))
+            .max()
+            .map_or(0, |c| c + 1);
+        // Indexes into `fields` sorted by name, for binary search. A layout
+        // has far fewer than 65,536 fields; refuse to generate otherwise
+        // rather than truncate an index.
+        let mut by_name: Vec<(u16, &String)> = present
+            .iter()
+            .enumerate()
+            .map(|(i, (name, _))| match u16::try_from(i) {
+                Ok(i) => (i, *name),
+                Err(_) => fail(&format!("{}: more than u16::MAX fields", t.name)),
+            })
+            .collect();
+        by_name.sort_by_key(|(_, name)| *name);
 
         let versions: Vec<String> = b
             .versions
@@ -715,7 +737,7 @@ fn generate_table_module(o: &mut String, t: &TableDef, spec_rows: Option<&[SpecR
             "            ],\n            width: {max_column},\n            by_name: &[{}],\n        }},",
             by_name
                 .iter()
-                .map(u16::to_string)
+                .map(|(i, _)| i.to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -738,7 +760,7 @@ fn generate_table_module(o: &mut String, t: &TableDef, spec_rows: Option<&[SpecR
         let canonical = latest_bucket.and_then(|b| {
             b.columns
                 .iter()
-                .find(|&(_, &c)| c + 1 == r.column)
+                .find(|&(_, &c)| u32::from(c) + 1 == u32::from(r.column))
                 .map(|(name, _)| name.as_str())
         });
         let kind = match r.kind.as_str() {

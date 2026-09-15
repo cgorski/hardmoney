@@ -29,23 +29,39 @@
 //! * [`Rule::CurrentFormat`] is a **warning** here, not a failure. hardmoney
 //!   knowingly parses every spec version since 3.x; refusing a 2004 filing
 //!   would defeat the purpose. The FEC rejects anything but the current
-//!   format at upload time. Because the bundled workbook's *required*
-//!   levels describe the current format only (real, accepted 3.x and 5.x
-//!   filings leave `entity_type` blank), [`Rule::RequiredFieldEmpty`] is
-//!   reported at warning severity on such filings. Every other check is
-//!   format-stable (character set, date and amount syntax, lengths, IDs,
-//!   transaction-ID integrity) and keeps its severity.
+//!   format at upload time. Because the bundled workbook describes the
+//!   current format only, the rules for which real, accepted 3.x-6.x
+//!   filings demonstrably differ ([`Rule::demoted_on_superseded_format`]:
+//!   blank required fields, accented Latin-1 letters, one-digit districts,
+//!   pre-BCRA H3 event codes) are reported at warning severity on such
+//!   filings. Every other check is format-stable (date and amount syntax,
+//!   lengths, IDs, transaction-ID integrity) and keeps its severity.
 //! * *Leading blanks* (FEC failing message #6/#31) cannot be detected: the
 //!   parser trims surrounding ASCII whitespace from every field before the
 //!   validator sees it (see [`crate::parser::utils`]).
 //! * Characters in a Form 99's free-text block are checked at **warning**
 //!   level ([`Rule::F99IllegalCharacter`]) because the FEC has accepted
 //!   real F99 filings containing out-of-range bytes there.
+//! * [`Rule::UnrecognizedFormType`] (FEC failing #18) is a warning because
+//!   a line hardmoney cannot dispatch may be a token the FEC knows and
+//!   hardmoney's tables do not; rejecting on our own gap would be wrong.
 //! * Summary-page arithmetic (warnings 3-4, "Subtotal not supported by
 //!   Schedule") lives in [`crate::parser::reconcile`], not here.
-//! * Cross-filing checks (the transaction-ID uniqueness "for the life of
-//!   the report", report-type-vs-form consistency) need data this crate
-//!   does not have in a single file.
+//!
+//! FEC messages with no rule here, and why:
+//!
+//! | FEC message | Reason |
+//! |---|---|
+//! | #20 "Validation Terminated! - Over 32,000 Problems" | hardmoney reports every finding. |
+//! | #22 "Report Type is Missing or Invalid", #38 "Wrong Report Type for this Form" | The workbook elides the code list (`12C,..., TER`, "refer to Appendix A"), which is not bundled; a missing code is [`Rule::RecommendedFieldEmpty`], and Form 24's `24`/`48` list is checked as [`Rule::InvalidAllowedValue`] at error severity. (Data note: the distiller also misses Form 13's two-item `90D,90S` list.) |
+//! | #24 "Extraneous data follows last field", #25 "data coded in a Dummy field", #26 "Invalid double-quote surround", #49 "Field no longer used" | Record-shape checks the parser resolves before a [`ParsedLine`] exists; a strict parse fails on the worst of them. |
+//! | #37 "Invalid Rate format" | Schedule C's interest rate is `A/N-15` free text and accepted filings carry `Prime -1`, `SOFR+2.32`, `9.00% APR`. |
+//! | #41 "Back/Cross-Reference ... not valid", #42-#44 (H1 redundancy, pre-BCRA H3 D/E codes), #46-#48 (version-3 amendment codes, `[BEGINTEXT]`, Schedule I links) | Legacy or Schedule I rules; Schedule I is not in the current workbook. |
+//! | W26 "Election Code missing", W33-W35, W37-W42, W44, W46-W51 (Form 7 codes, ratio codes, Form 1 party codes, creditor codes, yes/no fields, H1 point values, delimited names, H3/H5 breakdown totals, superfluous data, Schedule C line references) | The workbook gives these code lists as prose (`13A = Form 3; Sum Pg #13(a)`), not as `allowed_values`; the H3/H5 breakdown identities belong with [`crate::parser::reconcile`]. |
+//!
+//! Cross-filing checks (transaction-ID uniqueness "for the life of the
+//! report", across amendments) need data this crate does not have in a
+//! single file.
 //!
 //! # Surrounding quotes
 //!
@@ -131,8 +147,9 @@ pub enum Rule {
     /// failing #9).
     AmendmentNeedsNumber,
     /// A new/termination report whose header nonetheless carries a report
-    /// id or amendment number (FEC failing #8; a warning here because the
-    /// data is merely surplus).
+    /// id or amendment number (FEC failing #8). An amendment number of `0`
+    /// does not count: FECfile writes it on originals and the FEC accepts
+    /// them.
     HeaderInconsistentWithAmendmentStatus,
     /// A second top-level form record in the body (FEC failing #23).
     MultipleForms,
@@ -160,9 +177,18 @@ pub enum Rule {
     /// A conditionally required field is blank and its condition holds
     /// (FEC warning #1).
     ConditionallyRequiredFieldEmpty,
-    /// More characters than the spec's type allows (FEC failing #7).
+    /// More characters than the spec's type allows (FEC failing #7). For
+    /// an `AMT-n` field the bound is on the *digits*: the decimal point and
+    /// sign are free, because the FEC accepted ActBlue's September 2020
+    /// amendment (FEC-1458871, spec 8.3) with twelve-digit Column B totals
+    /// written in thirteen characters (`2280311229.59`).
     FieldTooLong,
     /// A character outside the FEC's allowed set (FEC failing #12/#27).
+    /// Reported at **warning** severity on superseded spec versions: the
+    /// FEC's own note on the rule says only ASCII 32-126 "used to be"
+    /// allowed, yet a 2001 spec-3.00 report from Puerto Rico with `á` and
+    /// `í` in contributor names was accepted, so pre-8.x enforcement cannot
+    /// be inferred from today's ranges.
     IllegalCharacter,
     /// A character outside the FEC's allowed set in a Form 99's free text
     /// (FEC failing #13/#28; a warning here -- see the module docs).
@@ -175,23 +201,63 @@ pub enum Rule {
     NotARealDate,
     /// A date outside 1960-2099 (FEC warning #2).
     DateOutOfRange,
+    /// A four-digit year field (`NUM-4`: the F3X "year for above", the F2
+    /// year of election, the F4 convention year) that is not `CCYY` (FEC
+    /// failing #36).
+    InvalidYear,
     /// An amount that is not `[-]digits[.dd]` -- dollar signs and commas
     /// included (FEC failing #34).
     InvalidAmount,
-    /// A non-digit in a numeric (non-date) field (FEC failing #35).
+    /// A character other than a digit or one decimal point in a numeric
+    /// field that is not a date, year, telephone, or district (FEC failing
+    /// #35). The decimal point is allowed because the workbook's `NUM-5`
+    /// allocation percentages on Schedules H1 and H2 are written `0.49`, and
+    /// every accepted party report carries them that way.
     NonNumeric,
-    /// A value outside the spec's published list for the field (a warning:
-    /// the lists come from the FEC's own filing software and can lag).
+    /// A congressional-district field (the workbook's `01 ... 99` columns)
+    /// that is not exactly two digits (FEC failing #39). Reported at
+    /// **warning** severity on superseded spec versions: real, accepted
+    /// 3.x filings carry one-digit districts (see the module docs).
+    InvalidDistrict,
+    /// A value outside the spec's published list for the field. A warning
+    /// unless the workbook's rule for the field says "Error if Coded
+    /// incorrectly" (report codes, FEC failing #22), in which case the
+    /// finding carries [`Severity::Error`].
     InvalidAllowedValue,
     /// A value that does not match the spec's published regex for the field.
     PatternMismatch,
     /// Not a USPS state/territory code (FEC warning #29).
     InvalidStateCode,
+    /// A ZIP field that is not five or nine digits (FEC warning #30). The
+    /// FEC's validator flags foreign postal codes this way too; it is a
+    /// warning.
+    InvalidZipCode,
+    /// A ten-digit telephone field (`NUM-10`) that is not ten digits (FEC
+    /// warning #31).
+    InvalidPhoneNumber,
+    /// A candidate-office field (the workbook's `H,S,P` columns) that is not
+    /// `H`, `S`, or `P` (FEC warning #32).
+    InvalidOfficeCode,
     /// An `entity_type` outside `CAN CCM COM IND ORG PAC PTY` (FEC warning #45).
     InvalidEntityType,
     /// A Schedule E / Form 57 / Form 76 support/oppose code other than `S`
     /// or `O` (FEC warning #36).
     InvalidSupportOpposeCode,
+    /// An election code (the workbook's `Edit: PGI` columns) that is not
+    /// one of `C E G O P R S` followed by a four-digit year (FEC warning
+    /// #5).
+    InvalidElectionCode,
+    /// A check-box column (the workbook's `Check-box` rows) holding
+    /// something other than `X` (FEC warning #43).
+    InvalidCheckbox,
+    /// A Schedule H3 event type outside the codes the workbook lists (`AD
+    /// GV DF DC EA PC`; FEC failing #45). Reported at **warning** severity
+    /// on superseded spec versions, whose H3 records use the pre-BCRA
+    /// one-letter codes.
+    InvalidEventType,
+    /// A second address line filled in while the first is blank (FEC
+    /// warning #28).
+    AddressInSecondLine,
 
     // -- Cross-line ---------------------------------------------------------
     /// The same transaction ID (case-insensitively) on two lines (FEC
@@ -212,7 +278,6 @@ impl Rule {
     pub const fn severity(self) -> Severity {
         match self {
             Rule::CurrentFormat
-            | Rule::HeaderInconsistentWithAmendmentStatus
             | Rule::UnrecognizedFormType
             | Rule::RecommendedFieldEmpty
             | Rule::ConditionallyRequiredFieldEmpty
@@ -221,14 +286,21 @@ impl Rule {
             | Rule::InvalidAllowedValue
             | Rule::PatternMismatch
             | Rule::InvalidStateCode
+            | Rule::InvalidZipCode
+            | Rule::InvalidPhoneNumber
+            | Rule::InvalidOfficeCode
             | Rule::InvalidEntityType
             | Rule::InvalidSupportOpposeCode
+            | Rule::InvalidElectionCode
+            | Rule::InvalidCheckbox
+            | Rule::AddressInSecondLine
             | Rule::EmbeddedDoubleQuote => Severity::Warning,
             Rule::HeaderFirst
             | Rule::CoverSecond
             | Rule::FilingTypeFec
             | Rule::AmendmentNeedsOriginalId
             | Rule::AmendmentNeedsNumber
+            | Rule::HeaderInconsistentWithAmendmentStatus
             | Rule::MultipleForms
             | Rule::ScheduleNotAllowedWithForm
             | Rule::FilerIdFormat
@@ -238,12 +310,34 @@ impl Rule {
             | Rule::IllegalCharacter
             | Rule::BadDateFormat
             | Rule::NotARealDate
+            | Rule::InvalidYear
             | Rule::InvalidAmount
             | Rule::NonNumeric
+            | Rule::InvalidDistrict
+            | Rule::InvalidEventType
             | Rule::DuplicateTransactionId
             | Rule::BackReferenceNotFound
             | Rule::F99TextTooLong => Severity::Error,
         }
+    }
+
+    /// Whether findings of this rule are demoted to [`Severity::Warning`]
+    /// on a filing in a superseded spec version. The bundled workbook
+    /// describes the *current* format; for these rules real, FEC-accepted
+    /// 3.x-6.x filings demonstrably did not meet it (blank entity types,
+    /// accented Latin-1 letters, one-digit districts, pre-BCRA one-letter
+    /// H3 event types), so rejecting them would contradict the FEC's own
+    /// acceptance. Every superseded-format filing is already reported under
+    /// [`Rule::CurrentFormat`]; the FEC rejects it for that alone.
+    #[must_use]
+    pub const fn demoted_on_superseded_format(self) -> bool {
+        matches!(
+            self,
+            Rule::RequiredFieldEmpty
+                | Rule::IllegalCharacter
+                | Rule::InvalidDistrict
+                | Rule::InvalidEventType
+        )
     }
 
     /// The FEC's own message template for this rule, as published in
@@ -278,13 +372,22 @@ impl Rule {
             Rule::BadDateFormat => "Bad Date - ________ not YYYYMMDD format",
             Rule::NotARealDate => "________ is not a Real Date",
             Rule::DateOutOfRange => "__{date}__ is outside range of 1960-2099",
+            Rule::InvalidYear => "____ is an Invalid Year (CCYY) Format",
             Rule::InvalidAmount => "Invalid Amount format: ____________",
             Rule::NonNumeric => "Non-numeric data in Numeric Field",
+            Rule::InvalidDistrict => "District \"__\" is not 2-digit Numeric format",
             Rule::InvalidAllowedValue => "Value \"_\" is Invalid for this field",
             Rule::PatternMismatch => "Value \"_\" does not match the required format",
             Rule::InvalidStateCode => "__ not a valid 2-character USPS State Code",
+            Rule::InvalidZipCode => "Zip Code is Invalid or Missing / Zip = _________",
+            Rule::InvalidPhoneNumber => "Invalid Area Code/Phone Number: __________",
+            Rule::InvalidOfficeCode => "Office Code \"_\" Invalid (Valid Codes: H, S, P)",
             Rule::InvalidEntityType => "Entity Type [___] is not an acceptable value",
             Rule::InvalidSupportOpposeCode => "Sup/Opp Code \"___\" Invalid (Valid Codes: S, O)",
+            Rule::InvalidElectionCode => "Election Code invalid: ___ {description}",
+            Rule::InvalidCheckbox => "Value \"_\" is Invalid for \"Checkbox=X\" field",
+            Rule::InvalidEventType => "Event Type {__} Invalid - OK Vals: [AD|GV|DF|DC|EA] (H3)",
+            Rule::AddressInSecondLine => "Single-line Address NOT in 1st delimited field",
             Rule::DuplicateTransactionId => "Tran ID is NOT UNIQUE - This one is same as other(s)",
             Rule::BackReferenceNotFound => "Back-Reference TRAN-ID does not match Sched TRAN-ID",
             Rule::F99TextTooLong => {
@@ -297,10 +400,13 @@ impl Rule {
 /// One validation message, tied to a line (and usually a field) of the
 /// filing.
 ///
-/// `severity` is `rule.severity()` with one exception: on a filing in a
-/// superseded spec version, [`Rule::RequiredFieldEmpty`] is reported at
-/// [`Severity::Warning`] (see the module docs). Filter on `severity`, not
-/// on `rule.severity()`.
+/// `severity` is `rule.severity()` with two exceptions: on a filing in a
+/// superseded spec version the rules for which
+/// [`Rule::demoted_on_superseded_format`] is true are reported at
+/// [`Severity::Warning`], and an [`Rule::InvalidAllowedValue`] finding on
+/// a field whose workbook rule says "Error if Coded incorrectly" (report
+/// codes) is reported at [`Severity::Error`]. Filter on `severity`, not on
+/// `rule.severity()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
@@ -699,12 +805,165 @@ fn is_date_field(spec: &FieldSpec) -> bool {
     spec.kind == FieldKind::Numeric && spec.max_len == Some(8)
 }
 
+/// Whether `value` is what the FEC's `NUM` type accepts outside its
+/// fixed-width uses: digits with at most one decimal point (`5`, `0.49`,
+/// `.51`), never a sign, never empty.
+#[must_use]
+pub fn is_numeric_value(value: &str) -> bool {
+    let mut digits = 0usize;
+    let mut points = 0usize;
+    for b in value.bytes() {
+        match b {
+            b'0'..=b'9' => digits = digits.saturating_add(1),
+            b'.' => points = points.saturating_add(1),
+            _ => return false,
+        }
+    }
+    digits > 0 && points <= 1
+}
+
+/// Whether a spec row is a `CCYY` year: every `NUM-4` column in the
+/// workbook is one (F3X "Year for Above", F2 "YEAR OF ELECTION", F4's
+/// convention year).
+fn is_year_field(spec: &FieldSpec) -> bool {
+    spec.kind == FieldKind::Numeric && spec.max_len == Some(4)
+}
+
+/// Whether a spec row is a ten-digit telephone number: every `NUM-10`
+/// column in the workbook is one (Form 1's custodian, treasurer, and agent
+/// telephones).
+fn is_phone_field(spec: &FieldSpec) -> bool {
+    spec.kind == FieldKind::Numeric && spec.max_len == Some(10)
+}
+
+/// Whether a spec row is a congressional district: the workbook marks
+/// these two-character columns with `01, ..., 99` / `01 ... 99` as the
+/// value reference.
+fn is_district_field(spec: &FieldSpec) -> bool {
+    spec.max_len == Some(2)
+        && spec
+            .value_reference
+            .is_some_and(|v| v.trim_start().starts_with("01"))
+}
+
+/// Whether a spec row is a ZIP code: a nine-character column whose
+/// description says `ZIP`.
+fn is_zip_field(spec: &FieldSpec) -> bool {
+    spec.max_len == Some(9) && spec.description.to_ascii_uppercase().contains("ZIP")
+}
+
+/// Whether a spec row is a candidate-office code: the workbook gives
+/// these one-character columns `H,S,P` as the value reference. (Its rule
+/// column says `Edit: OFFICE`, except on the Form 6 sheet where the rules
+/// are shifted by a row -- see [`is_state_field`] -- so the value
+/// reference is the reliable marker.)
+fn is_office_field(spec: &FieldSpec) -> bool {
+    spec.max_len == Some(1)
+        && spec.value_reference.is_some_and(|v| {
+            v.split(|c: char| !c.is_ascii_alphabetic())
+                .filter(|w| !w.is_empty())
+                .eq(["H", "S", "P"])
+        })
+}
+
+/// Whether a spec row is an election code: the workbook marks these with
+/// `Edit: PGI` or `Values: [G|P|R|S|C|E|O]+...` as the rule. The FEC's
+/// edit accepts one of `C E G O P R S` followed by a four-digit year.
+fn is_election_code_field(spec: &FieldSpec) -> bool {
+    spec.max_len == Some(5)
+        && spec.rule.is_some_and(|r| {
+            let r = r.trim_start();
+            r.get(..9)
+                .is_some_and(|p| p.eq_ignore_ascii_case("edit: pgi"))
+                || r.to_ascii_uppercase().contains("[G|P|R|S|C|E|O]")
+        })
+}
+
+/// Whether a spec row is a check-box: the workbook's rule column says
+/// `Check-box` (sometimes with a qualifier such as `- Mutually exclusive`).
+fn is_checkbox_field(spec: &FieldSpec) -> bool {
+    spec.max_len == Some(1)
+        && spec.rule.is_some_and(|r| {
+            r.trim_start()
+                .get(..9)
+                .is_some_and(|p| p.eq_ignore_ascii_case("check-box"))
+        })
+}
+
+/// The two-letter codes a value-reference such as `AD=ADministrative;
+/// GV=Generic Voter Drive; ...` enumerates (Schedule H3's event type):
+/// every run of upper-case letters immediately followed by `=`. Empty when
+/// the reference lists none.
+fn enumerated_codes(value_reference: &str) -> Vec<&str> {
+    value_reference
+        .split(|c: char| c.is_whitespace() || matches!(c, ';' | ',' | ':'))
+        .filter_map(|token| token.split_once('='))
+        .map(|(code, _)| code)
+        .filter(|code| !code.is_empty() && code.bytes().all(|b| b.is_ascii_uppercase()))
+        .collect()
+}
+
+/// Whether `value` has the FEC's election-code shape: one of `C E G O P R
+/// S` (convention, election-cycle/other, general, other, primary, runoff,
+/// special) followed by a four-digit year, case-insensitively.
+#[must_use]
+pub fn is_election_code(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    matches!(
+        bytes,
+        [kind, year @ ..]
+            if matches!(kind.to_ascii_uppercase(), b'C' | b'E' | b'G' | b'O' | b'P' | b'R' | b'S')
+                && year.len() == 4
+                && year.iter().all(u8::is_ascii_digit)
+    )
+}
+
+/// The canonical `..._street_1` sibling of a `..._street_2` field, if
+/// `name` is one.
+fn street_1_sibling(name: &str) -> Option<String> {
+    name.strip_suffix("street_2")
+        .map(|prefix| format!("{prefix}street_1"))
+}
+
+/// Whether the workbook's rule for a coded field promotes a wrong code to
+/// a failing message ("Error if Coded incorrectly", on report codes).
+fn wrong_code_is_error(spec: &FieldSpec) -> bool {
+    spec.rule.is_some_and(|r| {
+        r.to_ascii_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains("error if coded incorrectly")
+    })
+}
+
+/// The line's transaction ID, from whichever of the two canonical spellings
+/// its table uses (`transaction_id`; older layouts said
+/// `transaction_id_number`). Blank counts as absent.
 fn transaction_id(line: &ParsedLine) -> Option<&str> {
-    line.get("transaction_id")
-        .or_else(|| line.get("transaction_id_number"))
+    TRANSACTION_ID_FIELDS
+        .iter()
+        .find_map(|f| line.get(f))
         .map(effective_value)
         .filter(|s| !s.is_empty())
 }
+
+/// The canonical name the line's table uses for its transaction ID, for
+/// attributing a finding to the right field.
+fn transaction_id_field(line: &ParsedLine) -> &'static str {
+    TRANSACTION_ID_FIELDS
+        .iter()
+        .copied()
+        .find(|f| line.get(f).is_some())
+        .unwrap_or("transaction_id")
+}
+
+/// Candidate canonical names for the transaction-ID column, in preference
+/// order (the layouts were harmonised on `transaction_id`).
+const TRANSACTION_ID_FIELDS: &[&str] = &["transaction_id", "transaction_id_number"];
+
+/// Candidate canonical names for the back-reference column.
+const BACK_REFERENCE_FIELDS: &[&str] = &["back_reference_tran_id", "back_reference_tran_id_number"];
 
 // ---------------------------------------------------------------------------
 // Requirement conditions
@@ -767,8 +1026,11 @@ fn parse_condition(text: Option<&str>, default: Condition) -> Condition {
     if norm.contains("if not organization") {
         return Condition::EntityNotIn(&["ORG"]);
     }
-    if norm.contains("ccm, pac, or pty") {
+    if norm.contains("ccm, pac, or pty") || norm.contains("ccm, pac or pty") {
         return Condition::EntityIn(&["CCM", "PAC", "PTY"]);
+    }
+    if norm.contains("if can or ccm") {
+        return Condition::EntityIn(&["CAN", "CCM"]);
     }
     if norm.contains("x(warning) if ind") {
         return Condition::EntityIn(&["IND"]);
@@ -1034,7 +1296,12 @@ impl Checker<'_> {
             }
 
             // A date of the wrong length is reported once, as BadDateFormat.
-            let len = value.chars().count();
+            // An amount's bound counts digits (see `Rule::FieldTooLong`).
+            let (len, unit) = if spec.kind == FieldKind::Amount {
+                (value.bytes().filter(u8::is_ascii_digit).count(), "digits")
+            } else {
+                (value.chars().count(), "characters")
+            };
             if !is_date_field(spec)
                 && let Some(max) = spec.max_len
                 && len > usize::from(max)
@@ -1044,7 +1311,7 @@ impl Checker<'_> {
                     line,
                     Some(name),
                     format!(
-                        "{} exceeds maximum length of {max} ({len} characters)",
+                        "{} exceeds maximum length of {max} ({len} {unit})",
                         spec.description
                     ),
                 );
@@ -1052,10 +1319,40 @@ impl Checker<'_> {
 
             self.check_characters(line, name, value);
 
+            let all_digits = value.bytes().all(|b| b.is_ascii_digit());
             match spec.kind {
                 FieldKind::Numeric if is_date_field(spec) => self.check_date(line, name, value),
+                // A wrong-length year or phone number is reported once,
+                // under its own rule.
+                FieldKind::Numeric if is_year_field(spec) => {
+                    if !(all_digits && len == 4) {
+                        self.push_line(
+                            Rule::InvalidYear,
+                            line,
+                            Some(name),
+                            format!(
+                                "{value} is an Invalid Year (CCYY) Format for {}",
+                                spec.description
+                            ),
+                        );
+                    }
+                }
+                FieldKind::Numeric if is_phone_field(spec) => {
+                    if !(all_digits && len == 10) {
+                        self.push_line(
+                            Rule::InvalidPhoneNumber,
+                            line,
+                            Some(name),
+                            format!(
+                                "Invalid Area Code/Phone Number: {value} in {} (ten digits)",
+                                spec.description
+                            ),
+                        );
+                    }
+                }
+                FieldKind::Numeric if is_district_field(spec) => {}
                 FieldKind::Numeric => {
-                    if !value.bytes().all(|b| b.is_ascii_digit()) {
+                    if !is_numeric_value(value) {
                         self.push_line(
                             Rule::NonNumeric,
                             line,
@@ -1083,7 +1380,112 @@ impl Checker<'_> {
                 FieldKind::Alpha | FieldKind::AlphaNumeric | FieldKind::Unknown => {}
             }
 
+            // Districts are `NUM-2` on most sheets and `A/N-2` on two; the
+            // FEC's message is the same, so the check is by marker, not
+            // type, and stands in for the generic numeric and pattern
+            // checks on these columns.
+            if is_district_field(spec) && !(all_digits && len == 2) {
+                let mut finding = Finding::new(
+                    Rule::InvalidDistrict,
+                    line.line_no,
+                    &line.raw_form_type,
+                    Some(name),
+                    format!(
+                        "District \"{value}\" is not 2-digit Numeric format ({})",
+                        spec.description
+                    ),
+                );
+                self.demote_if_superseded(&mut finding);
+                self.findings.push(finding);
+            }
+
+            if is_zip_field(spec) && !(all_digits && (len == 5 || len == 9)) {
+                self.push_line(
+                    Rule::InvalidZipCode,
+                    line,
+                    Some(name),
+                    format!(
+                        "Zip Code is Invalid or Missing / Zip = {value} ({}: five or nine digits)",
+                        spec.description
+                    ),
+                );
+            }
+
+            if is_office_field(spec)
+                && !(value.eq_ignore_ascii_case("H")
+                    || value.eq_ignore_ascii_case("S")
+                    || value.eq_ignore_ascii_case("P"))
+            {
+                self.push_line(
+                    Rule::InvalidOfficeCode,
+                    line,
+                    Some(name),
+                    format!("Office Code \"{value}\" Invalid (Valid Codes: H, S, P)"),
+                );
+            }
+
+            if is_election_code_field(spec) && !is_election_code(value) {
+                self.push_line(
+                    Rule::InvalidElectionCode,
+                    line,
+                    Some(name),
+                    format!(
+                        "Election Code invalid: {value} {} (one of C, E, G, O, P, R, S followed by a four-digit year, e.g. P2026)",
+                        spec.description
+                    ),
+                );
+            }
+
+            if is_checkbox_field(spec) && !value.eq_ignore_ascii_case("X") {
+                self.push_line(
+                    Rule::InvalidCheckbox,
+                    line,
+                    Some(name),
+                    format!(
+                        "Value \"{value}\" is Invalid for \"Checkbox=X\" field {}",
+                        spec.description
+                    ),
+                );
+            }
+
+            if let Some(sibling) = street_1_sibling(name)
+                && line
+                    .get(&sibling)
+                    .is_some_and(|s| effective_value(s).is_empty())
+            {
+                self.push_line(
+                    Rule::AddressInSecondLine,
+                    line,
+                    Some(name),
+                    format!(
+                        "Single-line Address NOT in 1st delimited field: {} is '{value}' but {} is blank",
+                        spec.description,
+                        sibling.to_ascii_uppercase().replace('_', " ")
+                    ),
+                );
+            }
+
             match name {
+                "event_type" if line.table() == Table::H3 => {
+                    let codes = spec
+                        .value_reference
+                        .map(enumerated_codes)
+                        .unwrap_or_default();
+                    if !codes.is_empty() && !codes.iter().any(|c| c.eq_ignore_ascii_case(value)) {
+                        let mut finding = Finding::new(
+                            Rule::InvalidEventType,
+                            line.line_no,
+                            &line.raw_form_type,
+                            Some(name),
+                            format!(
+                                "Event Type {{{value}}} Invalid - OK Vals: [{}] (H3)",
+                                codes.join("|")
+                            ),
+                        );
+                        self.demote_if_superseded(&mut finding);
+                        self.findings.push(finding);
+                    }
+                }
                 "entity_type" => {
                     if !ENTITY_TYPES.iter().any(|e| e.eq_ignore_ascii_case(value)) {
                         self.push_line(
@@ -1114,9 +1516,10 @@ impl Checker<'_> {
                             .iter()
                             .any(|a| a.eq_ignore_ascii_case(value))
                     {
-                        self.push_line(
+                        let mut finding = Finding::new(
                             Rule::InvalidAllowedValue,
-                            line,
+                            line.line_no,
+                            &line.raw_form_type,
                             Some(name),
                             format!(
                                 "Value \"{value}\" is Invalid for {} (valid: {})",
@@ -1124,13 +1527,24 @@ impl Checker<'_> {
                                 spec.allowed_values.join(", ")
                             ),
                         );
+                        // "Warning if Code is missing; Error if Coded
+                        // incorrectly": the workbook's severity for a wrong
+                        // report code (FEC failing #22).
+                        if wrong_code_is_error(spec) {
+                            finding.severity = Severity::Error;
+                        }
+                        self.findings.push(finding);
                     }
                 }
             }
 
             // The filer ID's format is FilerIdFormat's job (on the cover) and
-            // FilerIdMismatch's (in the body); do not report it twice.
+            // FilerIdMismatch's (in the body); a district's is
+            // InvalidDistrict's and a year's InvalidYear's. Do not report
+            // any of them twice.
             if name != "filer_committee_id_number"
+                && !is_district_field(spec)
+                && !is_year_field(spec)
                 && let Some(pattern) = spec.pattern
                 && let Some(re) = PATTERNS.get(pattern)
                 && !re.is_match(value)
@@ -1168,10 +1582,18 @@ impl Checker<'_> {
                 Rule::RecommendedFieldEmpty,
                 parse_condition(spec.rule, Condition::Always),
             ),
-            Requirement::Conditional(text) => (
-                Rule::ConditionallyRequiredFieldEmpty,
-                parse_condition(Some(text), Condition::Unknown),
-            ),
+            Requirement::Conditional(text) => {
+                // The condition is usually in the REQUIRED cell ("X (warn if
+                // REPORT CODE=[12?|30?])"); when that cell says only
+                // "Conditional Warning", the RULE cell carries it ("Used if
+                // CCM, PAC or PTY" on Schedule A's donor committee columns),
+                // and WebCheck enforces it from there.
+                let mut condition = parse_condition(Some(text), Condition::Unknown);
+                if condition == Condition::Unknown {
+                    condition = parse_condition(spec.rule, Condition::Unknown);
+                }
+                (Rule::ConditionallyRequiredFieldEmpty, condition)
+            }
         };
         if condition == Condition::Always
             && let Some(implied) = implied_condition(line, name)
@@ -1197,18 +1619,23 @@ impl Checker<'_> {
         };
         let mut finding =
             Finding::new(rule, line.line_no, &line.raw_form_type, Some(name), message);
-        // The workbook's requirement levels describe the current format;
-        // earlier formats demonstrably differed (spec 3.x-5.x filings with
-        // blank entity types were accepted). Report, but do not reject.
-        if rule == Rule::RequiredFieldEmpty && !self.current_format() {
-            finding.severity = Severity::Warning;
-        }
+        self.demote_if_superseded(&mut finding);
         self.findings.push(finding);
     }
 
     /// Whether the filing is in the bundled (current) spec version.
     fn current_format(&self) -> bool {
         bundled_version().is_some_and(|v| v == self.filing.version)
+    }
+
+    /// The workbook describes the current format; earlier formats
+    /// demonstrably differed (spec 3.x-5.x filings with blank entity types
+    /// and one-digit districts were accepted). For the rules that say so
+    /// ([`Rule::demoted_on_superseded_format`]), report but do not reject.
+    fn demote_if_superseded(&self, finding: &mut Finding) {
+        if finding.rule.demoted_on_superseded_format() && !self.current_format() {
+            finding.severity = Severity::Warning;
+        }
     }
 
     /// `Some(true)` if the condition holds for this line, `Some(false)` if
@@ -1251,15 +1678,18 @@ impl Checker<'_> {
             }
         }
         if !bad.is_empty() {
-            self.push_line(
+            let mut finding = Finding::new(
                 Rule::IllegalCharacter,
-                line,
+                line.line_no,
+                &line.raw_form_type,
                 Some(name),
                 format!(
                     "Illegal character(s) found in text field: {}",
                     describe_chars(&bad)
                 ),
             );
+            self.demote_if_superseded(&mut finding);
+            self.findings.push(finding);
         }
     }
 
@@ -1311,15 +1741,10 @@ impl Checker<'_> {
             let key = id.to_ascii_uppercase();
             match seen.get(&key) {
                 Some(&first) => {
-                    let field = if line.get("transaction_id").is_some() {
-                        "transaction_id"
-                    } else {
-                        "transaction_id_number"
-                    };
                     self.push_line(
                         Rule::DuplicateTransactionId,
                         line,
-                        Some(field),
+                        Some(transaction_id_field(line)),
                         format!(
                             "Tran ID {id} is NOT UNIQUE - This one is same as other(s) (first used on line {first})"
                         ),
@@ -1332,7 +1757,10 @@ impl Checker<'_> {
         }
 
         for line in &filing.lines {
-            let Some(raw) = line.get("back_reference_tran_id_number") else {
+            let Some((field, raw)) = BACK_REFERENCE_FIELDS
+                .iter()
+                .find_map(|f| line.get(f).map(|raw| (*f, raw)))
+            else {
                 continue;
             };
             let back_ref = effective_value(raw);
@@ -1343,7 +1771,7 @@ impl Checker<'_> {
                 self.push_line(
                     Rule::BackReferenceNotFound,
                     line,
-                    Some("back_reference_tran_id_number"),
+                    Some(field),
                     format!(
                         "Back-Reference TRAN-ID {back_ref} does not match Sched TRAN-ID (no transaction in this filing has that ID)"
                     ),
@@ -1376,7 +1804,7 @@ impl Checker<'_> {
                 ),
             );
         }
-        for (i, text_line) in text.split('\n').enumerate() {
+        for (line_index, text_line) in text.split('\n').enumerate() {
             let mut bad: Vec<char> = Vec::new();
             for c in text_line.chars() {
                 if !is_legal_f99_text_char(c) && !bad.contains(&c) {
@@ -1390,7 +1818,7 @@ impl Checker<'_> {
                     Some("text"),
                     format!(
                         "Illegal character(s) found in text line #{} (Used for F99's): {}",
-                        i + 1,
+                        line_index.saturating_add(1),
                         describe_chars(&bad)
                     ),
                 );
@@ -1412,8 +1840,8 @@ fn describe_chars(chars: &[char]) -> String {
             }
         })
         .collect();
-    if chars.len() > 3 {
-        parts.push(format!("and {} more", chars.len() - 3));
+    if let Some(more) = chars.len().checked_sub(3).filter(|&n| n > 0) {
+        parts.push(format!("and {more} more"));
     }
     parts.join(", ")
 }
@@ -1590,6 +2018,11 @@ mod tests {
             EntityIn(&["CCM", "PAC", "PTY"])
         );
         assert_eq!(
+            p("Used if CCM, PAC or PTY"),
+            EntityIn(&["CCM", "PAC", "PTY"])
+        );
+        assert_eq!(p("Used if CAN or CCM"), EntityIn(&["CAN", "CCM"]));
+        assert_eq!(
             p("Warning if Code is missing;\nError if Coded incorrectly."),
             Always
         );
@@ -1693,7 +2126,7 @@ mod tests {
     }
 
     #[test]
-    fn non_amendment_with_report_id_is_inconsistent_warning() {
+    fn non_amendment_with_report_id_is_inconsistent_and_fails() {
         let text = clean_text().replacen(
             "8.5.1.0(f34)\u{1c}\u{1c}\u{1c}",
             "8.5.1.0(f34)\u{1c}FEC-1234567\u{1c}1\u{1c}",
@@ -1701,14 +2134,19 @@ mod tests {
         );
         let v = parse(&text).validate();
         assert_eq!(rules(&v), [Rule::HeaderInconsistentWithAmendmentStatus]);
-        assert!(v.is_acceptable());
-        // FECfile writes amendment number 0 on originals; the FEC accepts it.
-        let text = clean_text().replacen(
-            "8.5.1.0(f34)\u{1c}\u{1c}\u{1c}",
-            "8.5.1.0(f34)\u{1c}\u{1c}0\u{1c}",
-            1,
-        );
-        assert!(parse(&text).validate().is_empty());
+        // FEC failing #8: the header says amended, the form says new.
+        assert!(!v.is_acceptable());
+        assert_eq!(v.findings[0].severity, Severity::Error);
+        // FECfile writes amendment number 0 (or 000) on originals; the FEC
+        // accepts it, so neither is a finding.
+        for zero in ["0", "000"] {
+            let text = clean_text().replacen(
+                "8.5.1.0(f34)\u{1c}\u{1c}\u{1c}",
+                &format!("8.5.1.0(f34)\u{1c}\u{1c}{zero}\u{1c}"),
+                1,
+            );
+            assert!(parse(&text).validate().is_empty(), "{zero}");
+        }
     }
 
     #[test]
@@ -1959,12 +2397,61 @@ mod tests {
             v.findings
                 .iter()
                 .any(|f| f.rule == Rule::ConditionallyRequiredFieldEmpty
-                    && f.field == Some("date_of_election")),
+                    && f.field == Some("election_date")),
             "{v}"
         );
         // Quarterly: no such warning.
         let v = parse(&clean_text()).validate();
         assert!(!has(&v, Rule::ConditionallyRequiredFieldEmpty));
+    }
+
+    /// Schedule A's donor columns say only "Conditional Warning" in the
+    /// REQUIRED cell; the condition ("Used if CCM, PAC or PTY", "Used if
+    /// CAN or CCM") is in the RULE cell, and WebCheck enforces it: on the
+    /// Georgia Republican Party fixture it flagged a `PTY` line's blank
+    /// donor committee id and a `CCM` line's blank candidate id and last
+    /// name.
+    #[test]
+    fn donor_committee_and_candidate_columns_follow_the_rule_cell() {
+        let fields = |pairs: &[(&str, &str)]| -> Vec<&'static str> {
+            with_lines(vec![sched_a(pairs)])
+                .validate()
+                .findings
+                .iter()
+                .filter(|f| f.rule == Rule::ConditionallyRequiredFieldEmpty)
+                .filter_map(|f| f.field)
+                .collect()
+        };
+        let pty = fields(&[
+            ("entity_type", "PTY"),
+            ("contributor_organization_name", "14TH DISTRICT GOP"),
+            ("contributor_last_name", ""),
+            ("contributor_first_name", ""),
+        ]);
+        assert_eq!(
+            pty,
+            ["donor_committee_fec_id", "donor_committee_name"],
+            "{pty:?}"
+        );
+        let ccm = fields(&[
+            ("entity_type", "CCM"),
+            ("contributor_organization_name", "COLLINS FOR SENATE"),
+            ("contributor_last_name", ""),
+            ("contributor_first_name", ""),
+            ("donor_committee_fec_id", "C00544684"),
+            ("donor_committee_name", "COLLINS FOR SENATE"),
+        ]);
+        assert_eq!(
+            ccm,
+            [
+                "donor_candidate_fec_id",
+                "donor_candidate_last_name",
+                "donor_candidate_office"
+            ],
+            "{ccm:?}"
+        );
+        // An individual owes none of them.
+        assert!(fields(&[]).is_empty());
     }
 
     #[test]
@@ -1989,6 +2476,22 @@ mod tests {
         let quoted = format!("\"{}\"", "X".repeat(30));
         let v = with_lines(vec![sched_a(&[("contributor_last_name", &quoted)])]).validate();
         assert!(!has(&v, Rule::FieldTooLong), "{v}");
+        // AMT-12 bounds the digits: ActBlue's accepted 2280311229.59 (13
+        // characters, 12 digits) is fine; a 13th digit is not, and the
+        // decimal point and sign are never counted.
+        for (amount, ok) in [
+            ("2280311229.59", true),
+            ("-2280311229.59", true),
+            ("999999999999", true),
+            ("1000000000000", false),
+            ("12280311229.59", false),
+        ] {
+            let v = with_lines(vec![sched_a(&[("contribution_amount", amount)])]).validate();
+            assert_eq!(!has(&v, Rule::FieldTooLong), ok, "{amount}: {v}");
+            if !ok {
+                assert!(v.to_string().contains("13 digits"), "{v}");
+            }
+        }
     }
 
     #[test]
@@ -2054,9 +2557,444 @@ mod tests {
             let v = with_lines(vec![sched_a(&[("contribution_amount", ok)])]).validate();
             assert!(!has(&v, Rule::InvalidAmount), "{ok}: {v}");
         }
+        // A district is reported once, under its own rule (#39), not as
+        // NonNumeric or as a pattern mismatch.
         let v = with_lines(vec![sched_a(&[("donor_candidate_district", "1A")])]).validate();
-        assert!(has(&v, Rule::NonNumeric), "{v}");
+        assert_eq!(rules(&v), [Rule::InvalidDistrict], "{v}");
         assert_eq!(Rule::NonNumeric.severity(), Severity::Error);
+
+        // Schedule H2's allocation percentages are NUM-5 and written 0.49:
+        // a decimal point is numeric, a letter or a second point is not.
+        for (value, ok) in [
+            ("0.49", true),
+            (".51", true),
+            ("49", true),
+            ("49%", false),
+            ("0.4.9", false),
+            (".", false),
+        ] {
+            let v = with_lines(vec![h2(&[("federal_percentage", value)])]).validate();
+            assert_eq!(!has(&v, Rule::NonNumeric), ok, "{value}: {v}");
+        }
+        assert!(is_numeric_value("0"));
+        assert!(!is_numeric_value(""));
+        assert!(!is_numeric_value("-1"));
+    }
+
+    /// A Schedule H2 allocation-ratio line with the given overrides.
+    fn h2(pairs: &[(&str, &str)]) -> ParsedLine {
+        let mut all = vec![
+            ("form_type", "H2"),
+            ("filer_committee_id_number", "C00123456"),
+            ("transaction_id", "H2.1"),
+            ("activity_event_name", "SPRING GALA"),
+            ("direct_fundraising", "X"),
+            ("ratio_code", "N"),
+            ("federal_percentage", "0.60"),
+            ("nonfederal_percentage", "0.40"),
+        ];
+        for (k, v) in pairs {
+            if let Some(slot) = all.iter_mut().find(|(name, _)| name == k) {
+                slot.1 = v;
+            } else {
+                all.push((k, v));
+            }
+        }
+        ParsedLine::from_pairs(Table::H2, v85(), 3, all).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    #[test]
+    fn year_fields_must_be_ccyy() {
+        // F3X's Column B "year for above" is the NUM-4 column on the cover.
+        for (value, ok) in [
+            ("2026", true),
+            ("26", false),
+            ("202", false),
+            ("2O26", false),
+        ] {
+            let mut filing = parse(&clean_text());
+            filing.summary.set("col_b_year", value).unwrap();
+            let v = filing.validate();
+            assert_eq!(!has(&v, Rule::InvalidYear), ok, "{value}: {v}");
+            if !ok {
+                let f = v
+                    .findings
+                    .iter()
+                    .find(|f| f.rule == Rule::InvalidYear)
+                    .unwrap();
+                assert_eq!(f.severity, Severity::Error);
+                assert!(f.message.contains("Invalid Year (CCYY)"), "{f}");
+                // Reported once: not also as NonNumeric or a pattern mismatch.
+                assert_eq!(rules(&v), [Rule::InvalidYear], "{v}");
+            }
+        }
+    }
+
+    #[test]
+    fn district_must_be_two_digits_and_is_demoted_on_old_formats() {
+        for (value, ok) in [
+            ("08", true),
+            ("12", true),
+            ("00", true),
+            ("8", false),
+            ("123", false),
+            ("AL", false),
+        ] {
+            let v = with_lines(vec![sched_a(&[("donor_candidate_district", value)])]).validate();
+            assert_eq!(!has(&v, Rule::InvalidDistrict), ok, "{value}: {v}");
+            if !ok {
+                let f = v
+                    .findings
+                    .iter()
+                    .find(|f| f.rule == Rule::InvalidDistrict)
+                    .unwrap();
+                assert_eq!(f.severity, Severity::Error);
+                assert!(
+                    f.message
+                        .contains(&format!("District \"{value}\" is not 2-digit")),
+                    "{f}"
+                );
+            }
+        }
+        // Schedule E's district is A/N-2 in the workbook; the marker is the
+        // `01 ... 99` value reference, so it is checked the same way.
+        assert!(is_district_field(
+            Table::SchE.spec("candidate_district").unwrap()
+        ));
+        assert!(!is_district_field(Table::F5.spec("report_type").unwrap()));
+        // A 2001 filing with one-digit districts was accepted: warning there.
+        let mut filing = parse(&clean_text().replacen("\u{1c}8.5\u{1c}", "\u{1c}8.4\u{1c}", 1));
+        filing.lines = vec![sched_a(&[("donor_candidate_district", "8")])];
+        let v = filing.validate();
+        let f = v
+            .findings
+            .iter()
+            .find(|f| f.rule == Rule::InvalidDistrict)
+            .unwrap();
+        assert_eq!(f.severity, Severity::Warning);
+        assert!(Rule::InvalidDistrict.demoted_on_superseded_format());
+        assert!(!Rule::InvalidYear.demoted_on_superseded_format());
+    }
+
+    #[test]
+    fn zip_codes_are_five_or_nine_digits() {
+        for (value, ok) in [
+            ("22201", true),
+            ("222011234", true),
+            ("2220", false),
+            ("2220-123", false),
+            ("SW1A 1AA", false),
+        ] {
+            let v = with_lines(vec![sched_a(&[("contributor_zip_code", value)])]).validate();
+            assert_eq!(!has(&v, Rule::InvalidZipCode), ok, "{value}: {v}");
+            if !ok {
+                assert_eq!(rules(&v), [Rule::InvalidZipCode], "{value}: {v}");
+                let f = &v.findings[0];
+                assert_eq!(f.severity, Severity::Warning);
+                assert!(f.message.contains(&format!("Zip = {value}")), "{f}");
+                assert!(v.is_acceptable());
+            }
+        }
+        // Over nine characters is the length rule's job as well.
+        let v = with_lines(vec![sched_a(&[("contributor_zip_code", "22201-1234")])]).validate();
+        assert!(
+            has(&v, Rule::InvalidZipCode) && has(&v, Rule::FieldTooLong),
+            "{v}"
+        );
+    }
+
+    #[test]
+    fn office_codes_are_h_s_p() {
+        for (value, ok) in [
+            ("H", true),
+            ("S", true),
+            ("P", true),
+            ("h", true),
+            ("X", false),
+            ("HS", false),
+        ] {
+            let v = with_lines(vec![sched_a(&[
+                ("entity_type", "CAN"),
+                ("donor_candidate_office", value),
+            ])])
+            .validate();
+            assert_eq!(!has(&v, Rule::InvalidOfficeCode), ok, "{value}: {v}");
+        }
+        let v = with_lines(vec![sched_a(&[("donor_candidate_office", "X")])]).validate();
+        let f = v
+            .findings
+            .iter()
+            .find(|f| f.rule == Rule::InvalidOfficeCode)
+            .unwrap();
+        assert_eq!(f.severity, Severity::Warning);
+        assert!(
+            f.message
+                .contains("Office Code \"X\" Invalid (Valid Codes: H, S, P)"),
+            "{f}"
+        );
+        // Form 6's office column carries the row-shifted `Edit: ST`; the
+        // `H,S,P` value reference still identifies it.
+        assert!(is_office_field(Table::F6.spec("candidate_office").unwrap()));
+        assert!(!is_office_field(
+            Table::SchA.spec("contributor_state").unwrap()
+        ));
+    }
+
+    #[test]
+    fn phone_numbers_are_ten_digits() {
+        let f1 = |phone: &str| {
+            let mut filing = parse(&clean_text());
+            filing.lines.clear();
+            filing.summary = ParsedLine::from_pairs(
+                Table::F1,
+                v85(),
+                2,
+                [
+                    ("form_type", "F1N"),
+                    ("filer_committee_id_number", "C00123456"),
+                    ("treasurer_telephone", phone),
+                ],
+            )
+            .unwrap();
+            filing.validate()
+        };
+        for (value, ok) in [
+            ("2025551234", true),
+            ("5551234", false),
+            ("202-555-1234", false),
+            ("(202) 555-1234", false),
+        ] {
+            let v = f1(value);
+            assert_eq!(!has(&v, Rule::InvalidPhoneNumber), ok, "{value}: {v}");
+            // Reported once, not also as NonNumeric.
+            assert!(!has(&v, Rule::NonNumeric), "{value}: {v}");
+        }
+        let f = f1("5551234");
+        let f = f
+            .findings
+            .iter()
+            .find(|f| f.rule == Rule::InvalidPhoneNumber)
+            .unwrap();
+        assert_eq!(f.severity, Severity::Warning);
+        assert!(
+            f.message
+                .contains("Invalid Area Code/Phone Number: 5551234"),
+            "{f}"
+        );
+    }
+
+    #[test]
+    fn election_codes_are_a_letter_and_a_year() {
+        for (value, ok) in [
+            ("P2026", true),
+            ("G2026", true),
+            ("o2026", true),
+            ("P", false),
+            ("2026", false),
+            ("X2026", false),
+            ("P26", false),
+        ] {
+            assert_eq!(is_election_code(value), ok, "{value}");
+            let v = with_lines(vec![sched_a(&[("election_code", value)])]).validate();
+            assert_eq!(!has(&v, Rule::InvalidElectionCode), ok, "{value}: {v}");
+        }
+        let v = with_lines(vec![sched_a(&[("election_code", "P")])]).validate();
+        let f = v
+            .findings
+            .iter()
+            .find(|f| f.rule == Rule::InvalidElectionCode)
+            .unwrap();
+        assert_eq!(f.severity, Severity::Warning);
+        assert!(f.message.contains("Election Code invalid: P"), "{f}");
+        assert!(is_election_code_field(
+            Table::F3X.spec("election_code").unwrap()
+        ));
+        assert!(!is_election_code_field(
+            Table::F3X.spec("report_code").unwrap()
+        ));
+    }
+
+    #[test]
+    fn checkboxes_hold_x() {
+        for (value, ok) in [("X", true), ("x", true), ("Y", false), ("1", false)] {
+            let mut filing = parse(&clean_text());
+            filing.summary.set("change_of_address", value).unwrap();
+            let v = filing.validate();
+            assert_eq!(!has(&v, Rule::InvalidCheckbox), ok, "{value}: {v}");
+        }
+        let mut filing = parse(&clean_text());
+        filing.summary.set("qualified_committee", "Y").unwrap();
+        let v = filing.validate();
+        let f = v
+            .findings
+            .iter()
+            .find(|f| f.rule == Rule::InvalidCheckbox)
+            .unwrap();
+        assert_eq!(f.severity, Severity::Warning);
+        assert!(
+            f.message
+                .contains("Value \"Y\" is Invalid for \"Checkbox=X\" field"),
+            "{f}"
+        );
+        // Form 1M's committee type has `X=State Pty; N=Other`: a code list,
+        // not a check-box.
+        assert!(!is_checkbox_field(
+            Table::F1M.spec("committee_type").unwrap()
+        ));
+        assert!(is_checkbox_field(
+            Table::F3X.spec("change_of_address").unwrap()
+        ));
+    }
+
+    #[test]
+    fn h3_event_types_come_from_the_workbook_and_are_demoted_on_old_formats() {
+        let h3 = |event: &str| {
+            ParsedLine::from_pairs(
+                Table::H3,
+                v85(),
+                3,
+                [
+                    ("form_type", "H3"),
+                    ("filer_committee_id_number", "C00123456"),
+                    ("transaction_id", "H3.1"),
+                    ("back_reference_tran_id", "H3.1"),
+                    ("account_name", "STATE CHECKING"),
+                    ("event_type", event),
+                    ("receipt_date", "20260504"),
+                    ("total_amount_transferred", "100.00"),
+                    ("transferred_amount", "100.00"),
+                ],
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            enumerated_codes(
+                Table::H3
+                    .spec("event_type")
+                    .unwrap()
+                    .value_reference
+                    .unwrap()
+            ),
+            ["AD", "GV", "DF", "DC", "EA", "PC"]
+        );
+        assert!(enumerated_codes("01, ..., 99").is_empty());
+        for (value, ok) in [
+            ("AD", true),
+            ("df", true),
+            ("PC", true),
+            ("A", false),
+            ("XX", false),
+        ] {
+            let v = with_lines(vec![h3(value)]).validate();
+            assert_eq!(!has(&v, Rule::InvalidEventType), ok, "{value}: {v}");
+        }
+        let v = with_lines(vec![h3("A")]).validate();
+        let f = v
+            .findings
+            .iter()
+            .find(|f| f.rule == Rule::InvalidEventType)
+            .unwrap();
+        assert_eq!(f.severity, Severity::Error);
+        assert!(
+            f.message
+                .contains("Event Type {A} Invalid - OK Vals: [AD|GV|DF|DC|EA|PC] (H3)"),
+            "{f}"
+        );
+        // Pre-BCRA filings used one-letter codes; the FEC accepted them.
+        let mut filing = parse(&clean_text().replacen("\u{1c}8.5\u{1c}", "\u{1c}8.4\u{1c}", 1));
+        filing.lines = vec![h3("A")];
+        let v = filing.validate();
+        let f = v
+            .findings
+            .iter()
+            .find(|f| f.rule == Rule::InvalidEventType)
+            .unwrap();
+        assert_eq!(f.severity, Severity::Warning);
+    }
+
+    #[test]
+    fn address_in_second_line_only() {
+        let v = with_lines(vec![sched_a(&[
+            ("contributor_street_1", ""),
+            ("contributor_street_2", "1 ELM ST"),
+        ])])
+        .validate();
+        let f = v
+            .findings
+            .iter()
+            .find(|f| f.rule == Rule::AddressInSecondLine)
+            .unwrap_or_else(|| panic!("{v}"));
+        assert_eq!(f.severity, Severity::Warning);
+        assert_eq!(f.field, Some("contributor_street_2"));
+        assert!(
+            f.message
+                .contains("Single-line Address NOT in 1st delimited field"),
+            "{f}"
+        );
+        // Both lines filled, or only the first: fine.
+        let v = with_lines(vec![sched_a(&[("contributor_street_2", "APT 4")])]).validate();
+        assert!(!has(&v, Rule::AddressInSecondLine), "{v}");
+        let v = with_lines(vec![sched_a(&[])]).validate();
+        assert!(!has(&v, Rule::AddressInSecondLine), "{v}");
+        assert_eq!(
+            street_1_sibling("payee_street_2").as_deref(),
+            Some("payee_street_1")
+        );
+        assert_eq!(street_1_sibling("payee_street_1"), None);
+    }
+
+    #[test]
+    fn wrong_report_code_is_an_error_where_the_workbook_says_so() {
+        // F24: "Error if Code is missing; Error if Coded incorrectly."
+        let mut filing = parse(&clean_text());
+        filing.lines.clear();
+        filing.summary = ParsedLine::from_pairs(
+            Table::F24,
+            v85(),
+            2,
+            [
+                ("form_type", "F24N"),
+                ("filer_committee_id_number", "C00123456"),
+                ("report_type", "72"),
+            ],
+        )
+        .unwrap();
+        let v = filing.validate();
+        let f = v
+            .findings
+            .iter()
+            .find(|f| f.rule == Rule::InvalidAllowedValue)
+            .unwrap();
+        assert_eq!(f.severity, Severity::Error);
+        assert_eq!(Rule::InvalidAllowedValue.severity(), Severity::Warning);
+        assert!(!v.is_acceptable());
+        assert!(wrong_code_is_error(Table::F24.spec("report_type").unwrap()));
+        assert!(!wrong_code_is_error(
+            Table::F1M.spec("committee_type").unwrap()
+        ));
+    }
+
+    #[test]
+    fn illegal_characters_are_demoted_on_old_formats() {
+        let mut filing = parse(&clean_text().replacen("\u{1c}8.5\u{1c}", "\u{1c}8.4\u{1c}", 1));
+        filing.lines = vec![sched_a(&[("contributor_last_name", "GARC\u{cd}A")])];
+        let v = filing.validate();
+        let f = v
+            .findings
+            .iter()
+            .find(|f| f.rule == Rule::IllegalCharacter)
+            .unwrap();
+        assert_eq!(f.severity, Severity::Warning);
+        assert!(v.is_acceptable(), "{v}");
+        let v = with_lines(vec![sched_a(&[("contributor_last_name", "GARC\u{cd}A")])]).validate();
+        assert_eq!(
+            v.findings
+                .iter()
+                .find(|f| f.rule == Rule::IllegalCharacter)
+                .unwrap()
+                .severity,
+            Severity::Error
+        );
     }
 
     #[test]
@@ -2111,19 +3049,21 @@ mod tests {
 
     #[test]
     fn support_oppose_code() {
-        let line = ParsedLine::from_pairs(
-            Table::SchE,
-            v85(),
-            3,
-            [
-                ("form_type", "SE"),
-                ("filer_committee_id_number", "C00123456"),
-                ("transaction_id_number", "E1"),
-                ("support_oppose_code", "X"),
-            ],
-        )
-        .unwrap();
-        let v = with_lines(vec![line]).validate();
+        let sched_e = |code: &str| {
+            ParsedLine::from_pairs(
+                Table::SchE,
+                v85(),
+                3,
+                [
+                    ("form_type", "SE"),
+                    ("filer_committee_id_number", "C00123456"),
+                    ("transaction_id", "E1"),
+                    ("support_oppose_code", code),
+                ],
+            )
+            .unwrap()
+        };
+        let v = with_lines(vec![sched_e("X")]).validate();
         assert!(has(&v, Rule::InvalidSupportOpposeCode), "{v}");
         let f = v
             .findings
@@ -2132,6 +3072,10 @@ mod tests {
             .unwrap();
         assert_eq!(f.severity, Severity::Warning);
         assert!(f.message.contains("Sup/Opp Code \"X\" Invalid"));
+        for ok in ["S", "O", "s"] {
+            let v = with_lines(vec![sched_e(ok)]).validate();
+            assert!(!has(&v, Rule::InvalidSupportOpposeCode), "{ok}: {v}");
+        }
     }
 
     // -- Cross-line rules ---------------------------------------------------
@@ -2147,7 +3091,7 @@ mod tests {
             [
                 ("form_type", "SB21B"),
                 ("filer_committee_id_number", "C00123456"),
-                ("transaction_id_number", "ABC"),
+                ("transaction_id", "ABC"),
                 ("entity_type", "ORG"),
                 ("payee_organization_name", "ACME"),
                 ("payee_street_1", "1 ELM"),
@@ -2170,7 +3114,7 @@ mod tests {
         assert_eq!(dups[0].line_no, 4);
         assert_eq!(dups[0].field, Some("transaction_id"));
         assert_eq!(dups[1].line_no, 5);
-        assert_eq!(dups[1].field, Some("transaction_id_number"));
+        assert_eq!(dups[1].field, Some("transaction_id"));
         assert!(dups[0].message.contains("first used on line 3"));
     }
 
@@ -2178,7 +3122,7 @@ mod tests {
     fn back_reference_must_resolve() {
         let mut memo = sched_a(&[
             ("transaction_id", "M1"),
-            ("back_reference_tran_id_number", "T1"),
+            ("back_reference_tran_id", "T1"),
             ("back_reference_sched_name", "SA11AI"),
             ("memo_code", "X"),
         ]);
@@ -2186,7 +3130,7 @@ mod tests {
         let v = with_lines(vec![sched_a(&[]), memo.clone()]).validate();
         assert!(!has(&v, Rule::BackReferenceNotFound), "{v}");
 
-        memo.set("back_reference_tran_id_number", "NOPE").unwrap();
+        memo.set("back_reference_tran_id", "NOPE").unwrap();
         let v = with_lines(vec![sched_a(&[]), memo]).validate();
         let f = v
             .findings

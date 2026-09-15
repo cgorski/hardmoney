@@ -34,3 +34,4 @@ ballot_local_candidates,,,,,,,23,"9. LOCAL CANDIDATES  BLANK, 1 OR 2",23,"9. LOC
 extra_nonfederal_point,,,,,,,24,10. EXTRA NON-FED POINT  BLANK OR 1,24,10. EXTRA NON-FED POINT  BLANK OR 1
 subtotal,,,,,,,25,11. SUBTOTAL,25,11. SUBTOTAL
 total_points,,,,,,,26,12. TOTAL POINTS,26,12. TOTAL POINTS
+amended_cd,,,,,,,,,28,AMENDED CD

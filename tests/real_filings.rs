@@ -267,7 +267,7 @@ fn f3a_second_sample_has_schedule_d_debt_lines() {
 /// `F3XA_2011821.fec` is the other structurally rich fixture: Schedule A,
 /// Schedule B (memo variant `SB21B`), Schedule D debts, Schedule E
 /// independent expenditures, and three delimited `TEXT` records with
-/// `back_reference_tran_id_number` pointers -- distinct from (and not to be
+/// `back_reference_tran_id` pointers -- distinct from (and not to be
 /// confused with) the bracketed `[BEGINTEXT]` block format used by F99.
 #[test]
 fn f3xa_covers_schedule_e_and_delimited_text_records() {
@@ -298,7 +298,7 @@ fn f3xa_covers_schedule_e_and_delimited_text_records() {
     assert_eq!(text_lines.len(), 3);
     assert!(
         text_lines[0]
-            .get("back_reference_tran_id_number")
+            .get("back_reference_tran_id")
             .map(|s| !s.is_empty())
             .unwrap_or(false)
     );
@@ -482,7 +482,7 @@ fn form_2_candidate_registration_with_f2s_authorized_committees_parses() {
     let f2s: Vec<_> = filing.lines_for(Table::F2S).collect();
     assert_eq!(f2s.len(), 3);
     for line in &f2s {
-        assert_eq!(line.get("filer_candidate_id_number"), Some("S6IL00458"));
+        assert_eq!(line.get("candidate_id_number"), Some("S6IL00458"));
         assert!(
             line.get("authorized_committee_id_number")
                 .is_some_and(|id| id.starts_with('C') && id.len() == 9),

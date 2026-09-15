@@ -423,13 +423,10 @@ fn body_hint(snippet: &str) -> String {
 pub fn base64_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     // `& 0x3f` keeps the index below 64, so the `get` never misses; the
-    // fallback only exists to keep the function panic-free by construction.
+    // fallbacks only exist to keep the function panic-free by construction.
     let sextet = |n: u32, shift: u32| {
-        char::from(
-            *ALPHABET
-                .get(((n >> shift) & 0x3f) as usize)
-                .unwrap_or(&b'='),
-        )
+        let index = usize::try_from((n >> shift) & 0x3f).unwrap_or(usize::MAX);
+        ALPHABET.get(index).map_or('=', |&b| char::from(b))
     };
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     let (chunks, remainder) = bytes.as_chunks::<3>();
@@ -640,7 +637,8 @@ impl fmt::Display for OracleFinding {
 pub struct OracleReport {
     /// The response body as received (HTML fragment or text).
     pub raw: String,
-    /// WebCheck's verdict word: `SUCCESS`, `ERRORS`, `WARNINGS`, ...
+    /// WebCheck's verdict word: `SUCCESS` (no messages), `WARNINGS` (only
+    /// warnings), `ERRORS` (at least one failing message), ...
     pub result: Option<String>,
     /// The error count WebCheck itself stated (`errorsCount`), so a
     /// finding this parser missed is detectable.
@@ -655,12 +653,15 @@ pub struct OracleReport {
 }
 
 impl OracleReport {
-    /// True when WebCheck said `SUCCESS`, or (with no verdict word) when
-    /// no error-severity finding was parsed.
+    /// True when the FEC would accept the filing: WebCheck said `SUCCESS`
+    /// or `WARNINGS` (a warning "will not prevent the filing from being
+    /// processed", in the FEC's words), or -- with no verdict word -- no
+    /// error-severity finding was parsed. Only `ERRORS` (or any other
+    /// verdict) is a rejection.
     #[must_use]
     pub fn is_acceptable(&self) -> bool {
         match self.result.as_deref() {
-            Some(r) => r.eq_ignore_ascii_case("SUCCESS"),
+            Some(r) => r.eq_ignore_ascii_case("SUCCESS") || r.eq_ignore_ascii_case("WARNINGS"),
             None => self.error_count() == 0,
         }
     }
@@ -710,6 +711,7 @@ impl fmt::Display for OracleReport {
         }
         let verdict = match self.result.as_deref() {
             Some(r) if r.eq_ignore_ascii_case("SUCCESS") => "ACCEPTABLE".to_string(),
+            Some(r) if self.is_acceptable() => format!("ACCEPTABLE ({r})"),
             Some(r) => format!("NOT ACCEPTABLE ({r})"),
             None if self.error_count() == 0 => "ACCEPTABLE".to_string(),
             None => "NOT ACCEPTABLE".to_string(),
@@ -777,7 +779,9 @@ fn html_unescape(s: &str) -> String {
             out.push_str(after);
             return out;
         };
-        let entity = &after[1..end];
+        // `after` starts with the `&` just found and `;` is ASCII, so
+        // `1..end` and `end + 1..` are in bounds and on char boundaries.
+        let entity = after.get(1..end).unwrap_or("");
         let decoded = match entity {
             "nbsp" => Some(' '),
             "amp" => Some('&'),
@@ -796,11 +800,11 @@ fn html_unescape(s: &str) -> String {
         match decoded {
             Some(c) if end < 12 => {
                 out.push(c);
-                rest = &after[end + 1..];
+                rest = after.get(end + 1..).unwrap_or("");
             }
             _ => {
                 out.push('&');
-                rest = &after[1..];
+                rest = after.get(1..).unwrap_or("");
             }
         }
     }
@@ -828,12 +832,12 @@ fn capture<'a>(re: &'a Option<Regex>, text: &'a str) -> Option<&'a str> {
 /// `id="<next>"` (or the end).
 fn section<'a>(html: &'a str, section: &str, next: Option<&str>) -> Option<&'a str> {
     let marker = format!("id=\"{section}\"");
-    let start = html.find(&marker)? + marker.len();
-    let rest = &html[start..];
+    let start = html.find(&marker)?.saturating_add(marker.len());
+    let rest = html.get(start..)?;
     let end = next
         .and_then(|n| rest.find(&format!("id=\"{n}\"")))
         .unwrap_or(rest.len());
-    Some(&rest[..end])
+    rest.get(..end)
 }
 
 /// Groups the text cells of one section into findings.
@@ -1001,13 +1005,13 @@ fn parse_text_line(line: &str) -> OracleFinding {
             }
         });
         if let Some(m) = caps.get(0) {
-            rest = &rest[m.end()..];
+            rest = rest.get(m.end()..).unwrap_or("");
         }
     }
     if let Some(caps) = LINE_PREFIX.as_ref().and_then(|re| re.captures(rest)) {
         f.line_no = caps.get(1).and_then(|m| m.as_str().parse().ok());
         if let Some(m) = caps.get(0) {
-            rest = &rest[m.end()..];
+            rest = rest.get(m.end()..).unwrap_or("");
         }
     }
     f.message = rest.trim().to_string();
@@ -1079,28 +1083,33 @@ pub fn parse_soap_response(body: &str) -> Result<SoapReturn, WebCheckError> {
 
 /// The text content of the first `<name>` or `<prefix:name>` element in
 /// `xml`, tags of any nested elements included verbatim.
+///
+/// Every slice below starts or ends at an index `find` returned for an
+/// ASCII needle on the same string (or one past it), so each is in bounds
+/// and on a character boundary; `get` is used regardless so a mistake
+/// would surface as `None`, never a panic.
 fn element_text(xml: &str, name: &str) -> Option<String> {
     let mut search = 0;
-    while let Some(rel) = xml[search..].find('<') {
-        let open = search + rel;
-        let after = &xml[open + 1..];
+    while let Some(rel) = xml.get(search..)?.find('<') {
+        let open = search.saturating_add(rel);
+        let after = xml.get(open.saturating_add(1)..)?;
         let tag_end = after.find(['>', ' ', '/'])?;
-        let tag = &after[..tag_end];
+        let tag = after.get(..tag_end)?;
         let local = tag.rsplit(':').next().unwrap_or(tag);
         if local == name && !tag.starts_with('/') && !tag.starts_with('?') && !tag.starts_with('!')
         {
-            let content_start = open + 1 + after.find('>')? + 1;
+            let content_start = after.find('>')?.saturating_add(1);
             let close_a = format!("</{tag}>");
             let close_b = format!("</{name}>");
-            let rest = &xml[content_start..];
+            let rest = after.get(content_start..)?;
             let end = rest
                 .find(&close_a)
                 .into_iter()
                 .chain(rest.find(&close_b))
                 .min()?;
-            return Some(rest[..end].to_string());
+            return rest.get(..end).map(str::to_string);
         }
-        search = open + 1;
+        search = open.saturating_add(1);
     }
     None
 }
@@ -1144,16 +1153,16 @@ fn json_scalar_field(json: &str, key: &str) -> Option<String> {
     let end = value
         .find([',', '}', ' ', '\n', '\r', '\t'])
         .unwrap_or(value.len());
-    Some(value[..end].to_string())
+    value.get(..end).map(str::to_string)
 }
 
 /// The text of `json` from the start of `key`'s value.
 fn json_raw_value<'a>(json: &'a str, key: &str) -> Option<&'a str> {
     let needle = format!("\"{key}\"");
     let mut from = 0;
-    while let Some(rel) = json[from..].find(&needle) {
-        let after_key = from + rel + needle.len();
-        let rest = json[after_key..].trim_start();
+    while let Some(rel) = json.get(from..)?.find(&needle) {
+        let after_key = from.saturating_add(rel).saturating_add(needle.len());
+        let rest = json.get(after_key..)?.trim_start();
         if let Some(value) = rest.strip_prefix(':') {
             return Some(value.trim_start());
         }
@@ -1247,6 +1256,10 @@ pub fn live_alternates(rule: Rule) -> &'static [&'static str] {
         // tests/fixtures/invalid/bad_dates_and_amounts.fec:
         // "$5,500.00 not a Valid Amount of Expenditure value".
         Rule::InvalidAmount => &["____ not a Valid {field} value"],
+        // tests/fixtures/F3A_2004471.fec: a blank payee state -- an
+        // `X (warning)` column in the workbook -- comes back at warning
+        // severity but worded like the failing message #1-#4.
+        Rule::RecommendedFieldEmpty => &["is Required, but field is Empty"],
         // tests/fixtures/invalid/bad_filer_id.fec (an eight-character
         // committee id on an F3XA cover): the same bytes get the published
         // wording on some submissions and this Form 5 message on others --

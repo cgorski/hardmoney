@@ -116,7 +116,114 @@ Section 4(b) requires stating changes):
       upstream table simply never claimed 8.x. Schedule I was dropped by
       the FEC in spec 8.5.
 
-Tables authored by hardmoney (not derived from fech-sources):
+  The following were found by comparing hardmoney's parse of 141 real
+  filings, field by field, against the independently maintained `fecfile`
+  Python library (tests/oracle_fecfile.py) and then checking every
+  disagreement against the FEC's per-version column listings
+  (data/fec-csv-sources/headers/*.csv) and the v8.5 specification
+  workbook. Details and evidence: tests/fixtures/ORACLE_NOTES.md.
+
+  SchC2.csv (Schedule C-2, loan guarantors), spec 3.x-5.x buckets:
+    - Upstream listed a TRANSACTION ID NUMBER at column 3 and shifted
+      every following field right by one. The FEC's 3.x and 5.x listings
+      (headers/3.csv, headers/5.2.csv) have no such column: BACK REFERENCE
+      TRAN ID is column 3, IND/NAME 4, STREET 1-2 5-6, CITY 7, STATE 8,
+      ZIP 9, INDEMP 10, INDOCC 11, AMOUNT GUARANTEED BALANCE 12. Every
+      guarantor field in those buckets was being read from the column to
+      its right. Corrected; `transaction_id` is now absent before 6.1, as
+      it is on the parallel Schedule C-1 table. The 5.x AMENDED CD column
+      (13) is named `amended_cd`.
+
+  F5.csv (Form 5, independent expenditures by non-committees):
+    - The `^8.0|7.0|6.4|6.3|6.2` bucket did not claim 6.1, so every 6.1
+      Form 5 failed with "no column layout". headers/6.1.csv is identical
+      to headers/6.2.csv for F5; the bucket now includes 6.1.
+
+  F3Z.csv (Form 3Z, consolidated candidate-committee report):
+    - Upstream covered 6.4-8.5 only. The FEC lists F3Z with the same 36
+      columns in every electronic version from 3.00 on (headers/3.csv,
+      5.0-5.3, 6.1-6.3 differ from 6.4 only in label wording); the bucket
+      now covers 3.x-8.5.
+
+  F3L.csv (Form 3L, bundled contributions report):
+    - Column 14, STATE OF ELECTION (A-2, conditionally required), was
+      unnamed in every version, so the field could not be read or written.
+      Named `state_of_election`, the canonical name F3/F3X/F3P use for the
+      same field. It is the only column of the FEC's v8.5 workbook that
+      hardmoney's 8.5 layouts did not name (asserted by
+      tests/parser_oracle.rs).
+
+  amended_cd in spec 3.x-5.x buckets:
+    - The FEC's 3.x-5.2 listings carry an AMENDED CD (SchL: AMENDED CODE)
+      column near the end of most record types, which 5.3 relabels SPACE
+      HOLDER. Upstream named it `amended_cd` on Schedule A/B/H4/I and
+      Form 8/91/105 but left it unnamed elsewhere, and real 3.00 filings
+      carry values there (`A` on an H1 line, `N` on Schedule D lines in
+      the audit corpus), which hardmoney then dropped on a round trip.
+      Named `amended_cd` at the FEC's column in the 3.x/5.x buckets of
+      F3P31 (31), F56 (26), F57 (31, 5.x; 3.x already had it), F65 (26),
+      F76 (15), F92 (33), F93 (30), F94 (10), SchC (25), SchC1 (41, 5.x),
+      SchC2 (13, 5.x), SchD (27), SchE (36), SchF (36), H1 (28, 3.x),
+      H2 (10), H3 (10), H5 (10), H6 (38), SchL (40), TEXT (5, 5.x). No
+      existing field occupied any of these columns.
+
+    Vocabulary (hardmoney 3.0; scripts/rename_canonical.py holds the full
+    map and applies it). The upstream tables spelled the same concept
+    differently from one table to the next. 159 canonical names on 39
+    tables were renamed so that each concept has one spelling everywhere;
+    no column position, label, or version bucket changed. The families:
+      - transaction id: `transaction_id_number` -> `transaction_id` on
+        F132, F133, F3P31, F57, H4, H6, SchB, SchC, SchC1, SchC2, SchD,
+        SchE, SchF, SchI, SchL, TEXT (SchI's 3.x/5.x `transaction_id` row
+        and its 6.x-8.4 `transaction_id_number` row now share one name).
+      - back reference: `back_reference_tran_id_number` ->
+        `back_reference_tran_id` on all 16 tables that carry it;
+        TEXT `back_reference_sched_form_name` -> `back_reference_sched_name`.
+      - memo: `memo_text_description` -> `memo_text` on F132, F133, F3P31,
+        SchA, SchB, SchC, SchE, SchF.
+      - ZIP: F132/F133 `contributor_zip` -> `contributor_zip_code`.
+      - street: SchA/SchA3L `conduit_street1`/`conduit_street2` ->
+        `conduit_street_1`/`conduit_street_2`.
+      - election date/state: F3P/F3X `date_of_election` -> `election_date`;
+        F5/F7 `election_state` ("STATE OF ELECTION") -> `state_of_election`.
+      - candidate id: F10/F56/F65 `candidate_id`, F3P31/H4/H6/SchD
+        `fec_candidate_id_number`, F2S `filer_candidate_id_number` ->
+        `candidate_id_number`.
+      - committee id: F57/SchE `payee_cmtte_fec_id_number` ->
+        `payee_committee_id_number`; F1S `joint_fund_participant_cmte_type`
+        -> `joint_fund_participant_committee_type`.
+      - names: SchC `lender_candidate_middle_nm` ->
+        `lender_candidate_middle_name`; SchE `ind_name_notary` ->
+        `notary_name`, `ind_name_as_signed` -> `completing_name`.
+      - purpose description: H4/H6 `expenditure_purpose_description` ->
+        `expenditure_purpose_descrip`.
+      - codes: F57 `amended_code` -> `amended_cd`; F5 `report_pgi` ->
+        `election_code`; F92 `transaction_type` -> `transaction_code`.
+      - shared concepts: SchB
+        `reference_to_si_or_sl_system_code_that_identifies_the_account` ->
+        `reference_code`; H3 `event_activity_name` -> `activity_event_name`;
+        F9 `qualified_non_profit` -> `qualified_nonprofit`.
+      - cover pages (F3, F3Z, F3Z1, F3Z2, F3P, F3PZ1, F3PZ2, F3X, F4, SchL):
+        lines whose FEC labels describe the same line now share a name:
+        `col_a_individuals_itemized`, `col_a_individuals_unitemized`,
+        `col_a_individual_contribution_total`,
+        `col_a_political_party_contributions`, `col_a_pac_contributions`,
+        `col_a_candidate_contributions`, `col_a_candidate_loans`,
+        `col_a_offset_to_operating_expenditures`,
+        `col_a_offset_to_fundraising_expenditures`,
+        `col_a_offset_to_legal_expenditures`,
+        `col_a_total_offsets_to_expenditures`, `col_a_transfers_to_authorized`,
+        `col_a_exempt_legal_disbursements`, `col_a_candidate_loan_repayments`,
+        `col_a_other_loan_repayments`, `col_a_total_loan_repayments`,
+        `col_a_total_loan_repayments_made`, `col_a_refunds_to_individuals`,
+        `col_a_refunds_to_party_committees`, `col_a_refunds_to_other_committees`,
+        `col_a_total_refunds`, `col_a_cash_on_hand_beginning_period`,
+        `col_a_cash_on_hand_close_of_period`, `col_a_subtotal`, and their
+        `col_b_` twins; F3P Column B names that disagreed with Column A
+        (17(e), 20(d), 27(a)) and an F4 typo
+        (`col_b_prior_expendiutres_subject_to_limits`) were corrected.
+
+  Tables authored by hardmoney (not derived from fech-sources):
 
   F2S.csv (Form 2 Schedule -- additional authorized committees). Upstream
   has no table for this record type, so F2 filings that carried F2S

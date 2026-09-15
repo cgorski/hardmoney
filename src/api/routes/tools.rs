@@ -13,7 +13,10 @@
 //!
 //! Errors are `{"error": "..."}` like the rest of the API: 400 for a
 //! malformed body or an unparseable filing (the message names the line),
-//! 404 for an unknown table, 413 when the body exceeds the server's cap,
+//! 404 for an unknown table, 413 when the body exceeds the server's cap
+//! (or when a [`Document`] would *write* to more than the cap: a JSON
+//! record is a few bytes but builds a full-width line in memory, so the
+//! sum of the records' layout widths is held to the same limit),
 //! 415 for a JSON route called without `Content-Type: application/json`,
 //! 501 when `fetch` is not compiled in, 502 when the FEC download fails.
 //!
@@ -35,6 +38,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tower_http::limit::RequestBodyLimitLayer;
 
+use crate::parser::form::table_for_form_type;
 use crate::parser::{
     BUNDLED_SPEC_VERSION, FieldSpec, Filing, Header, ParseOptions, ParsedLine, Reconciliation,
     SkippedLine, SpecVersion, Table, Validation,
@@ -267,11 +271,13 @@ pub async fn fetch(Path(filing_id): Path<u64>) -> ToolsError {
 ///
 /// `version` is the spec version every line is laid out with (`"8.5"`).
 /// `summary.fields.form_type` must be the cover line's token as filed
-/// (`F3XN`, not `F3X`). A body line's `form_type`, if blank, defaults to
-/// its table's name. `line_no` is optional; when absent the cover is line
-/// 2 and body lines are numbered from 3, matching a written file. Unknown
-/// keys are ignored, so the output of `POST /tools/parse` can be sent
-/// back unchanged.
+/// (`F3XN`, not `F3X`), and every body line's `fields.form_type` must be
+/// its token as filed too (`SA11AI`, `SB21B`, `TEXT`): a schedule has
+/// many tokens and no default one. A form-type token that belongs to a
+/// different table than the record's `table` is a 400. `line_no` is
+/// optional; when absent the cover is line 2 and body lines are numbered
+/// from 3, matching a written file. Unknown keys are ignored, so the
+/// output of `POST /tools/parse` can be sent back unchanged.
 #[derive(Debug, Deserialize)]
 pub struct Document {
     pub version: String,
@@ -336,17 +342,85 @@ fn build_line(
         };
         pairs.push((name.as_str(), v));
     }
+    // `Filing::from_parts` rejects a record whose form-type token belongs
+    // to another table -- or is blank, since `ParsedLine::from_pairs` then
+    // fills in the table's name, which is not a token for any schedule --
+    // but its message ("no format table for ...") is about a token nobody
+    // wrote; say what actually disagrees.
+    let token = pairs
+        .iter()
+        .find(|(k, _)| *k == "form_type")
+        .map(|(_, v)| v.trim())
+        .unwrap_or("");
+    if token.is_empty() {
+        if table_for_form_type(table.as_str()) != Some(table) {
+            return Err(ToolsError::BadRequest(format!(
+                "line {line_no}: fields.form_type is required for a {table} record (the form-type token as filed, for example {})",
+                example_token(table)
+            )));
+        }
+    } else if let Some(actual) = table_for_form_type(&token.to_ascii_uppercase())
+        && actual != table
+    {
+        return Err(ToolsError::BadRequest(format!(
+            "line {line_no}: table '{}' does not match form type '{token}', which is a {actual} record",
+            input.table.trim()
+        )));
+    }
     ParsedLine::from_pairs(table, version, line_no, pairs)
         .map_err(|e| ToolsError::BadRequest(format!("line {line_no}: {e}")))
 }
 
+/// The delimited cells the document's records would occupy when written:
+/// the layout width of every record whose table is known at `version`.
+/// A lower bound on the written file's size in bytes (each cell costs at
+/// least its delimiter), used to refuse a document that is small as JSON
+/// but large as a filing before any line is built.
+fn written_cells(doc: &Document, version: SpecVersion) -> usize {
+    std::iter::once(&doc.summary)
+        .chain(&doc.lines)
+        .filter_map(|l| l.table.trim().parse::<Table>().ok())
+        .filter_map(|t| t.layout(version))
+        .fold(0usize, |n, layout| {
+            n.saturating_add(usize::from(layout.width))
+        })
+}
+
+/// A form-type token a record of `table` could carry, for error messages.
+/// The common schedules get their usual line token; anything else gets
+/// the FEC's spec sample if there is one, else the table name.
+fn example_token(table: Table) -> String {
+    match table {
+        Table::SchA => "SA11AI".to_string(),
+        Table::SchB => "SB21B".to_string(),
+        Table::SchC => "SC/10".to_string(),
+        Table::SchD => "SD10".to_string(),
+        Table::SchE => "SE".to_string(),
+        _ => table
+            .spec("form_type")
+            .and_then(|s| s.sample)
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| table.as_str().to_string()),
+    }
+}
+
 /// Rebuilds a [`Filing`] from a [`Document`], reporting the first
-/// inconsistency as a 400 that names the line.
-fn build_filing(doc: &Document) -> Result<Filing, ToolsError> {
+/// inconsistency as a 400 that names the line, and a document that would
+/// write to more than `limits.max_body_bytes` as a 413.
+fn build_filing(doc: &Document, limits: Limits) -> Result<Filing, ToolsError> {
     let version: SpecVersion = doc
         .version
         .parse()
         .map_err(|e: crate::parser::InvalidSpecVersion| ToolsError::BadRequest(e.to_string()))?;
+    let cells = written_cells(doc, version);
+    if cells > limits.max_body_bytes {
+        return Err(ToolsError::PayloadTooLarge(format!(
+            "the document's {} record(s) would write to at least {cells} bytes, more than this server's {} byte limit; use the `hardmoney` CLI for large filings",
+            doc.lines.len().saturating_add(1),
+            limits.max_body_bytes
+        )));
+    }
 
     let h = &doc.header;
     let fec_version_raw = if h.fec_version_raw.trim().is_empty() {
@@ -420,7 +494,7 @@ pub async fn validate(
     Extension(limits): Extension<Limits>,
     body: Result<Json<Document>, JsonRejection>,
 ) -> Result<Json<Validation>, ToolsError> {
-    let filing = build_filing(&take_document(body, limits)?)?;
+    let filing = build_filing(&take_document(body, limits)?, limits)?;
     Ok(Json(filing.validate()))
 }
 
@@ -430,7 +504,7 @@ pub async fn reconcile(
     Extension(limits): Extension<Limits>,
     body: Result<Json<Document>, JsonRejection>,
 ) -> Result<Json<Reconciliation>, ToolsError> {
-    let filing = build_filing(&take_document(body, limits)?)?;
+    let filing = build_filing(&take_document(body, limits)?, limits)?;
     filing
         .reconcile()
         .map(Json)
@@ -459,7 +533,7 @@ pub async fn write(
     Extension(limits): Extension<Limits>,
     body: Result<Json<Document>, JsonRejection>,
 ) -> Result<Response, ToolsError> {
-    let filing = build_filing(&take_document(body, limits)?)?;
+    let filing = build_filing(&take_document(body, limits)?, limits)?;
     let errors = filing.validate().error_count();
     let committee = filing
         .summary
@@ -572,6 +646,10 @@ mod tests {
         serde_json::from_value(json).unwrap()
     }
 
+    const NO_LIMIT: Limits = Limits {
+        max_body_bytes: usize::MAX,
+    };
+
     #[test]
     fn build_filing_defaults_header_columns_and_numbers_lines() {
         let d = doc(json!({
@@ -579,7 +657,7 @@ mod tests {
             "summary": { "table": "F3X", "fields": { "form_type": "F3XN", "filer_committee_id_number": "C00123456" } },
             "lines": [ { "table": "SchA", "fields": { "form_type": "SA11AI", "contribution_amount": "10.00" } } ]
         }));
-        let f = build_filing(&d).unwrap();
+        let f = build_filing(&d, NO_LIMIT).unwrap();
         assert_eq!(f.header.record_type, "HDR");
         assert_eq!(f.header.ef_type, "FEC");
         assert_eq!(f.header.fec_version_raw, "8.5");
@@ -591,7 +669,7 @@ mod tests {
 
     #[test]
     fn build_filing_rejects_each_inconsistency_with_a_message() {
-        let cases: [(Value, &str); 7] = [
+        let cases: [(Value, &str); 9] = [
             (
                 json!({ "version": "abc", "summary": { "table": "F3X", "fields": { "form_type": "F3XN" } } }),
                 "not an FEC spec version",
@@ -622,9 +700,20 @@ mod tests {
                         "lines": [ { "table": "SchA", "line_no": 12, "fields": { "contribution_amount": 10 } } ] }),
                 "line 12: field 'contribution_amount' must be a string",
             ),
+            // A record whose `table` disagrees with its form-type token.
+            (
+                json!({ "version": "8.5", "summary": { "table": "F3X", "fields": { "form_type": "F3XN" } },
+                        "lines": [ { "table": "SchB", "line_no": 7, "fields": { "form_type": "SA11AI" } } ] }),
+                "line 7: table 'SchB' does not match form type 'SA11AI', which is a SchA record",
+            ),
+            // A cover whose `table` disagrees with the document's form type.
+            (
+                json!({ "version": "8.5", "summary": { "table": "F3", "fields": { "form_type": "F3XN" } } }),
+                "line 2: table 'F3' does not match form type 'F3XN', which is a F3X record",
+            ),
         ];
         for (input, expected) in cases {
-            match build_filing(&doc(input)) {
+            match build_filing(&doc(input), NO_LIMIT) {
                 Err(ToolsError::BadRequest(msg)) => {
                     assert!(
                         msg.contains(expected),
@@ -643,9 +732,49 @@ mod tests {
             "header": { "soft_name": "X", "soft_ver": "1", "name_delim": "^" },
             "summary": { "table": "F3X", "fields": { "form_type": "F3XN" } }
         }));
-        let f = build_filing(&d).unwrap();
+        let f = build_filing(&d, NO_LIMIT).unwrap();
         assert_eq!(f.header.name_delim.as_deref(), Some("^"));
         assert_eq!(f.header.to_fields().len(), 9);
+    }
+
+    /// Many tiny JSON records build many full-width lines: the written
+    /// size, not the JSON size, is what the body cap bounds.
+    #[test]
+    fn a_document_that_would_write_past_the_body_cap_is_413() {
+        let lines: Vec<Value> = (0..100)
+            .map(|_| json!({ "table": "SchA", "fields": { "form_type": "SA11AI" } }))
+            .collect();
+        let d = doc(json!({
+            "version": "8.5",
+            "summary": { "table": "F3X", "fields": { "form_type": "F3XN" } },
+            "lines": lines
+        }));
+        let cells = written_cells(&d, SpecVersion::electronic(8, 5));
+        let sch_a = usize::from(
+            Table::SchA
+                .layout(SpecVersion::electronic(8, 5))
+                .unwrap()
+                .width,
+        );
+        assert!(
+            cells > 100 * sch_a,
+            "{cells} cells for 100 SchA lines + cover"
+        );
+
+        let tight = Limits {
+            max_body_bytes: cells - 1,
+        };
+        match build_filing(&d, tight) {
+            Err(ToolsError::PayloadTooLarge(msg)) => {
+                assert!(msg.contains("101 record(s)"), "{msg}");
+                assert!(msg.contains(&format!("{} byte limit", cells - 1)), "{msg}");
+            }
+            other => panic!("expected 413, got {other:?}"),
+        }
+        let exact = Limits {
+            max_body_bytes: cells,
+        };
+        assert!(build_filing(&d, exact).is_ok());
     }
 
     #[test]

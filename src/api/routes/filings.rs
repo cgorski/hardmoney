@@ -153,10 +153,23 @@ pub struct ScheduleELine {
     pub candidate_office_state: Option<String>,
 }
 
+/// `GET /filings/{filing_id}/schedule-e`: the filing's Schedule E lines in
+/// file order; `[]` for an ingested filing without any, 404 for a filing
+/// id that has not been ingested (like `GET /filings/{filing_id}`).
 pub async fn schedule_e(
     State(pool): State<PgPool>,
     Path(filing_id): Path<i64>,
 ) -> Result<Json<Vec<ScheduleELine>>, ApiError> {
+    let (exists,): (bool,) =
+        sqlx::query_as("SELECT EXISTS (SELECT 1 FROM filings WHERE filing_id = $1)")
+            .bind(filing_id)
+            .fetch_one(&pool)
+            .await?;
+    if !exists {
+        return Err(ApiError::NotFound(format!(
+            "no filing with filing_id {filing_id}"
+        )));
+    }
     let rows = sqlx::query_as::<_, ScheduleELine>(
         "SELECT line_index, payee_name, expenditure_amt, expenditure_date, \
                 support_oppose_code, candidate_id, candidate_name, candidate_office_state \

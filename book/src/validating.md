@@ -118,7 +118,7 @@ $ hardmoney validate --json tests/fixtures/invalid/duplicate_tran_id.fec
       "rule": "duplicate_transaction_id",
       "line_no": 5,
       "form_type": "SB21B",
-      "field": "transaction_id_number",
+      "field": "transaction_id",
       "message": "Tran ID SB21B.4120 is NOT UNIQUE - This one is same as other(s) (first used on line 4)"
     }
   ]
@@ -133,8 +133,9 @@ The exit status is the same as without `--json`.
 
 ## The rules
 
-`Rule` is an enum of 32 variants. Each maps to a message in the FEC's
-published "Validation errors explained" list and has a fixed
+`Rule` is an enum of 41 variants. Each maps to a message in the FEC's
+published "Validation errors explained" list (its number is given as
+`#n` for a failing message, `Wn` for a warning) and has a fixed
 `Severity`: `Error` is a failing message, `Warning` is not. The table
 is generated from the enum itself (`Rule::severity()`,
 `Rule::fec_message()`), so it is the code:
@@ -142,46 +143,73 @@ is generated from the enum itself (`Rule::severity()`,
 | Rule | Severity | FEC message |
 |---|---|---|
 | Structure | | |
-| `header_first` | error | HDR record must be First in File |
-| `cover_second` | error | "Cover" (eg. F3A, F3XN, ...) must be 2nd in File |
-| `filing_type_fec` | error | Filing must be an "FEC" Type of filing |
-| `current_format` | warning | Filing must be in the current FEC format |
-| `amendment_needs_original_id` | error | Amended filing must have an ID of the "Original" |
-| `amendment_needs_number` | error | Amended filing must have an "Amendment Number" |
-| `header_inconsistent_with_amendment_status` | warning | Header (HDR) inconsistent with Orig/Amend status |
-| `multiple_forms` | error | Multi-Form Filings are NOT Allowed |
-| `schedule_not_allowed_with_form` | error | Schedule does not belong with Form ____ |
-| `unrecognized_form_type` | warning | Unrecognized Form Type / Record Ignored |
+| `header_first` | error | #14 HDR record must be First in File |
+| `cover_second` | error | #15 "Cover" (eg. F3A, F3XN, ...) must be 2nd in File |
+| `filing_type_fec` | error | #16 Filing must be an "FEC" Type of filing |
+| `current_format` | warning | #11 Filing must be in the current FEC format |
+| `amendment_needs_original_id` | error | #17 Amended filing must have an ID of the "Original" |
+| `amendment_needs_number` | error | #9 Amended filing must have an "Amendment Number" |
+| `header_inconsistent_with_amendment_status` | error | #8 Header (HDR) inconsistent with Orig/Amend status |
+| `multiple_forms` | error | #23 Multi-Form Filings are NOT Allowed |
+| `schedule_not_allowed_with_form` | error | #19 Schedule does not belong with Form ____ |
+| `unrecognized_form_type` | warning | #18 Unrecognized Form Type / Record Ignored |
 | IDs | | |
-| `filer_id_format` | error | ID# _________ NOT Correct FEC ID# Format |
-| `filer_id_mismatch` | error | ID# _________ NOT SAME AS Cover Page ID# _________ |
+| `filer_id_format` | error | #5 ID# _________ NOT Correct FEC ID# Format |
+| `filer_id_mismatch` | error | #21 ID# _________ NOT SAME AS Cover Page ID# _________ |
 | Per field (driven by `FieldSpec`) | | |
-| `required_field_empty` | error | {field} is Required, but field is Empty |
-| `recommended_field_empty` | warning | {field} is Missing |
-| `conditionally_required_field_empty` | warning | Conditionally Required field is Empty |
-| `field_too_long` | error | {field} exceeds maximum length of ______ |
-| `illegal_character` | error | Illegal character(s) found in text field |
-| `f99_illegal_character` | warning | Illegal character(s) found in text line #____ (Used for F99's) |
-| `embedded_double_quote` | warning | Embedded double-quotes (") not allowed |
-| `bad_date_format` | error | Bad Date - ________ not YYYYMMDD format |
-| `not_a_real_date` | error | ________ is not a Real Date |
-| `date_out_of_range` | warning | __{date}__ is outside range of 1960-2099 |
-| `invalid_amount` | error | Invalid Amount format: ____________ |
-| `non_numeric` | error | Non-numeric data in Numeric Field |
-| `invalid_allowed_value` | warning | Value "_" is Invalid for this field |
+| `required_field_empty` | error\* | #1-#4 {field} is Required, but field is Empty |
+| `recommended_field_empty` | warning | W27 {field} is Missing |
+| `conditionally_required_field_empty` | warning | W1 Conditionally Required field is Empty |
+| `field_too_long` | error | #7 {field} exceeds maximum length of ______ |
+| `illegal_character` | error\* | #12/#27 Illegal character(s) found in text field |
+| `f99_illegal_character` | warning | #13/#28 Illegal character(s) found in text line #____ (Used for F99's) |
+| `embedded_double_quote` | warning | #30 Embedded double-quotes (") not allowed |
+| `bad_date_format` | error | #32 Bad Date - ________ not YYYYMMDD format |
+| `not_a_real_date` | error | #33 ________ is not a Real Date |
+| `date_out_of_range` | warning | W2 __{date}__ is outside range of 1960-2099 |
+| `invalid_year` | error | #36 ____ is an Invalid Year (CCYY) Format |
+| `invalid_amount` | error | #34 Invalid Amount format: ____________ |
+| `non_numeric` | error | #35 Non-numeric data in Numeric Field |
+| `invalid_district` | error\* | #39 District "__" is not 2-digit Numeric format |
+| `invalid_allowed_value` | warning\*\* | Value "_" is Invalid for this field (#22 for report codes) |
 | `pattern_mismatch` | warning | Value "_" does not match the required format |
-| `invalid_state_code` | warning | __ not a valid 2-character USPS State Code |
-| `invalid_entity_type` | warning | Entity Type [___] is not an acceptable value |
-| `invalid_support_oppose_code` | warning | Sup/Opp Code "___" Invalid (Valid Codes: S, O) |
+| `invalid_state_code` | warning | W29 __ not a valid 2-character USPS State Code |
+| `invalid_zip_code` | warning | W30 Zip Code is Invalid or Missing / Zip = _________ |
+| `invalid_phone_number` | warning | W31 Invalid Area Code/Phone Number: __________ |
+| `invalid_office_code` | warning | W32 Office Code "_" Invalid (Valid Codes: H, S, P) |
+| `invalid_entity_type` | warning | W45 Entity Type [___] is not an acceptable value |
+| `invalid_support_oppose_code` | warning | W36 Sup/Opp Code "___" Invalid (Valid Codes: S, O) |
+| `invalid_election_code` | warning | W5 Election Code invalid: ___ {description} |
+| `invalid_checkbox` | warning | W43 Value "_" is Invalid for "Checkbox=X" field |
+| `invalid_event_type` | error\* | #45 Event Type {__} Invalid - OK Vals: [AD\|GV\|DF\|DC\|EA] (H3) |
+| `address_in_second_line` | warning | W28 Single-line Address NOT in 1st delimited field |
 | Cross-line | | |
-| `duplicate_transaction_id` | error | Tran ID is NOT UNIQUE - This one is same as other(s) |
-| `back_reference_not_found` | error | Back-Reference TRAN-ID does not match Sched TRAN-ID |
+| `duplicate_transaction_id` | error | #40 Tran ID is NOT UNIQUE - This one is same as other(s) |
+| `back_reference_not_found` | error | #10/#41 Back-Reference TRAN-ID does not match Sched TRAN-ID |
 | Form 99 | | |
-| `f99_text_too_long` | error | Body of text exceeds maximum of 20,000 characters (F99 filings) |
+| `f99_text_too_long` | error | #29 Body of text exceeds maximum of 20,000 characters (F99 filings) |
+
+\* Reported at warning severity on a filing in a superseded spec version
+(`Rule::demoted_on_superseded_format`); see below. \*\* Reported at
+error severity where the workbook's rule for the field says "Error if
+Coded incorrectly" (report codes).
 
 `Rule` implements `Display`/`FromStr` in `snake_case` (which is also
 its JSON form) and iteration via `strum::IntoEnumIterator`; it is
 `#[non_exhaustive]`, so match it with a wildcard.
+
+The FEC messages with no rule here, and why, are tabulated in the
+module documentation of `hardmoney::parser::validate`. In short: #6/#31
+(leading blanks) are trimmed by the parser before the validator sees a
+value; #22/#38 (report type missing/invalid, wrong for the form) need the
+report-code list the workbook elides (`12C,..., TER`) and refers to an
+appendix that is not bundled; #24-#26 and #49 are record-shape checks the
+parser makes before a line exists; #37 (interest rate format) cannot be
+enforced because Schedule C's rate is `A/N-15` free text and accepted
+filings carry `Prime -1`, `SOFR+2.32`, `9.00% APR`; the rest are legacy
+(version-3 amendment codes, Schedule I, pre-BCRA H3 codes) or depend on
+code lists the workbook gives only as prose (Form 7 communication codes,
+Form 1 party codes, Schedule C line references).
 
 ### Structural rules versus per-field rules
 
@@ -193,7 +221,7 @@ second cover record; a schedule must be one the spec associates with the
 filing's form (`SchA` belongs with F3, F3X, F3P, F3L, not F24); every
 body line's filer id must be a well-formed committee or candidate id
 and match the cover's; transaction ids must be unique
-(case-insensitively) and every `back_reference_tran_id_number` must name
+(case-insensitively) and every `back_reference_tran_id` must name
 one that exists in the file; a Form 99's text block is capped at 20,000
 characters.
 
@@ -206,14 +234,19 @@ and for each field applies what the row says:
 
 | `FieldSpec` | Drives |
 |---|---|
-| `required` = `Error` / `Warning` / `Conditional(text)` | `required_field_empty` / `recommended_field_empty` / `conditionally_required_field_empty` on a blank, with the `rule` text parsed for a condition, so `CONTRIBUTOR LAST NAME` (`Required if [IND|CAN]`) is only required when the entity type is one of those |
-| `max_len` | `field_too_long` |
-| `kind` = `Numeric` on a date field | `bad_date_format`, `not_a_real_date`, `date_out_of_range` |
-| `kind` = `Numeric` otherwise | `non_numeric` |
+| `required` = `Error` / `Warning` / `Conditional(text)` | `required_field_empty` / `recommended_field_empty` / `conditionally_required_field_empty` on a blank, with the condition text (or, when that says only "Conditional Warning", the `rule` text) parsed for a condition, so `CONTRIBUTOR LAST NAME` (`Required if [IND|CAN]`) is only required when the entity type is one of those, and `DONOR COMMITTEE FEC ID` (`Used if CCM, PAC or PTY`) only on a committee's contribution |
+| `max_len` | `field_too_long` (for an `AMT-n` field the bound is on the digits: the FEC accepted ActBlue's `2280311229.59`, thirteen characters, in an `AMT-12` column) |
+| `kind` = `Numeric`, `NUM-8` | `bad_date_format`, `not_a_real_date`, `date_out_of_range` |
+| `kind` = `Numeric`, `NUM-4` / `NUM-10` | `invalid_year` / `invalid_phone_number` |
+| `kind` = `Numeric` otherwise | `non_numeric` (digits and at most one decimal point: Schedule H1/H2's `NUM-5` percentages are written `0.49`) |
 | `kind` = `Amount` | `invalid_amount` (`parse_money` must accept it: `[-]digits[.dd]`, no `$` or commas) |
-| `allowed_values`, `pattern` | `invalid_allowed_value`, `pattern_mismatch` |
-| the field's name | `invalid_entity_type`, `invalid_support_oppose_code`, `invalid_state_code` |
-| every text field | `illegal_character` (outside ASCII 32-126 and Latin-1 128-168, 173), `embedded_double_quote` |
+| `allowed_values`, `pattern` | `invalid_allowed_value` (at error severity when `rule` says "Error if Coded incorrectly"), `pattern_mismatch` |
+| `value_reference` = `AK,AL,...` / `01 ... 99` / `H,S,P`, `rule` = `Edit: ST` / `Edit: PGI` / `Check-box` | `invalid_state_code`, `invalid_district`, `invalid_office_code`, `invalid_election_code`, `invalid_checkbox` |
+| `value_reference` = `AD=ADministrative; GV=...` (Schedule H3's event type) | `invalid_event_type`, with the code list read from the reference |
+| a `ZIP` column | `invalid_zip_code` (five or nine digits) |
+| a `STREET 2` column with its `STREET 1` blank | `address_in_second_line` |
+| the field's name | `invalid_entity_type`, `invalid_support_oppose_code` |
+| every text field | `illegal_character` (outside ASCII 32-126 and Latin-1 128-168, 173, excluding 157-159; TAB only in Form 99 text), `embedded_double_quote` |
 
 ```rust
 use hardmoney::Table;
@@ -272,13 +305,19 @@ filing would defeat that. The FEC rejects non-current formats at upload
 time, which is a different question from whether the file is
 well-formed.
 
-On a superseded format, `required_field_empty` is demoted to a warning.
-The workbook's required levels describe the current format, and real,
-accepted 3.x and 5.x filings leave `entity_type` blank. So on such a
-filing each `required_field_empty` finding carries `Severity::Warning`
-even though `Rule::RequiredFieldEmpty.severity()` is `Error`. Filter on
-the finding's `severity`, not the rule's. Every other check is
-format-stable and keeps its severity.
+On a superseded format, four rules are demoted to warnings
+(`Rule::demoted_on_superseded_format`): `required_field_empty`,
+`illegal_character`, `invalid_district`, and `invalid_event_type`. The
+workbook describes the current format, and real, FEC-accepted older
+filings demonstrably differ from it: 3.x and 5.x filings leave
+`entity_type` blank, a 2001 report from Puerto Rico carries `á` and `í`
+in contributor names, the 2001 Merck PAC amendment has 63 one-digit
+districts, and 3.00 Schedule H3 records use the pre-BCRA one-letter
+event codes. So on such a filing each of those findings carries
+`Severity::Warning` even though the rule's `severity()` is `Error`.
+Filter on the finding's `severity`, not the rule's. Every other check is
+format-stable and keeps its severity. (Such a filing is already
+`current_format`, which is why the FEC would reject it today.)
 
 Embedded double quotes are a warning. The parser already removes one
 pair of wrapping quotes (some vendors quote every field), so any `"` the
@@ -296,8 +335,17 @@ Summary arithmetic is not here. "Subtotal not supported by Schedule" is
 [Reconciling a filing](./reconciling.md).
 
 Cross-filing checks are not possible from one file: transaction-id
-uniqueness "for the life of the report" (across amendments), and
-report-type-versus-form consistency.
+uniqueness "for the life of the report" (across amendments).
+
+`unrecognized_form_type` (FEC #18, a failing message) is a warning,
+because a body line hardmoney cannot dispatch may be a record type the
+FEC knows and hardmoney's tables do not; rejecting a filing on our own
+gap would be wrong. `header_inconsistent_with_amendment_status` (#8),
+by contrast, is an error as the FEC has it: an `F3XN` whose header
+carries `FEC-1234567` is rejected, and WebCheck reports the reverse case
+(an `F3XA` with a blank header) under the same message. An amendment
+number of `0` (or `000`, as the DSCC files) is not a finding: FECfile
+writes it on originals and the FEC accepts them.
 
 The 2001 Merck PAC filing shows the first two at once:
 
@@ -332,21 +380,35 @@ WARN  line 2629 SB21B entity_type: ENTITY TYPE is Required, but field is Empty
 
 ## How real filings fare
 
-Every one of the 25 real filings in `tests/fixtures/` was accepted by the
+Every one of the 31 real filings in `tests/fixtures/` was accepted by the
 FEC, so an error-severity finding on any of them would be a bug in the
 rule, not the filing. There are none, and across the wider local corpus
-of 102 accepted filings there are zero error-severity findings. The
-warnings each fixture carries are pinned exactly in
-`tests/validate_fixtures.rs`, so a change in either direction is
-visible.
+-- 364 filings that parse, including 98 fetched in September 2026 from
+national and state party committees, House and Senate candidates, joint
+fundraising committees, and presidential campaigns -- every
+FEC-accepted filing reports zero errors (the three that do not are
+synthetic test files from other parsers' suites). That measurement found
+and fixed three false positives an earlier version of the rules
+produced: `non_numeric` on the `NUM-5` allocation percentages of
+Schedules H1/H2 (`0.49`, on every state-party report),
+`field_too_long` on twelve-digit amounts written in thirteen
+characters (ActBlue's `2280311229.59`), and `illegal_character` on a
+2001 filing's accented names. The warnings each fixture carries are
+pinned exactly in `tests/validate_fixtures.rs`, so a change in either
+direction is visible.
 
 What the warnings on accepted filings typically are, in order of
-frequency: `recommended_field_empty` (a payee's street or ZIP left
-blank; the FEC marks address fields `X (warning)`), `current_format`
-on anything older than 8.5, `pattern_mismatch` (a one-digit candidate
-district in the 2001 Merck filing; the FEC later required two), and on
-3.x-5.x filings the demoted `required_field_empty`. A year-end 2007
-report at spec 6.1:
+frequency across that corpus: `recommended_field_empty` (a payee's
+street or ZIP left blank; the FEC marks address fields `X (warning)`),
+the demoted `required_field_empty` on 3.x-6.x filings,
+`invalid_zip_code` (foreign postal codes and four-digit ZIPs -- the FEC
+flags these too, as W30), `invalid_election_code` (a bare `P` or `G`
+with no year, on pre-6.x filings), `invalid_district` (the 63 one-digit
+districts in the 2001 Merck filing; the FEC later required two),
+`current_format` on anything older than 8.5, and a handful of
+`conditionally_required_field_empty` (a party committee's contribution
+filed without the committee's FEC id). A year-end 2007 report at spec
+6.1:
 
 ```text
 $ hardmoney validate tests/fixtures/F3XN_320000_v6.1.fec
@@ -380,7 +442,9 @@ reference, a `DEL` byte and a Windows-1252 `ž`, a blanked amendment
 header, impossible dates and `$5,500.00`, a second cover record, a
 Schedule A under a Form 24), each pinned to exactly the rules it must
 trigger and no others. The README there lists them with the FEC
-message number each corresponds to.
+message number each corresponds to. Every other rule has a unit test in
+`src/parser/validate.rs` that provokes it and one that shows it silent
+on a correct value.
 
 ## From Rust
 
@@ -406,8 +470,8 @@ println!("{} error(s), {} warning(s)", report.error_count(), report.warning_coun
 
 ```text
 acceptable: false
-ERROR line 5 SB21B transaction_id_number: Tran ID SB21B.4120 is NOT UNIQUE - This one is same as other(s) (first used on line 4)
-  rule=duplicate_transaction_id severity=error line=5 form=SB21B field=Some("transaction_id_number")
+ERROR line 5 SB21B transaction_id: Tran ID SB21B.4120 is NOT UNIQUE - This one is same as other(s) (first used on line 4)
+  rule=duplicate_transaction_id severity=error line=5 form=SB21B field=Some("transaction_id")
 1 error(s), 0 warning(s)
 ```
 
@@ -520,10 +584,26 @@ The file leaves your machine. `--oracle` is never on by default.
 
 ### What the FEC's validator says about our fixtures
 
-Run on 2026-09-15 against the live service: every one of the accepted
-fixtures in `tests/fixtures/` comes back `SUCCESS` with no messages, as
-it should. On the ten `invalid/` fixtures, eight diff clean: the same
-field, the same rule. The two that do not:
+Run on 2026-09-15 against the live service: every one of the 8.5
+fixtures in `tests/fixtures/` comes back accepted. Most say `SUCCESS`
+with no messages; the 2026 additions show WebCheck's warnings and how
+they pair with ours. `F3A_2004471.fec` (a House amendment) comes back
+`WARNINGS` -- "FEC data file PASSED validation with Warnings!", which
+`OracleReport::is_acceptable` treats as accepted -- with `Zip Code is
+Invalid or Missing / Zip = 1016` and, for the same payee's blank state,
+`is Required, but field is Empty` at warning severity; both pair with
+our `invalid_zip_code` and `recommended_field_empty` (`2 matched`).
+`F3XA_2011814.fec` (Georgia Republican Party) draws three `Conditionally
+Required field is Empty` warnings -- a party committee's contribution
+without its FEC id, a candidate committee's without the candidate's id
+or last name -- all paired with ours; we add a fourth for the same line's
+blank candidate office, which the workbook marks `Used if CAN or CCM`
+and WebCheck does not report (`3 matched, 1 only ours`). The two other
+state-party reports and the joint fundraising committee are `SUCCESS`
+with nothing to say, which is also the evidence that WebCheck reads
+Schedule H2's `0.49` percentages as numeric. On the ten `invalid/`
+fixtures, eight diff clean: the same field, the same rule. The two that
+do not:
 
 - `amendment_missing_ids.fec` (an F3XA whose header has no report id or
   amendment number). We report two HDR errors (`Amended filing must
@@ -545,8 +625,10 @@ places (`Filing Format must be Version 8.5` rather than `Filing must
 be in the current FEC format`, `No Match Found for Back-Reference to
 Schedule/TranID - SA11AI.9999` rather than `Back-Reference TRAN-ID does
 not match Sched TRAN-ID`, `$5,500.00 not a Valid Amount of Expenditure
-value` rather than `Invalid Amount format`), and those observed
-alternates are matched too. And it is not always deterministic: the
+value` rather than `Invalid Amount format`, `is Required, but field is
+Empty` at warning severity for an `X (warning)` column rather than `is
+Missing`), and those observed alternates are matched too
+(`webcheck::live_alternates`). And it is not always deterministic: the
 same eight-character committee id drew `ID# 'C0094412' NOT Correct FEC
 ID# Format` on some submissions and `An FEC 'C9xxxxxxx' ID must be used
 to file Form 5` on others.
@@ -599,7 +681,8 @@ assert!(d.is_empty(), "the two validators disagree");
 ```
 
 `WebCheck::submit` returns an `OracleReport`: `raw` (the response as
-received), `result` (`SUCCESS`/`ERRORS`), the counts WebCheck itself
+received), `result` (`SUCCESS`, `WARNINGS`, or `ERRORS`; the first two
+are `is_acceptable()`), the counts WebCheck itself
 stated, `filing_type`, `committee_id`, and `findings: Vec<OracleFinding>`
 (`line_no: Option<u64>`, `severity`, `form_type`, `item`, `field_no`,
 `field_label`, `message`). It fails with a `WebCheckError`: `Transport`,

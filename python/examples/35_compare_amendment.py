@@ -6,11 +6,9 @@ requires ids to be stable across amendments of a report), giving the
 transactions added, removed, and changed. ``Filing.amends_filing`` and
 ``is_amendment`` come from the amendment's header.
 
-Two fixture-repository details worth knowing: Schedule A calls the id
-``transaction_id`` while Schedule B, C, D, E and TEXT call it
-``transaction_id_number``; and ``str.splitlines()`` treats the FEC's
-field separator (0x1c) as a line break, so split ``.fec`` text on the
-CRLF the writer emits.
+Every schedule calls the id ``transaction_id``. One detail worth
+knowing: ``str.splitlines()`` treats the FEC's field separator (0x1c) as
+a line break, so split ``.fec`` text on the CRLF the writer emits.
 
 The repository has no original/amendment pair, so with one path (or
 none) the example derives an amendment from that filing: one Schedule A
@@ -47,7 +45,7 @@ F3X_RECEIPT_CHAIN = [
 
 
 def transaction_id(line: hardmoney.Line) -> Optional[str]:
-    return line.get("transaction_id") or line.get("transaction_id_number") or None
+    return line.get("transaction_id") or None
 
 
 def describe(line: hardmoney.Line) -> str:

@@ -174,9 +174,13 @@ and `fec_version_raw` default to `HDR`, `FEC`, and `version`), `summary`
 `line_no` is optional and defaults to file order). Unknown keys are
 ignored, so the output of `parse` can be edited and sent back as it is.
 `summary.fields.form_type` must be the cover line's token as filed
-(`F3XN`, not `F3X`). A document that names a table or field the layout
-does not have, or whose `header.fec_version_raw` disagrees with `version`,
-is a 400 whose message names the line.
+(`F3XN`, not `F3X`), and every body line's `fields.form_type` must be its
+token as filed too (`SA11AI`, `SB21B`; a schedule has many tokens and no
+default one). A document that names a table or field the layout does not
+have, whose `header.fec_version_raw` disagrees with `version`, or whose
+record's `table` disagrees with its form-type token (`"table": "SchB"`
+with `"form_type": "SA11AI"`) is a 400 whose message names the line and
+says what disagrees.
 
 From a shell:
 
@@ -202,7 +206,11 @@ differences from the input described in [Writing `.fec` files](./writing-fec.md)
 ## Limits
 
 * Uploads and fetched filings are capped at the server's body limit
-  (32 MB with `--ui`; `ApiConfig::max_body_bytes` in library code). The
+  (32 MiB with `--ui`; `ApiConfig::max_body_bytes` in library code). The
+  same cap applies to what a JSON document would *write*: `validate`,
+  `reconcile`, and `write` sum the layout widths of the document's records
+  and answer 413 if the written filing would exceed it, so a small JSON
+  body cannot build a huge filing in server memory. The
   JSON the page receives is several times the size of the `.fec`, so a
   filing near the cap takes tens of seconds to load and hundreds of
   megabytes of browser memory. The CLI has no such ceiling.

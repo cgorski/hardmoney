@@ -24,6 +24,15 @@
 //!   after the cover line, with the cover's `text` column left blank, which
 //!   is how the FEC's own software files it.
 //! * Blank lines are dropped.
+//! * A value can only contain what the parser can hand back. A line feed
+//!   or an ASCII-28 inside a value -- possible only through
+//!   [`ParsedLine::set`], never from a parse -- is replaced with a space
+//!   rather than corrupting the record structure (an ASCII-28 in a
+//!   comma-delimited file would make the re-parse pick the wrong
+//!   delimiter). A bare carriage return *does* survive a parse (only `\n`
+//!   ends a record) and is written back verbatim so the round trip stays
+//!   exact; the FEC's validator flags it as an illegal character either
+//!   way.
 //!
 //! # Encoding
 //!
@@ -144,10 +153,11 @@ impl LineWriter {
                     if i > 0 {
                         out.push(NEW_DELIMITER);
                     }
-                    // A delimiter or line break inside a value would corrupt
-                    // the record structure; they cannot survive a parse
+                    // A delimiter or line feed inside a value would corrupt
+                    // the record structure; neither can survive a parse
                     // (the parser splits on them), so replace with a space.
-                    push_sanitised(out, cell, &[NEW_DELIMITER, '\r', '\n']);
+                    // A bare `\r` is data to the parser and stays.
+                    push_sanitised(out, cell, &[NEW_DELIMITER, '\n']);
                 }
             }
             Self::Csv => {
@@ -155,12 +165,15 @@ impl LineWriter {
                     if i > 0 {
                         out.push(',');
                     }
-                    if cell.contains([',', '"', '\r', '\n']) {
+                    // Quote when needed; `\r` is quoted (so a CSV consumer
+                    // sees it as field content) but kept, since the
+                    // per-line reader does not treat it as a terminator.
+                    if cell.contains([',', '"', '\r', '\n', NEW_DELIMITER]) {
                         out.push('"');
                         for ch in cell.chars() {
                             match ch {
                                 '"' => out.push_str("\"\""),
-                                '\r' | '\n' => out.push(' '),
+                                '\n' | NEW_DELIMITER => out.push(' '),
                                 c => out.push(c),
                             }
                         }
@@ -287,15 +300,27 @@ mod tests {
         assert_eq!(encode("O\u{2019}Neil"), b"O\x92Neil");
         // A character outside Windows-1252 forces UTF-8.
         assert_eq!(encode("\u{4e2d}"), "\u{4e2d}".as_bytes());
+        // The reverse ambiguity: `Ã©` is two Windows-1252 characters whose
+        // bytes (C3 A9) are also valid UTF-8 for `é`. The parser decodes
+        // UTF-8 first, so those bytes would come back as `é`; the encoder
+        // notices and emits UTF-8 instead.
+        assert_eq!(encode("\u{c3}\u{a9}"), "\u{c3}\u{a9}".as_bytes());
         // Round trip through the parser's decoder.
         for s in [
             "caf\u{e9}",
             "O\u{2019}Neil",
             "\u{4e2d}\u{6587}",
             "mixed \u{e9} \u{4e2d}",
+            "\u{c3}\u{a9}",
+            "\u{c2}\u{a0}",
         ] {
             assert_eq!(crate::parser::filing::decode(&encode(s)), s, "{s:?}");
         }
+        // A UTF-8 BOM is not part of the header token.
+        assert_eq!(
+            crate::parser::filing::decode(b"\xEF\xBB\xBFHDR\x1cFEC"),
+            "HDR\u{1c}FEC"
+        );
     }
 
     #[test]
@@ -313,6 +338,29 @@ mod tests {
             Some("bad name with break")
         );
         assert_eq!(again.lines.len(), 0);
+    }
+
+    /// A bare carriage return inside a value is what the parser yields for
+    /// one on the wire (only `\n` ends a record), so the writer must hand
+    /// it back unchanged on both delimiter paths.
+    #[test]
+    fn bare_carriage_return_inside_a_value_round_trips() {
+        for (text, field) in [
+            (
+                "HDR\u{1c}FEC\u{1c}8.5\u{1c}X\u{1c}1\r\nF3XN\u{1c}C00123456\u{1c}odd\rname\r\n",
+                "committee_name",
+            ),
+            (
+                "HDR,FEC,5.3,X,1\r\nF3XN,C00123456,\"odd\rname\"\r\n",
+                "committee_name",
+            ),
+        ] {
+            let filing = Filing::parse(text).unwrap();
+            assert_eq!(filing.summary.get(field), Some("odd\rname"), "{text:?}");
+            let again = Filing::parse_bytes(&filing.to_fec()).unwrap();
+            assert_eq!(again.summary.get(field), Some("odd\rname"), "{text:?}");
+            assert_round_trip(&filing);
+        }
     }
 
     /// Values that survive the parser's normalisation unchanged: no
@@ -350,7 +398,7 @@ mod tests {
                     ("contributor_last_name", last.as_str()),
                     ("contributor_organization_name", org.as_str()),
                     ("contributor_employer", employer.as_str()),
-                    ("memo_text_description", memo_text.as_str()),
+                    ("memo_text", memo_text.as_str()),
                     ("contribution_amount", amount_s.as_str()),
                 ],
             )

@@ -13,9 +13,29 @@
 //! * one pair of surrounding double quotes is removed (`"BRABANT"` ->
 //!   `BRABANT`, `""` -> empty). Some vendors -- CMDI Crimson Filer among
 //!   them -- quote every text field even in ASCII-28-delimited files, and
-//!   the FEC accepts and strips them (its validator's message #26 is
-//!   "Invalid double-quote surround text field", #30 "Embedded double-quotes
-//!   not allowed"). A lone or unbalanced quote is data and is kept.
+//!   the FEC accepts and strips them. A lone or unbalanced quote is data
+//!   and is kept.
+//!
+//! # Why a quoted field is never data
+//!
+//! The FEC validator's message #30 ("Embedded double-quotes not allowed")
+//! states the rule: *"Any field can have begin/end quotes (they are
+//! necessary for text that has embedded commas). However, any field that
+//! has surrounding quotes may not also contain double quotes anywhere
+//! within the text."* Surrounding quotes are therefore delimiter syntax
+//! in every field of every record type, and there is **no** wire spelling
+//! for a value that itself begins and ends with a double quote: a field
+//! filed as `"Bob"` is the value `Bob` to the FEC, and `""Bob""` is
+//! rejected (#30). A nickname inside a longer value -- `Robert "Bob"
+//! Smith` -- is not surrounded and is kept verbatim. Message #26 ("Invalid
+//! double-quote surround text field") covers the one remaining case, an
+//! opening quote on the last field with no closing quote, which this
+//! function also treats as data.
+//!
+//! On the comma-delimited path the CSV splitter has already removed the
+//! quoting layer, so this second strip only changes a value if the field
+//! was `"""..."""` on the wire -- illegal under #30 and never seen in the
+//! corpus.
 //!
 //! Anything that needs to *interpret* a value (entity-type codes, memo
 //! flags, form-type tokens) does so case-insensitively at the point of
@@ -24,10 +44,13 @@
 /// Applies the wire-format normalisation described in the module docs:
 /// trims leading/trailing ASCII whitespace (space, tab, CR, LF, FF, VT),
 /// then removes one pair of surrounding double quotes if present, then
-/// trims again. Everything else is returned untouched.
+/// trims again. Everything else is returned untouched, borrowed from the
+/// input. Never fails; an empty, all-whitespace, or `""` input yields `""`.
 ///
 /// Only ASCII whitespace is trimmed: a non-breaking space or other Unicode
-/// whitespace inside filer-entered text is data, not padding.
+/// whitespace inside filer-entered text is data, not padding. The
+/// unusual byte U+001C (the record delimiter) is not whitespace and, if it
+/// reached here, would be kept; the splitters never pass one.
 #[must_use]
 pub fn normalize_field(entry: &str) -> &str {
     let trimmed = entry.trim_matches(|c: char| c.is_ascii_whitespace());
@@ -97,6 +120,25 @@ mod tests {
         assert_eq!(normalize_field("\"abc"), "\"abc");
         assert_eq!(normalize_field("abc\""), "abc\"");
         assert_eq!(normalize_field("say \"hi\" now"), "say \"hi\" now");
+    }
+
+    /// FEC validator message #30: surrounding quotes are delimiter syntax
+    /// in any field, so a nickname filed as the whole value is unquoted
+    /// exactly as the FEC reads it, while a nickname inside a name is data.
+    #[test]
+    fn quoted_nickname_follows_the_fec_rule() {
+        assert_eq!(normalize_field("\"Bob\""), "Bob");
+        assert_eq!(
+            normalize_field("Robert \"Bob\" Smith"),
+            "Robert \"Bob\" Smith"
+        );
+        assert_eq!(normalize_field("\"Bob\" Smith"), "\"Bob\" Smith");
+        // Illegal on the wire (#30); the only lossless reading keeps the
+        // inner pair.
+        assert_eq!(normalize_field("\"\"Bob\"\""), "\"Bob\"");
+        // Whitespace inside the quotes is padding too: the FEC's #31
+        // forbids leading blanks, so they are never data.
+        assert_eq!(normalize_field("\"  Bob \""), "Bob");
     }
 
     #[test]

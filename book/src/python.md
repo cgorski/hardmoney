@@ -160,7 +160,7 @@ except KeyError as e:
 ```
 
 ```text
-['form_type', 'filer_committee_id_number', 'transaction_id', 'back_reference_tran_id_number', 'back_reference_sched_name', 'entity_type']
+['form_type', 'filer_committee_id_number', 'transaction_id', 'back_reference_tran_id', 'back_reference_sched_name', 'entity_type']
 FirstEnergy n/a
 KeyError: 'no_such_field'
 ```

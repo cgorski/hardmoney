@@ -20,3 +20,4 @@ candidate_suffix,17,S/O CANDIDATE SUFFIX,,
 candidate_office,18,S/O CANDIDATE OFFICE,10,CAN/OFFICE
 candidate_state,19,S/O CANDIDATE STATE ,11,CAN/STATE  
 candidate_district,20,S/O CANDIDATE DISTRICT,12,CAN/DIST
+amended_cd,,,15,AMENDED CD

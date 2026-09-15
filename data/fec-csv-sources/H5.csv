@@ -9,3 +9,4 @@ voter_registration_amount,7,VOTER REGISTRATION AMOUNT,5,Amount Voter Registratio
 voter_id_amount,8,VOTER ID AMOUNT,6,Amount Voter ID
 gotv_amount,9,GOTV AMOUNT,7,Amount GOTV
 generic_campaign_amount,10,GENERIC CAMPAIGN AMOUNT,8,Amount Generic Campaing Activity
+amended_cd,,,10,AMENDED CD

@@ -21,7 +21,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-hardmoney = { version = "2", default-features = false, features = ["fetch"] }
+hardmoney = { version = "3", default-features = false, features = ["fetch"] }
 rust_decimal = "1"
 ```
 
@@ -41,7 +41,7 @@ Two things to notice:
 
 The scratch crate that verified this chapter used
 `hardmoney = { path = "/path/to/hardmoney", default-features = false, features = ["fetch"] }`
-against the source tree; the `version = "2"` form is what you'd publish
+against the source tree; the `version = "3"` form is what you would publish
 with.
 
 ## The program

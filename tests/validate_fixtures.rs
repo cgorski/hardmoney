@@ -47,8 +47,8 @@ fn accepted_filings_have_no_errors() {
     let dir = fixtures_dir();
     let names = fixture_names(&dir);
     assert!(
-        names.len() >= 25,
-        "expected the 25 real fixtures, found {}",
+        names.len() >= 31,
+        "expected the 31 real fixtures, found {}",
         names.len()
     );
     for name in &names {
@@ -76,15 +76,27 @@ fn accepted_filings_have_no_errors() {
 fn accepted_filings_warnings_are_pinned() {
     let expected: BTreeMap<&str, Vec<(Rule, usize)>> = BTreeMap::from([
         // 2002, spec 3.00: superseded format; 63 one-digit candidate
-        // districts (the FEC required two digits later); six Schedule B
-        // lines with a blank entity type, which 3.x allowed.
+        // districts (FEC failing #39 today, demoted on the old format); six
+        // Schedule B lines with a blank entity type, which 3.x allowed.
         (
             "F3XA_27789_v3.fec",
             vec![
                 (Rule::CurrentFormat, 1),
-                (Rule::PatternMismatch, 63),
+                (Rule::InvalidDistrict, 63),
                 (Rule::RequiredFieldEmpty, 6),
             ],
+        ),
+        // 2026 House amendment with Schedule C loans and Schedule D debts:
+        // one payee with a blank street and a four-digit ZIP (`1016`).
+        (
+            "F3A_2004471.fec",
+            vec![(Rule::RecommendedFieldEmpty, 1), (Rule::InvalidZipCode, 1)],
+        ),
+        // 2026 presidential amendment (spec 8.5): sixteen blank payee
+        // address parts and one four-digit ZIP.
+        (
+            "F3PA_1993032.fec",
+            vec![(Rule::RecommendedFieldEmpty, 16), (Rule::InvalidZipCode, 1)],
         ),
         ("F3XN_210000_v5.3.fec", vec![(Rule::CurrentFormat, 1)]),
         // Spec 6.1 Schedule B lines missing payee street/city/state/zip.
@@ -93,10 +105,24 @@ fn accepted_filings_warnings_are_pinned() {
             vec![(Rule::CurrentFormat, 1), (Rule::RecommendedFieldEmpty, 15)],
         ),
         ("F6N_150000_v5.1.fec", vec![(Rule::CurrentFormat, 1)]),
-        // Spec 8.0 F3 amendment with 14 blank contributor zips/streets/state.
+        // Spec 8.0 F3 amendment with 14 blank contributor zips/streets/state
+        // and a PAC contribution (`SA11C`) with no donor committee id.
         (
             "F3A_767339_v8.0.fec",
-            vec![(Rule::CurrentFormat, 1), (Rule::RecommendedFieldEmpty, 14)],
+            vec![
+                (Rule::CurrentFormat, 1),
+                (Rule::RecommendedFieldEmpty, 14),
+                (Rule::ConditionallyRequiredFieldEmpty, 1),
+            ],
+        ),
+        // Georgia Republican Party, spec 8.5, Schedules H2-H4: a party
+        // committee's contribution without its FEC id and a candidate
+        // committee's without the candidate's id, name, or office
+        // ("Used if CCM, PAC or PTY" / "Used if CAN or CCM"). WebCheck
+        // reports the first three of the four.
+        (
+            "F3XA_2011814.fec",
+            vec![(Rule::ConditionallyRequiredFieldEmpty, 4)],
         ),
     ]);
 
@@ -111,7 +137,27 @@ fn accepted_filings_warnings_are_pinned() {
         want.sort_by_key(|(r, _)| r.to_string());
         assert_eq!(counts, want, "{name}:\n{v}");
     }
-    assert_eq!(total_warnings, 103);
+    assert_eq!(total_warnings, 127);
+}
+
+/// The party-committee fixtures carry Schedules H2-H4 and 100%-federal
+/// election activity. Their `NUM-5` allocation percentages on H2 (`0.49`)
+/// are numeric, not `non_numeric` (a false positive an earlier rule
+/// produced on every accepted state-party report), and two of the three
+/// are completely clean -- as WebCheck also says.
+#[test]
+fn party_fixtures_with_allocation_schedules_are_clean() {
+    for name in ["F3XN_1998773.fec", "F3XA_2008083.fec"] {
+        let v = validate(&fixtures_dir().join(name));
+        assert!(v.is_empty(), "{name}:\n{v}");
+    }
+    let v = validate(&fixtures_dir().join("F3XA_2011814.fec"));
+    assert!(v.is_acceptable(), "{v}");
+    assert!(
+        v.iter()
+            .all(|f| f.rule == Rule::ConditionallyRequiredFieldEmpty),
+        "{v}"
+    );
 }
 
 /// A superseded-format filing's blank required fields are warnings, not
@@ -151,7 +197,7 @@ fn duplicate_transaction_id() {
     );
     let f = &v.findings[0];
     assert_eq!(f.form_type, "SB21B");
-    assert_eq!(f.field, Some("transaction_id_number"));
+    assert_eq!(f.field, Some("transaction_id"));
     assert!(
         f.message.contains("SB21B.4120") && f.message.contains("line 4"),
         "{f}"
@@ -204,7 +250,7 @@ fn field_too_long() {
 fn dangling_back_reference() {
     let v = invalid("dangling_back_reference.fec");
     assert_eq!(rules_by_line(&v), [(5, Rule::BackReferenceNotFound)], "{v}");
-    assert_eq!(v.findings[0].field, Some("back_reference_tran_id_number"));
+    assert_eq!(v.findings[0].field, Some("back_reference_tran_id"));
     assert!(v.findings[0].message.contains("SA11AI.9999"));
 }
 

@@ -42,12 +42,19 @@
 //! Filings are UTF-8, or Windows-1252 when older software wrote
 //! filer-entered text as raw bytes. The eager parser decides once for the
 //! whole file; the streaming reader, which never sees the whole file,
-//! decides per line (per record on the comma-delimited path). The two agree
-//! on every fixture and on every filing that is consistently one encoding.
-//! They differ only on a file that mixes valid multi-byte UTF-8 on some
-//! lines with invalid bytes on others, where the streaming reader keeps
-//! the UTF-8 lines intact and the eager parser re-reads them as
-//! Windows-1252.
+//! decides per physical line. The two agree on every fixture and on every
+//! filing that is consistently one encoding. They differ only on a file
+//! that mixes valid multi-byte UTF-8 on some lines with invalid bytes on
+//! others, where the streaming reader keeps the UTF-8 lines intact and
+//! the eager parser re-reads them as Windows-1252.
+//!
+//! # Comma-delimited filings
+//!
+//! Spec 3.x-5.x records are CSV-quoted but still one per physical line,
+//! and the reader splits each line on its own, exactly as the eager parser
+//! does (see the comma-delimited notes on [`Filing::parse`]), so
+//! [`ParsedLine::line_no`] is always the physical line and a malformed
+//! quote on one record cannot swallow the records after it.
 //!
 //! # Errors
 //!
@@ -95,14 +102,14 @@
 
 use std::borrow::Cow;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Cursor, Read};
+use std::io::{self, BufRead, BufReader};
 use std::iter::FusedIterator;
 use std::path::Path;
 
 use crate::parser::error::{FecError, Result};
 use crate::parser::filing::{
     Filing, Lenient, NEW_DELIMITER, OnUnparseableLine, ParseOptions, ParsedLine, SkipReason,
-    SkippedLine, split_new_delimited, strip_ant_suffix,
+    SkippedLine, UTF8_BOM, split_new_delimited, split_old_delimited, strip_ant_suffix,
 };
 use crate::parser::form;
 use crate::parser::header::Header;
@@ -123,8 +130,10 @@ const OPEN_BUFFER_BYTES: usize = 64 * 1024;
 /// record, the cover line, and the form-type facts derived from them.
 ///
 /// This is what [`FilingReader::new`] parses eagerly. The field
-/// documentation on [`Filing`] applies to each field here; the cover line
-/// is always [`ParsedLine::line_no`] 2, as in the eager parser.
+/// documentation on [`Filing`] applies to each field here; the cover line's
+/// [`ParsedLine::line_no`] is its physical line (2 on an ASCII-28 filing;
+/// the first non-blank line after the header on a comma-delimited one),
+/// as in the eager parser.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
@@ -150,15 +159,27 @@ pub struct Preamble {
 }
 
 impl Preamble {
-    /// Parses the header and cover line from their already-split fields.
+    /// Parses the header and cover line from their already-split fields;
+    /// the cover line is numbered 2 (use this for ASCII-28 filings, where
+    /// it always is).
     ///
     /// Fails with [`FecError::UnknownElectronicHeaderVersion`] if the
     /// header's version is not an electronic 3.x-8.x version,
     /// [`FecError::MissingFormLine`] if the cover line has no form-type
     /// token, [`FecError::ParserMissing`] if that token names no known
     /// table, and [`FecError::NoMatchingVersionBucket`] if the table has no
-    /// layout at this version.
+    /// layout at this version. Every error that concerns the cover line
+    /// names line 2.
     pub fn from_fields(header_fields: &[&str], summary_fields: &[&str]) -> Result<Self> {
+        Self::from_fields_at(header_fields, summary_fields, 2)
+    }
+
+    /// [`Preamble::from_fields`] with the cover line's physical line number.
+    pub(crate) fn from_fields_at(
+        header_fields: &[&str],
+        summary_fields: &[&str],
+        summary_line_no: u64,
+    ) -> Result<Self> {
         let header = Header::from_fields(header_fields)?;
         let version = header.version;
 
@@ -174,9 +195,9 @@ impl Preamble {
             form::table_for_form_type(&raw_form_type).ok_or_else(|| FecError::ParserMissing {
                 form_type: raw_form_type.clone(),
                 version,
-                line_no: Some(2),
+                line_no: Some(summary_line_no),
             })?;
-        let summary = ParsedLine::from_cells(table, version, 2, summary_fields)?;
+        let summary = ParsedLine::from_cells(table, version, summary_line_no, summary_fields)?;
 
         Ok(Self {
             header,
@@ -244,11 +265,11 @@ impl<R: BufRead> FilingReader<R> {
     ///
     /// Fails with [`FecError::Io`] if the reader fails,
     /// [`FecError::DeprecatedHeaderFormat`] if the file starts with `/*`,
-    /// [`FecError::MissingFormLine`] if it has fewer than two lines or a
-    /// blank cover line, [`FecError::Csv`] on a malformed comma-delimited
-    /// header, [`FecError::UnterminatedTextBlock`] if a text block after
-    /// the cover never closes, and with whatever
-    /// [`Preamble::from_fields`] fails with.
+    /// [`FecError::MissingFormLine`] if it has fewer than two (non-blank,
+    /// on the comma path) lines or a blank cover line,
+    /// [`FecError::UnterminatedTextBlock`] if a text block after the cover
+    /// never closes, and with whatever [`Preamble::from_fields`] fails
+    /// with.
     pub fn new(reader: R) -> Result<Self> {
         Self::with_options(reader, ParseOptions::STRICT)
     }
@@ -287,26 +308,30 @@ impl<R: BufRead> FilingReader<R> {
                 body,
             })
         } else {
-            // Spec 3.x-5.x: comma-delimited with CSV quoting, so the header
-            // must be re-read through the CSV parser (its fields may be
-            // quoted). Chain the raw first line back in front of the rest.
-            let LineSource { reader, buf, .. } = source;
-            let mut csv = CsvSource::new(Cursor::new(buf).chain(reader));
-            if csv.next_record()?.is_none() {
+            // Spec 3.x-5.x: comma-delimited with CSV quoting, one record
+            // per line. Blank lines are skipped, including any before the
+            // header (the eager parser does the same).
+            let header_line = if header_line.trim().is_empty() {
+                match source.next_non_blank_line()? {
+                    Some((_, raw)) => raw,
+                    None => return Err(FecError::MissingFormLine),
+                }
+            } else {
+                header_line
+            };
+            let Some((summary_line_no, summary_raw)) = source.next_non_blank_line()? else {
                 return Err(FecError::MissingFormLine);
-            }
-            let header_fields: Vec<String> = csv.fields().into_iter().map(str::to_owned).collect();
-            if csv.next_record()?.is_none() {
-                return Err(FecError::MissingFormLine);
-            }
-            let summary_fields = csv.fields();
-            let preamble = Preamble::from_fields(
-                &header_fields.iter().map(String::as_str).collect::<Vec<_>>(),
-                &summary_fields,
+            };
+            let header_record = split_old_delimited(&header_line)?;
+            let summary_record = split_old_delimited(&summary_raw)?;
+            let preamble = Preamble::from_fields_at(
+                &header_record.iter().collect::<Vec<_>>(),
+                &summary_record.iter().collect::<Vec<_>>(),
+                summary_line_no,
             )?;
             let body = Body::new(preamble.version, options);
             Ok(Self {
-                source: Source::Csv(csv),
+                source: Source::Csv(source),
                 preamble,
                 body,
             })
@@ -344,16 +369,14 @@ impl<R: BufRead> FilingReader<R> {
     }
 
     /// Physical lines consumed from the underlying reader so far,
-    /// including the header and cover line and any line read ahead.
-    ///
-    /// Exact for ASCII-28 filings. For comma-delimited (spec 3.x-5.x)
-    /// filings, where a quoted field may span lines, it is the last line
-    /// of the most recently read record.
+    /// including the header and cover line and any line read ahead
+    /// (the one-record lookahead means this can be one more than the
+    /// `line_no` of the last record yielded). Exact for both delimiter
+    /// styles.
     #[must_use]
     pub fn lines_read(&self) -> u64 {
         match &self.source {
-            Source::Delimited(s) => s.line_no,
-            Source::Csv(s) => s.lines_read,
+            Source::Delimited(s) | Source::Csv(s) => s.line_no,
         }
     }
 
@@ -427,17 +450,21 @@ fn next_delimited<R: BufRead>(
     }
 }
 
-/// One iteration of the comma-delimited path. Pre-6.0 filings predate the
-/// `[BEGINTEXT]` convention, so there is no text-block handling here (as in
-/// the eager parser).
-fn next_csv<R: Read>(source: &mut CsvSource<R>, body: &mut Body) -> Option<Result<ParsedLine>> {
+/// One iteration of the comma-delimited path: one CSV-quoted record per
+/// physical line. Pre-6.0 filings predate the `[BEGINTEXT]` convention, so
+/// there is no text-block handling here (as in the eager parser).
+fn next_csv<R: BufRead>(source: &mut LineSource<R>, body: &mut Body) -> Option<Result<ParsedLine>> {
     loop {
-        let line_no = match source.next_record() {
-            Ok(Some(line_no)) => line_no,
+        let (line_no, raw) = match source.next_non_blank_line() {
+            Ok(Some(line)) => line,
             Ok(None) => return body.finish(),
             Err(e) => return body.fail(e),
         };
-        let fields = source.fields();
+        let record = match split_old_delimited(&raw) {
+            Ok(record) => record,
+            Err(e) => return body.fail(e),
+        };
+        let fields: Vec<&str> = record.iter().collect();
         if fields.iter().all(|f| f.trim().is_empty()) {
             continue;
         }
@@ -616,9 +643,9 @@ impl Body {
 enum Source<R: BufRead> {
     /// Spec 6.0+: one record per physical line, ASCII-28 delimited.
     Delimited(LineSource<R>),
-    /// Spec 3.x-5.x: comma-delimited with CSV quoting. The first line was
-    /// consumed to detect the delimiter and is chained back in front.
-    Csv(CsvSource<io::Chain<Cursor<Vec<u8>>, R>>),
+    /// Spec 3.x-5.x: one record per physical line, comma-delimited with
+    /// CSV quoting applied line by line.
+    Csv(LineSource<R>),
 }
 
 enum LineKind {
@@ -674,8 +701,28 @@ impl<R: BufRead> LineSource<R> {
             return Ok(None);
         }
         self.line_no = self.line_no.saturating_add(1);
-        let line = strip_terminator(&self.buf);
+        let mut line = strip_terminator(&self.buf);
+        if self.line_no == 1 {
+            // As `filing::decode` does for the whole file.
+            line = line.strip_prefix(UTF8_BOM).unwrap_or(line);
+        }
         Ok(Some((self.line_no, decode_line(line))))
+    }
+
+    /// [`next_line`](Self::next_line), skipping lines that are empty or
+    /// all whitespace. Owned, because the comma-delimited path (its only
+    /// caller) re-parses the line into an owned CSV record anyway.
+    fn next_non_blank_line(&mut self) -> Result<Option<(u64, String)>> {
+        loop {
+            match self.next_line()? {
+                None => return Ok(None),
+                Some((line_no, raw)) => {
+                    if !raw.trim().is_empty() {
+                        return Ok(Some((line_no, raw.into_owned())));
+                    }
+                }
+            }
+        }
     }
 
     /// Having just read a `[BEGINTEXT]` line at `start`, collects every
@@ -745,104 +792,6 @@ fn decode_line(bytes: &[u8]) -> Cow<'_, str> {
     }
 }
 
-/// Records from the `csv` crate over the comma-delimited path, with one
-/// reusable record buffer.
-struct CsvSource<R> {
-    reader: csv::Reader<R>,
-    record: CsvRecord,
-    /// The current record's fields re-decoded as Windows-1252; only filled
-    /// when the record is not valid UTF-8.
-    decoded: Vec<String>,
-    lines_read: u64,
-}
-
-/// The one record buffer, in whichever form the last read left it. The
-/// conversions between the two are moves of the same allocation, so the
-/// buffer is reused across records either way.
-enum CsvRecord {
-    /// Validated UTF-8 -- the normal case. `csv` checks the whole record
-    /// in one pass (ASCII fast path) and then slices fields without
-    /// re-checking, which is what the eager parser's `StringRecord`s do.
-    Text(csv::StringRecord),
-    /// Not valid UTF-8; `CsvSource::decoded` holds the Windows-1252
-    /// reading of every field.
-    Bytes(csv::ByteRecord),
-}
-
-impl Default for CsvRecord {
-    fn default() -> Self {
-        Self::Bytes(csv::ByteRecord::new())
-    }
-}
-
-impl CsvRecord {
-    fn into_bytes(self) -> csv::ByteRecord {
-        match self {
-            Self::Text(text) => text.into_byte_record(),
-            Self::Bytes(bytes) => bytes,
-        }
-    }
-}
-
-impl<R: Read> CsvSource<R> {
-    fn new(reader: R) -> Self {
-        Self {
-            reader: csv::ReaderBuilder::new()
-                .has_headers(false)
-                .flexible(true)
-                .from_reader(reader),
-            record: CsvRecord::default(),
-            decoded: Vec::new(),
-            lines_read: 0,
-        }
-    }
-
-    /// Reads the next record into the buffer and returns the 1-based line
-    /// it starts on (what the eager parser records as `line_no`).
-    /// `Ok(None)` at end of input.
-    fn next_record(&mut self) -> Result<Option<u64>> {
-        let mut bytes = std::mem::take(&mut self.record).into_bytes();
-        let more = self.reader.read_byte_record(&mut bytes)?;
-        // csv-core's line counter is 1 + newlines consumed, so after a
-        // newline-terminated record `line() - 1` is that record's last
-        // line. A final record with no terminator is covered by its own
-        // start line instead.
-        let consumed = self.reader.position().line().saturating_sub(1);
-        self.lines_read = self.lines_read.max(consumed);
-        let line_no = bytes.position().map(|p| p.line()).unwrap_or(0);
-
-        self.record = match csv::StringRecord::from_byte_record(bytes) {
-            Ok(text) => CsvRecord::Text(text),
-            Err(not_utf8) => {
-                let bytes = not_utf8.into_byte_record();
-                self.decoded.clear();
-                self.decoded.extend(bytes.iter().map(|f| {
-                    encoding_rs::WINDOWS_1252
-                        .decode_without_bom_handling(f)
-                        .0
-                        .into_owned()
-                }));
-                CsvRecord::Bytes(bytes)
-            }
-        };
-
-        if !more {
-            return Ok(None);
-        }
-        self.lines_read = self.lines_read.max(line_no);
-        Ok(Some(line_no))
-    }
-
-    /// The current record's fields, decoded as a unit: all UTF-8 if every
-    /// field is valid UTF-8, otherwise all Windows-1252.
-    fn fields(&self) -> Vec<&str> {
-        match &self.record {
-            CsvRecord::Text(text) => text.iter().collect(),
-            CsvRecord::Bytes(_) => self.decoded.iter().map(String::as_str).collect(),
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Filing::open
 // ---------------------------------------------------------------------------
@@ -878,6 +827,8 @@ impl Filing {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+
     use super::*;
 
     const HDR: &str = "HDR\u{1c}FEC\u{1c}8.5\u{1c}FECfile\u{1c}8.5.1.0(f34)\u{1c}\u{1c}";
@@ -949,10 +900,7 @@ mod tests {
         );
         let lines = collect(reader(&content));
         assert_eq!(lines.len(), 2);
-        assert_eq!(
-            lines[1].get("back_reference_tran_id_number"),
-            Some("VENDOR")
-        );
+        assert_eq!(lines[1].get("back_reference_tran_id"), Some("VENDOR"));
         assert_same_as_eager(&content);
     }
 
@@ -1116,12 +1064,22 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].line_no, 3);
         assert_eq!(lines[0].get("contributor_name"), Some("SMITH, JANE"));
-        // The csv crate stamps a record with the position it started
-        // scanning from, which is the blank line 4 rather than the record's
-        // own line 5. The eager parser reports the same number (checked
-        // below), and equivalence is the contract here.
-        assert_eq!(lines[1].line_no, 4);
+        // Physical line numbers: the blank line 4 is skipped, not counted
+        // against the record that follows it.
+        assert_eq!(lines[1].line_no, 5);
         assert_eq!(r.lines_read(), 5);
+        assert_same_as_eager(content);
+    }
+
+    #[test]
+    fn old_comma_delimited_blank_lines_before_header_and_cover_are_skipped() {
+        let content = "\n\nHDR,FEC,3.00,SoftCo,1.0,^,,\n\n\"F3XN\",\"C00123456\"\n\n\"SB21B\",\"C00123456\",\"\",\"\",\"\",\"\",\"\",\"\",\"\n\"SB21B\",\"C00123456\"\n";
+        let mut r = reader(content);
+        assert_eq!(r.preamble().summary.line_no, 5);
+        let lines = r.by_ref().collect::<Result<Vec<_>>>().unwrap();
+        // The stray trailing quote on line 7 does not swallow line 8.
+        assert_eq!(lines.iter().map(|l| l.line_no).collect::<Vec<_>>(), [7, 8]);
+        assert_eq!(r.lines_read(), 8);
         assert_same_as_eager(content);
     }
 
@@ -1141,7 +1099,7 @@ mod tests {
         let mut r = FilingReader::new(bytes.as_slice()).unwrap();
         assert_eq!(r.preamble().summary.get("committee_name"), Some("CAFÉ PAC"));
         let line = r.next().unwrap().unwrap();
-        assert_eq!(line.get("back_reference_tran_id_number"), Some("ÉMILE"));
+        assert_eq!(line.get("back_reference_tran_id"), Some("ÉMILE"));
 
         let eager = Filing::parse_bytes(&bytes).unwrap();
         assert_eq!(eager.summary, r.preamble().summary);
@@ -1149,7 +1107,23 @@ mod tests {
     }
 
     #[test]
-    fn windows_1252_bytes_decode_per_record_on_the_comma_path() {
+    fn utf8_bom_is_not_part_of_the_header_on_either_path() {
+        for body in [
+            format!("{HDR}\nF3XN\u{1c}C00123456\n"),
+            "HDR,FEC,5.3,X,1\nF3XN,C00123456\n".to_string(),
+        ] {
+            let mut bytes = b"\xEF\xBB\xBF".to_vec();
+            bytes.extend_from_slice(body.as_bytes());
+            let r = FilingReader::new(bytes.as_slice()).unwrap();
+            assert_eq!(r.preamble().header.record_type, "HDR");
+            let eager = Filing::parse_bytes(&bytes).unwrap();
+            assert_eq!(eager.header, r.preamble().header);
+            assert_eq!(eager.summary, r.preamble().summary);
+        }
+    }
+
+    #[test]
+    fn windows_1252_bytes_decode_per_line_on_the_comma_path() {
         let mut bytes = b"HDR,FEC,5.3,SoftCo,1.0\nF3XN,C00123456,\"CAF\xC9, INC.\"\n".to_vec();
         bytes.extend_from_slice(b"SA11AI,C00123456,IND,\xC9MILE\nSA11AI,C00123456,IND,PLAIN\n");
         let mut r = FilingReader::new(bytes.as_slice()).unwrap();

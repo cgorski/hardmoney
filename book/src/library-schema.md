@@ -31,7 +31,9 @@ The generator refuses inconsistent data (two fields at one column, one
 field at two columns, overlapping version buckets), which is why the
 project's rule is "data, not code, for facts about the format": a column
 number is never typed into a `.rs` file by hand. The same compiled data
-is what [`hardmoney spec`](./cli-reference.md#spec) prints.
+is what [`hardmoney spec`](./cli-reference.md#spec) prints. The canonical
+names themselves, the rules they follow and every field of every table with
+its FEC label, are the subject of the next chapter, [Field names](./field-names.md).
 
 ## `SpecVersion`
 

@@ -10,7 +10,7 @@ zip_code,8,ORGANIZATION ZIP,8,ZIP
 organization_type,9,ORGANIZATION TYPE,9,ORGANIZATION TYPE
 report_code,10,REPORT CODE,10,RPTCODE
 election_date,11,DATE OF ELECTION,11,DATE (Of Election)
-election_state,12,STATE OF ELECTION,12,STATE (Of Election)
+state_of_election,12,STATE OF ELECTION,12,STATE (Of Election)
 coverage_from_date,13,COVERAGE FROM DATE,13,DATE (Coverage From)
 coverage_through_date,14,COVERAGE THROUGH DATE,14,DATE (Coverage To)
 total_costs,15,TOTAL COSTS,15,TOTAL COSTS

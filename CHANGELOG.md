@@ -1,5 +1,175 @@
 # Changelog
 
+## 3.0.0 — 2026-09-15
+
+- **Breaking: one canonical field vocabulary across all 59 tables.** The
+  field names in `data/fec-csv-sources/*.csv` spelled the same concept
+  differently from one table to the next (`transaction_id` on Schedule A
+  but `transaction_id_number` on B, C, D, E, F, H4, H6 and TEXT;
+  `memo_text_description` on Schedule A but `memo_text` on H4;
+  `col_a_individual_contributions_itemized` on Form 3 but
+  `col_a_individuals_itemized` on 3X and 3P; `date_of_election` on 3X but
+  `election_date` on 3). 159 names on 39 tables are renamed so each
+  concept has one spelling everywhere: `transaction_id`,
+  `back_reference_tran_id`, `back_reference_sched_name`, `memo_text`,
+  `*_zip_code`, `*_street_1`/`_2`, `*_middle_name`, `election_date`,
+  `state_of_election`, `candidate_id_number`, `payee_committee_id_number`,
+  `expenditure_purpose_descrip`, `amended_cd`, and on the cover pages of
+  F3, F3Z*, F3P, F3PZ*, F3X, F4 and Schedule L the F3-family spellings
+  for lines whose FEC labels describe the same line
+  (`col_a_political_party_contributions`, `col_a_pac_contributions`,
+  `col_a_candidate_contributions`, `col_a_candidate_loans`,
+  `col_a_refunds_to_*`, `col_a_total_refunds`,
+  `col_a_cash_on_hand_beginning_period`, ...). No column position or
+  version bucket changed, so parsing is byte-for-byte the same; only the
+  keys differ. The generated constants follow (`sch_b::TRANSACTION_ID`,
+  `sch_a::MEMO_TEXT`), as do the typed views (`ScheduleA::memo_text`,
+  `ScheduleB::memo_text`, `ScheduleE::memo_text`), the reconcile rule
+  tables, `LineCheck.field`, validation findings' `field`, exports'
+  column headers, and the JSON stored in `schedule_e_lines.raw` (re-ingest
+  before `bulk-dump-compare` on filings ingested with 2.x). The full map,
+  one family per concept with the rule that picked the winner, is
+  `scripts/rename_canonical.py` (the script that applied it; refuses
+  collisions and touches only column 1); `NOTICE` lists every family;
+  the new book chapter *Field names* documents the rules, the concept
+  table, and every field of every table with its FEC label; a new test
+  in `tests/format_table_integrity.rs` enforces the rules on any future
+  table change.
+- **Correctness and hardening audit of everything outside the parser**
+  (`db`, `api`, `bulk`, `export`, `fec`, `ui`, `cli`, Python bindings).
+  Fixed: concurrent ingests of amendments to one original could leave
+  two rows `most_recent` (each chain `UPDATE` ran against a snapshot
+  without the other's uncommitted row); the resolver now takes a
+  transaction-scoped advisory lock on the chain's original id
+  (`db::chain_lock`), with a test that reproduces the race.
+  `GET /filings/{id}/schedule-e` is a 404 for an id that was never
+  ingested, like the parent route (it was `[]`).
+  `GET /independent-expenditures` pages deterministically (`sub_id` is
+  the tiebreaker). The request log span redacts `?api_key=` so
+  `RUST_LOG=debug` never writes the key. `POST /tools/{write,validate,
+  reconcile}` bound a document by the size of the filing it would
+  *write* (sum of the records' layout widths) rather than by its JSON
+  size, 413 past the body cap; a record whose `table` disagrees with its
+  form-type token, or a schedule record without one, is a 400 that says
+  what disagrees (it was "no format table for form type 'SCHA'").
+  `fec`: `ureq`'s `BadUri`/`RequireHttpsOnly` errors, which quote the
+  request URI, are redacted before they reach an error message.
+  `bulk::dump`: a resumed download whose 206 carries a different ETag
+  than the saved partial restarts from zero instead of splicing two
+  files. `dumps check` measures free space for a relative cache dir that
+  does not exist yet; `dumps remove --keep-file` says the file was kept
+  rather than "not downloaded". `efile watch` sleeps on the runtime, not
+  the thread. `query` percent-encodes path ids and rejects a negative
+  `--offset` up front. New `hardmoney bulk-resolve-chains`: the missing
+  CLI half of `bulk-load-filing --no-resolve` (and the fix-up after
+  migration `0003` on a namespace that already held filings). Book: the
+  CLI reference is re-captured from 2.2.0 (`validate --oracle`,
+  `bulk-restore-dump --cycles/--no-indexes/--dump-file/--jobs`, the three
+  `bulk-dump-*` commands were missing); *API hardening* says 64 KiB / 32
+  MiB with `--ui` (it said 64 KB); *REST API*, *Amendments*, and *Web UI*
+  document the behaviours above. Tech debt: one `cli::shared` module
+  replaces the two copies of the column renderer and the dump cache
+  default; `bulk::filing_id_from_path` is the same four lines as the
+  export one.
+
+- **Parser correctness audit against an independent oracle.** Every
+  corpus filing (141 real filings, 435,726 records, 19.5 million field
+  values) was parsed with both hardmoney and the `fecfile` Python library
+  and compared field by field (`tests/oracle_fecfile.py`, run by
+  `tests/parser_oracle.rs` under `HARDMONEY_ORACLE_TESTS=1`); every
+  disagreement was traced to the FEC's own column listings or v8.5
+  workbook and is documented in `tests/fixtures/ORACLE_NOTES.md`. Found
+  and fixed in hardmoney: **comma-delimited (spec 3.x-5.x) filings are
+  now parsed one record per physical line** -- a stray unbalanced `"` at
+  the end of a record (every Schedule H4 line of a real Aristotle 3.00
+  filing, now `tests/fixtures/quirks/`) used to open a CSV quote that
+  silently swallowed the remaining 113 records into one field; `line_no`
+  on that path is now the physical line (it was off by the blank lines
+  skipped before each record, and the cover was always reported as line
+  2) on both the eager and streaming parsers. Table data (each recorded
+  in `NOTICE`): Schedule C-2 in 3.x-5.x had a phantom `transaction_id`
+  column that shifted every guarantor field one column right; Form 5 had
+  no layout for spec 6.1 and Form 3Z none before 6.4 although the FEC
+  lists both; Form 3L column 14 (STATE OF ELECTION, the only v8.5
+  workbook column no layout named) is now `state_of_election`; and the
+  3.x-5.x AMENDED CD column, which real filings populate, is named
+  `amended_cd` on the 21 tables where it was unnamed. A leading UTF-8 BOM
+  no longer leaks into `header.record_type`. The writer keeps a bare `\r`
+  inside a value (the parser does), so `parse(write(parse(f)))` is exact
+  on every corpus filing including the Windows-1252 ones. `ParsedLine::set`
+  updates `raw_form_type` when the *column-0* field is set (`rec_type`
+  on TEXT), not whenever a field happens to be called `form_type`;
+  `Layout::token_field` names that column. `build.rs` and the parser
+  modules in scope have no unchecked arithmetic, indexing, or `unwrap`
+  left outside tests. New `tests/parser_adversarial.rs` (proptest):
+  arbitrary and filing-shaped bytes, truncation at every offset, injected
+  delimiters/quotes/NULs/invalid UTF-8/`[BEGINTEXT]`, a 5 MB single line,
+  and random valid filings over every table and version never panic and
+  round-trip through the writer and `FilingReader`; every `FecError`
+  variant is provoked. Docs corrected: `Filing::parse` lists its
+  delimiter choice and every error; `Header::from_fields` its failure
+  cases; `normalize_field` cites the FEC's rule #30 for why a
+  quote-wrapped field is never data; `decode` explains the UTF-8-first
+  choice; `is_allowed_top_level_form` says it takes a *base* form.
+
+- **Reconcile and validate audited against 98 freshly fetched FEC-accepted
+  reports.** The Schedule H3-H6 rules (F3X 18(a), 18(b), 21(a), 30(a)),
+  written from the spec text, were checked against 45 state-party Form 3X
+  reports carrying 3-648 H4 and up to 33 H3 records each: every one
+  balances, confirming 18(a) = sum of H3 `transferred_amount` (each
+  event-type record repeats the transfer total; summing that would
+  double-count) and 21(a)(i)/(ii) = H4 federal/nonfederal shares with
+  memo entries excluded (4,065 memos in the sample; no report carries an
+  `SB21A`). Four lines are now floors (`>=`) rather than identities, per
+  the FEC's own Form 3X/3/3P instructions ("aggregating in excess of
+  $200"): F3X 24 (independent expenditures; Schedule E's unitemized
+  "Line (b)" has no electronic field) and 30(b) (100%-federal election
+  activity; seven of the 45 reports exceed their `SB30B` sum), F3 11(d)
+  and F3P 17(d) (contributions from the candidate). The corpus now stands
+  at 124 periodic reports, 102 balancing every Column A rule; the 22
+  others are 17 truncated third-party samples and 5 single-line filer
+  discrepancies, each written up in `tests/fixtures/ORACLE_NOTES.md`
+  along with a twelve-cent gap on one NRSC line 12. `Relation`'s docs
+  now tabulate the exact-versus-floor derivation for every line;
+  `LineCheck::reported_unparseable` says what it does (blank is zero, not
+  garbage); the module documents why `Decimal` saturation cannot hide a
+  discrepancy. Six fixtures added (all FEC-accepted, spec 8.5): three
+  state parties with H2-H4 (Georgia GOP, Republican Party of Virginia,
+  New Hampshire Democrats), a House amendment with 58 Schedule C loans
+  and 3 Schedule D debts, a joint fundraising committee with 106 `SB22`
+  transfers, and a 2026 presidential amendment. **Validate:** three false
+  positives found on accepted filings and fixed -- `non_numeric` on the
+  `NUM-5` allocation percentages of Schedules H1/H2 (`0.49`, on 16 of 45
+  party reports; a decimal point is numeric), `field_too_long` on
+  `AMT-12` amounts written in 13 characters (ActBlue's accepted
+  `2280311229.59`; the bound is on digits), and `illegal_character` on a
+  2001 report's `á`/`í` (demoted to a warning on superseded formats, as
+  `required_field_empty` is). Nine rules added from the FEC's message
+  list, each data-driven from the workbook: `invalid_year` (#36),
+  `invalid_district` (#39, replacing the pattern warning; demoted on old
+  formats), `invalid_event_type` (#45, H3 codes read from the value
+  reference), `invalid_zip_code` (W30), `invalid_phone_number` (W31),
+  `invalid_office_code` (W32), `invalid_election_code` (W5),
+  `invalid_checkbox` (W43), `address_in_second_line` (W28).
+  `header_inconsistent_with_amendment_status` is an error, as the FEC's
+  #8 is; `invalid_allowed_value` is an error where the workbook says
+  "Error if Coded incorrectly" (report codes, #22). Conditional
+  requirements whose condition sits in the workbook's rule cell ("Used
+  if CCM, PAC or PTY", "Used if CAN or CCM" on Schedule A's donor
+  columns) are now evaluated, matching WebCheck's live behaviour.
+  `Rule::demoted_on_superseded_format` names the demoted set. Every FEC
+  message without a rule is tabulated in the module docs with the reason
+  (#22/#38 need a report-code list the workbook elides; #37 cannot be
+  enforced on `A/N-15` free text that accepted filings fill with
+  `Prime -1`). Across 364 corpus files every FEC-accepted one reports
+  zero errors. **WebCheck:** `OracleReport::is_acceptable` treats the
+  service's `WARNINGS` verdict ("PASSED validation with Warnings") as
+  accepted, as the FEC does; WebCheck's `is Required, but field is
+  Empty` wording for a blank `X (warning)` column is a live alternate for
+  `recommended_field_empty`; a live test pins five 2026 fixtures against
+  the service. `webcheck.rs` slices are `get`-based throughout; no `as`
+  cast remains in the three modules.
+
 ## 2.2.0 — 2026-09-15
 
 - **`hardmoney dumps`: a guided import of the FEC's Postgres dump files**

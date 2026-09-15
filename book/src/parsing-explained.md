@@ -135,7 +135,7 @@ handful of the 44 fields each line carries:
   "line_no": 3,
   "fields": {
     "filer_committee_id_number": "C00865444",
-    "transaction_id_number": "500196509",
+    "transaction_id": "500196509",
     "entity_type": "ORG",
     "payee_organization_name": "DECLARATION MEDIA LLC",
     "expenditure_amount": "11282.23",

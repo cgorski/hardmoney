@@ -164,7 +164,7 @@ pub async fn watch(args: WatchArgs) -> CliResult {
             Err(e) if args.once => return Err(e.into()),
             Err(e) => {
                 eprintln!("poll failed: {e}; retrying in {}s", args.interval);
-                std::thread::sleep(Duration::from_secs(args.interval));
+                tokio::time::sleep(Duration::from_secs(args.interval)).await;
                 continue;
             }
         };
@@ -230,7 +230,9 @@ pub async fn watch(args: WatchArgs) -> CliResult {
             }
             return Ok(());
         }
-        std::thread::sleep(Duration::from_secs(args.interval));
+        // Async sleep: a blocking one would pin a runtime worker for the
+        // whole interval (and stall a pool's background tasks with `--ingest`).
+        tokio::time::sleep(Duration::from_secs(args.interval)).await;
     }
 }
 

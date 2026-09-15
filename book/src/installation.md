@@ -6,7 +6,7 @@ Add `hardmoney` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-hardmoney = "2"
+hardmoney = "3"
 ```
 
 That pulls in every feature: the parser, the Postgres bulk-ETL module, and
@@ -16,7 +16,7 @@ feature set instead:
 
 ```toml
 [dependencies]
-hardmoney = { version = "2", default-features = false, features = ["fetch"] }
+hardmoney = { version = "3", default-features = false, features = ["fetch"] }
 ```
 
 `fetch` enables `Filing::fetch`, which downloads a raw filing directly

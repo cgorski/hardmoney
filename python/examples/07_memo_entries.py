@@ -48,8 +48,8 @@ def main(argv: Sequence[str]) -> int:
     for line in sched_a:
         flag = "X" if line.is_memo else ""
         print(f"{line.line_no:4} {line.form_type:6} {flag:4} {line.amount('contribution_amount')!s:>10}  "
-              f"{line['back_reference_tran_id_number']:14} {name_of(line)}"
-              + (f" ({line['memo_text_description']})" if line['memo_text_description'] else ""))
+              f"{line['back_reference_tran_id']:14} {name_of(line)}"
+              + (f" ({line['memo_text']})" if line['memo_text'] else ""))
 
     # Sum one form-type token both ways.
     tokens = sorted({l.form_type for l in memos}) or sorted({l.form_type for l in sched_a})

@@ -8,8 +8,9 @@
 //!
 //! # Fidelity
 //!
-//! Field values are preserved **verbatim** apart from surrounding ASCII
-//! whitespace (see [`crate::parser::utils`]); nothing is upper-cased or
+//! Field values are preserved **verbatim** apart from two wire
+//! conventions -- surrounding ASCII whitespace and one pair of wrapping
+//! double quotes (see [`crate::parser::utils`]); nothing is upper-cased or
 //! stripped. Interpretation of codes (form-type tokens, entity types, memo
 //! flags) is case-insensitive at the point of use. Every [`ParsedLine`]
 //! remembers the [`Layout`] it was parsed with, which is what makes the
@@ -83,7 +84,15 @@ pub struct ParsedLine {
 
 impl ParsedLine {
     /// Parses one already-split record with the layout for `table` at
-    /// `version`. Fails only if no layout covers that version.
+    /// `version`. Fails only with [`FecError::NoMatchingVersionBucket`] if
+    /// no layout covers that version.
+    ///
+    /// Each field takes the cell at its layout column, normalised (see
+    /// [`crate::parser::utils::normalize_field`]); a cell the record does
+    /// not carry (short line) is blank, and cells beyond the layout's
+    /// columns are ignored. `raw_form_type` is the first cell upper-cased
+    /// (blank if there is none); the table is `table`, whatever the token
+    /// says -- dispatch happens before this call.
     pub fn from_cells(
         table: Table,
         version: SpecVersion,
@@ -122,8 +131,12 @@ impl ParsedLine {
 
     /// Builds a line from `(field, value)` pairs -- for tests, synthetic
     /// fixtures, and editors. Every name must exist in the layout for
-    /// `table` at `version`; unspecified fields are blank. The `form_type`
-    /// field, if not given, defaults to the table's name.
+    /// `table` at `version` (else [`FecError::UnknownField`]); unspecified
+    /// fields are blank. The column-0 token field (`form_type`, or
+    /// `rec_type` on a `TEXT` record), if not given, defaults to the
+    /// table's name -- which dispatches back to the table for every table
+    /// except the schedules, whose tokens carry a line number (`SA11AI`);
+    /// give `form_type` explicitly for those.
     pub fn from_pairs<'p>(
         table: Table,
         version: SpecVersion,
@@ -134,8 +147,10 @@ impl ParsedLine {
         for (name, value) in pairs {
             line.set(name, value)?;
         }
-        if line.raw_form_type.is_empty() {
-            let _ = line.set("form_type", table.as_str());
+        if line.raw_form_type.is_empty()
+            && let Some(token_field) = line.layout.token_field()
+        {
+            let _ = line.set(token_field, table.as_str());
         }
         Ok(line)
     }
@@ -169,8 +184,15 @@ impl ParsedLine {
         self.get(field).filter(|v| !v.is_empty())
     }
 
-    /// Sets `field` (trimmed); fails if the layout has no such field. If
-    /// `field` is `form_type`, `raw_form_type` is updated too.
+    /// Sets `field` (normalised like a parsed value: trimmed, one pair of
+    /// wrapping quotes removed); fails with [`FecError::UnknownField`] if
+    /// the layout has no such field. Setting the column-0 token field
+    /// (`form_type`, or `rec_type` on a `TEXT` record) updates
+    /// `raw_form_type` too, so the line keeps dispatching to the table it
+    /// was built with only if the new token still names that table --
+    /// [`Filing::from_parts`] checks exactly that. A `TEXT` record's
+    /// `form_type` on spec 3.x-5.x is column 2 (the form the text
+    /// annotates) and does not touch `raw_form_type`.
     pub fn set(&mut self, field: &str, value: &str) -> Result<()> {
         let i = self
             .layout
@@ -182,7 +204,7 @@ impl ParsedLine {
         if let Some(slot) = self.values.get_mut(i) {
             *slot = CompactString::new(normalize_field(value));
         }
-        if field == "form_type" {
+        if self.layout.fields.get(i).is_some_and(|f| f.column == 0) {
             self.raw_form_type = normalize_form_type(value);
         }
         Ok(())
@@ -344,9 +366,11 @@ pub struct Filing {
     /// a well-formed reference -- including on amendments, which the FEC's
     /// own validator would reject (`hardmoney validate` reports it).
     pub amends_filing: Option<u64>,
-    /// The cover/summary line (row 2 of the file). For a Form 99, this is
-    /// also where any `[BEGINTEXT]` block's content ends up (spliced into
-    /// the `text` field).
+    /// The cover/summary line: physical line 2 of an ASCII-28 filing
+    /// (which must carry it there), or the first non-blank line after the
+    /// header of a comma-delimited one (`summary.line_no` says which). For
+    /// a Form 99, this is also where any `[BEGINTEXT]` block's content
+    /// ends up (spliced into the `text` field).
     pub summary: ParsedLine,
     /// Every subsequent body line (schedules, sub-forms, `TEXT` records),
     /// in file order.
@@ -421,6 +445,7 @@ pub struct SkippedLine {
     pub line_no: u64,
     /// The form-type token (column 0), upper-cased.
     pub raw_form_type: String,
+    /// Why the line could not be parsed.
     pub reason: SkipReason,
 }
 
@@ -505,13 +530,28 @@ impl Filing {
     ///
     /// Equivalent to `Filing::parse_with(content, &ParseOptions::STRICT)`
     /// followed by `.into_strict()`.
+    ///
+    /// The delimiter is chosen from the first line: if it contains ASCII 28
+    /// the filing is spec 6.0+ (one record per line, no quoting), otherwise
+    /// it is comma-delimited spec 3.x-5.x (CSV quoting, one record per
+    /// line; blank lines anywhere are skipped). Fails with
+    /// [`FecError::DeprecatedHeaderFormat`] on a `/*`-style pre-3.0 header,
+    /// [`FecError::MissingFormLine`] if there is no header or cover line
+    /// (or the cover's form-type token is blank),
+    /// [`FecError::UnknownElectronicHeaderVersion`] if the header's version
+    /// is not electronic 3.x-8.x, [`FecError::ParserMissing`] or
+    /// [`FecError::NoMatchingVersionBucket`] for a line that cannot be
+    /// dispatched (naming the line), and
+    /// [`FecError::UnterminatedTextBlock`] for a `[BEGINTEXT]` without its
+    /// `[ENDTEXT]`.
     pub fn parse(content: &str) -> Result<Filing> {
         Self::parse_with(content, &ParseOptions::STRICT)?.into_strict()
     }
 
     /// Parses a complete filing from raw bytes, decoding as UTF-8 first and
     /// falling back to Windows-1252 (the encoding older FECFile-produced
-    /// filings sometimes use for filer-entered free text) if that fails.
+    /// filings sometimes use for filer-entered free text) if that fails;
+    /// see [`decode`]. Otherwise identical to [`Filing::parse`].
     pub fn parse_bytes(bytes: &[u8]) -> Result<Filing> {
         Self::parse_bytes_with(bytes, &ParseOptions::STRICT)?.into_strict()
     }
@@ -607,15 +647,14 @@ impl Filing {
     }
 
     fn parse_new_delimited(content: &str, options: &ParseOptions) -> Result<Lenient<Filing>> {
-        // (line_no, raw text) pairs; line numbers are 1-based.
-        let mut lines = content.lines().enumerate().map(|(i, l)| (i as u64 + 1, l));
+        let mut lines = numbered_lines(content);
 
         let (_, header_raw) = lines.next().ok_or(FecError::MissingFormLine)?;
         let (_, summary_raw) = lines.next().ok_or(FecError::MissingFormLine)?;
         let header_fields = split_new_delimited(header_raw);
         let summary_fields = split_new_delimited(summary_raw);
 
-        let mut parsed = Self::parse_header_and_summary(&header_fields, &summary_fields)?;
+        let mut parsed = Self::parse_header_and_summary(&header_fields, &summary_fields, 2)?;
         let mut acc = BodyAccumulator::new(options);
 
         while let Some((line_no, raw)) = lines.next() {
@@ -650,34 +689,32 @@ impl Filing {
         Ok(acc.finish(parsed))
     }
 
+    /// Spec 3.x-5.x: comma-delimited with CSV quoting, **one record per
+    /// physical line**. Each line is split on its own (see
+    /// [`split_old_delimited`]), so a stray unbalanced quote at the end of
+    /// one record -- which real 3.00 filings from at least one vendor
+    /// carry on every Schedule H4 line -- cannot swallow the rest of the
+    /// file into a single field, and `line_no` is always the physical line.
+    /// Blank lines are skipped, including any before the header.
     fn parse_old_delimited(content: &str, options: &ParseOptions) -> Result<Lenient<Filing>> {
-        let mut reader = csv::ReaderBuilder::new()
-            .has_headers(false)
-            .flexible(true)
-            .from_reader(content.as_bytes());
-        let mut records = reader.records();
+        let mut lines = numbered_lines(content).filter(|(_, raw)| !raw.trim().is_empty());
 
-        let header_record = records
-            .next()
-            .transpose()?
-            .ok_or(FecError::MissingFormLine)?;
-        let summary_record = records
-            .next()
-            .transpose()?
-            .ok_or(FecError::MissingFormLine)?;
+        let (_, header_raw) = lines.next().ok_or(FecError::MissingFormLine)?;
+        let (summary_line_no, summary_raw) = lines.next().ok_or(FecError::MissingFormLine)?;
+        let header_record = split_old_delimited(header_raw)?;
+        let summary_record = split_old_delimited(summary_raw)?;
         let header_fields: Vec<&str> = header_record.iter().collect();
         let summary_fields: Vec<&str> = summary_record.iter().collect();
 
-        let parsed = Self::parse_header_and_summary(&header_fields, &summary_fields)?;
+        let parsed =
+            Self::parse_header_and_summary(&header_fields, &summary_fields, summary_line_no)?;
         let mut acc = BodyAccumulator::new(options);
 
         // Pre-6.0 filings (the only ones using the comma delimiter) predate
         // the [BEGINTEXT]/[ENDTEXT] convention, so no slurp-mode handling
         // is needed here.
-        for record in records {
-            let record = record?;
-            // csv reports the 1-based line of the record's first byte.
-            let line_no = record.position().map(|p| p.line()).unwrap_or(0);
+        for (line_no, raw) in lines {
+            let record = split_old_delimited(raw)?;
             let fields: Vec<&str> = record.iter().collect();
             if fields.iter().all(|f| f.trim().is_empty()) {
                 continue;
@@ -743,9 +780,15 @@ impl Filing {
     }
 
     /// Shared header + cover-line parsing, common to both delimiter
-    /// styles. Returns a `Filing` with an empty `lines` vec -- callers fill
-    /// that in afterward.
-    fn parse_header_and_summary(header_fields: &[&str], summary_fields: &[&str]) -> Result<Filing> {
+    /// styles. `summary_line_no` is the cover line's physical line (2 on
+    /// the ASCII-28 path, which requires it there; the comma path skips
+    /// blank lines). Returns a `Filing` with an empty `lines` vec --
+    /// callers fill that in afterward.
+    fn parse_header_and_summary(
+        header_fields: &[&str],
+        summary_fields: &[&str],
+        summary_line_no: u64,
+    ) -> Result<Filing> {
         let header = Header::from_fields(header_fields)?;
         let version = header.version;
 
@@ -757,9 +800,9 @@ impl Filing {
             form::table_for_form_type(&raw_form_type).ok_or_else(|| FecError::ParserMissing {
                 form_type: raw_form_type.clone(),
                 version,
-                line_no: Some(2),
+                line_no: Some(summary_line_no),
             })?;
-        let summary = ParsedLine::from_cells(table, version, 2, summary_fields)?;
+        let summary = ParsedLine::from_cells(table, version, summary_line_no, summary_fields)?;
         Self::from_parts(header, summary, Vec::new())
     }
 }
@@ -867,25 +910,100 @@ impl<'o> BodyAccumulator<'o> {
     }
 }
 
+/// Physical lines of `content` with their 1-based numbers, split as
+/// [`str::lines`] does (`\n` or `\r\n`; a lone `\r` is not a break). The
+/// count is a `u64` because line numbers appear in errors and in
+/// [`ParsedLine::line_no`]; `usize -> u64` cannot lose range on any
+/// supported target.
+fn numbered_lines(content: &str) -> impl Iterator<Item = (u64, &str)> {
+    content
+        .lines()
+        .enumerate()
+        .map(|(i, l)| (u64::try_from(i).unwrap_or(u64::MAX).saturating_add(1), l))
+}
+
 /// Decodes raw filing bytes: UTF-8 if valid, else Windows-1252.
+///
+/// The two encodings are distinguishable in practice. Every byte sequence
+/// that Windows-1252 software emits for a *single* non-ASCII character
+/// (`0x80..=0xFF`, e.g. `0x92` for a curly apostrophe, `0xE9` for `é`) is
+/// invalid on its own as UTF-8, so such files fall through to the
+/// fallback. The reverse ambiguity -- a valid multi-byte UTF-8 sequence
+/// such as `C3 A9` (`é`) that is *also* two printable Windows-1252
+/// characters (`Ã©`) -- is resolved in favour of UTF-8, because no filer
+/// types `Ã©` and every UTF-8 filing would otherwise be misread. A file
+/// that mixes both encodings decodes entirely as Windows-1252 (its UTF-8
+/// sequences then read as mojibake); the streaming reader, which decides
+/// per line, keeps the UTF-8 lines intact in that case.
+///
+/// A leading UTF-8 byte-order mark is dropped: it is an artefact of the
+/// editor or exporter, not part of the `HDR` token, and would otherwise
+/// come back as `header.record_type == "\u{feff}HDR"`.
+///
+/// Note that decoding never fails: every byte is a character in
+/// Windows-1252 (`encoding_rs` maps the five undefined positions to the
+/// corresponding C1 controls), so no input is rejected here.
 #[must_use]
 pub fn decode(bytes: &[u8]) -> String {
+    let bytes = bytes.strip_prefix(UTF8_BOM).unwrap_or(bytes);
     match std::str::from_utf8(bytes) {
         Ok(s) => s.to_string(),
         Err(_) => {
-            let (decoded, _, _) = encoding_rs::WINDOWS_1252.decode(bytes);
+            let (decoded, _) = encoding_rs::WINDOWS_1252.decode_without_bom_handling(bytes);
             decoded.into_owned()
         }
     }
 }
 
+/// The UTF-8 encoding of U+FEFF.
+pub(crate) const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
+
 /// Splits one already-decoded raw line on the ASCII-28 delimiter. A
 /// trailing `\r` (CRLF line ending) is dropped; fields are otherwise
 /// returned exactly as filed -- per-field trimming happens in
-/// [`ParsedLine::from_cells`].
+/// [`ParsedLine::from_cells`]. Never fails and never returns an empty
+/// vector (an empty line is one empty field).
 #[must_use]
 pub fn split_new_delimited(raw: &str) -> Vec<&str> {
     raw.trim_end_matches('\r').split(NEW_DELIMITER).collect()
+}
+
+/// Splits one physical line of a comma-delimited (spec 3.x-5.x) filing
+/// into its fields, applying CSV quoting rules: a field may be wrapped in
+/// double quotes, inside which commas are data and `""` is one quote.
+///
+/// The line is parsed on its own, so a record can never span lines. That
+/// matches the FEC's format (one record per line, no line breaks inside
+/// fields) and every other parser of the era; it also means the
+/// malformations real filings contain degrade gracefully instead of
+/// derailing the parse: an unterminated quote runs to the end of the line
+/// (`"","","` yields three empty fields), a quote that closes mid-field is
+/// dropped (`"ab"c` yields `abc`), and a quote inside an unquoted field is
+/// data (`ab"c`). A lone `\r` inside the line is data too; a trailing one
+/// (CRLF) is dropped. An empty or all-whitespace line yields a record with
+/// a single blank field.
+///
+/// Returns the `csv` crate's record; the `Result` is for API symmetry with
+/// the crate, which cannot fail on an in-memory UTF-8 line.
+pub(crate) fn split_old_delimited(raw: &str) -> Result<csv::StringRecord> {
+    let raw = raw.trim_end_matches('\r');
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        // Only `\n` ends a record, and the line carries none: a bare `\r`
+        // inside a field stays in the field.
+        .terminator(csv::Terminator::Any(b'\n'))
+        // The reader buffers the whole line once; the default 8 KiB buffer
+        // would be allocated per line.
+        .buffer_capacity(raw.len().max(1))
+        .from_reader(raw.as_bytes());
+    let mut record = csv::StringRecord::new();
+    if !reader.read_record(&mut record)? {
+        // Only an empty input yields no record; represent it as one blank
+        // field so callers see the same shape as `split_new_delimited`.
+        record.push_field("");
+    }
+    Ok(record)
 }
 
 /// Strips a trailing amendment (`A`), new (`N`), or termination (`T`)
@@ -1111,6 +1229,65 @@ mod tests {
             filing.summary.get("committee_name"),
             Some("COMMITTEE, INC.")
         );
+        assert_eq!(filing.summary.line_no, 2);
+    }
+
+    /// Comma-delimited records are one per physical line, and `line_no`
+    /// is the physical line even when blank lines are skipped (the whole-
+    /// file CSV reader hardmoney used before 2.3 reported the line *before*
+    /// the skipped blanks, and let the cover sit at "line 2" regardless).
+    #[test]
+    fn old_delimiter_line_numbers_are_physical_and_blank_lines_are_skipped() {
+        let content = "\nHDR,FEC,3.00,SoftCo,1.0,^,,\n\n\"F3XN\",\"C00123456\"\n\n\n\"SB21B\",\"C00123456\"\n\"SB21B\",\"C00123456\"\n\n\"H2\",\"C00123456\"\n";
+        let filing = Filing::parse(content).unwrap();
+        assert_eq!(filing.summary.line_no, 4);
+        assert_eq!(
+            filing.lines.iter().map(|l| l.line_no).collect::<Vec<_>>(),
+            [7, 8, 10]
+        );
+        // Errors name the physical line too.
+        let bad = format!("{content}\n\nZZZ,C00123456\n");
+        match Filing::parse(&bad) {
+            Err(FecError::ParserMissing { line_no, .. }) => assert_eq!(line_no, Some(13)),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A real 3.00 vendor (Aristotle CM4) ended every Schedule H4 record
+    /// with an unbalanced `"`. Read as one CSV stream that quote opens a
+    /// field which swallows every following line; read per line each
+    /// record survives and the stray quote is an empty last field.
+    #[test]
+    fn old_delimiter_stray_trailing_quote_does_not_swallow_following_records() {
+        let content = "HDR,FEC,3.00,SoftCo,1.0,^,,\nF3XN,C00123456\n\"H4\",\"C00123456\",\"\",\"Payee One\",\"\",\"\",\"\",\"\",\"\",\"\",20010102,10.00,5.00,5.00,\"X\",\"\",\"\",\"\",10.00,\"\",\"\",\"\",\"\",\"\",\"\",\"\",\"\",\"\",\"\",\"\",\"\",,\"\",\"T1\",\"\",\"\",\"\",\"\n\"H4\",\"C00123456\",\"\",\"Payee Two\",\"\",\"\",\"\",\"\",\"\",\"\",20010103,20.00,10.00,10.00,\"X\",\"\",\"\",\"\",20.00,\"\",\"\",\"\",\"\",\"\",\"\",\"\",\"\",\"\",\"\",\"\",\"\",,\"\",\"T2\",\"\",\"\",\"\",\"\n";
+        let filing = Filing::parse(content).unwrap();
+        assert_eq!(filing.lines.len(), 2);
+        assert_eq!(filing.lines[0].get("payee_name"), Some("Payee One"));
+        assert_eq!(filing.lines[1].get("payee_name"), Some("Payee Two"));
+        assert_eq!(filing.lines[1].line_no, 4);
+        for l in &filing.lines {
+            assert!(l.iter().all(|(_, v)| !v.contains('"')), "{l:?}");
+        }
+    }
+
+    #[test]
+    fn split_old_delimited_applies_csv_quoting_per_line() {
+        let cells = |raw: &str| -> Vec<String> {
+            split_old_delimited(raw)
+                .unwrap()
+                .iter()
+                .map(str::to_string)
+                .collect()
+        };
+        assert_eq!(cells("a,\"b,c\",d\r"), ["a", "b,c", "d"]);
+        assert_eq!(cells("a,\"say \"\"hi\"\"\",d"), ["a", "say \"hi\"", "d"]);
+        assert_eq!(cells("\"\",\"\",\""), ["", "", ""]);
+        assert_eq!(cells("a,\"un\"closed,d"), ["a", "unclosed", "d"]);
+        assert_eq!(cells("a,un\"quoted,d"), ["a", "un\"quoted", "d"]);
+        assert_eq!(cells("a,b\rc"), ["a", "b\rc"]);
+        assert_eq!(cells(""), [""]);
+        assert_eq!(cells("   "), ["   "]);
+        assert_eq!(cells(","), ["", ""]);
     }
 
     #[test]
@@ -1250,6 +1427,61 @@ mod tests {
         assert_eq!(strip_ant_suffix("TEXT"), "TEXT");
         assert_eq!(strip_ant_suffix("A"), "A");
         assert_eq!(strip_ant_suffix(""), "");
+    }
+
+    /// Every top-level form the crate accepts, with every designator the
+    /// FEC defines (`N`ew, `A`mendment, `T`ermination) and none, in both
+    /// cases, must strip back to its base and report `is_amendment` only
+    /// for `A`. No base form ends in A/N/T, so a bare base is never
+    /// mangled; the tokens seen on line 2 across the audit corpus (F3A,
+    /// F3N, F3T, F3XN, F3XA, F3XT, F3PN, F3PA, F99, F6N, F24N, F1A, F1N,
+    /// F1MN, F1MA, F2A, F9N, F7N, F5N, F3LN, F13N) are all covered.
+    #[test]
+    fn every_allowed_form_strips_its_designator_and_flags_amendments() {
+        for base in form::ALLOWED_TOP_LEVEL_FORMS {
+            assert!(
+                !base.ends_with(['A', 'N', 'T']),
+                "{base}: a base form ending in a designator letter would be ambiguous"
+            );
+            // Only the periodic reports have a termination designator; the
+            // other forms are filed as N/A (F99 has no designator at all).
+            let has_t = matches!(*base, "F3" | "F3X" | "F3P" | "F4");
+            let bare_is_filed = matches!(*base, "F99" | "F6" | "F2" | "F1M" | "F8" | "F10");
+            for (suffix, amends) in [("", false), ("N", false), ("A", true), ("T", false)] {
+                for token in [
+                    format!("{base}{suffix}"),
+                    format!("{base}{suffix}").to_lowercase(),
+                ] {
+                    assert_eq!(strip_ant_suffix(&token), *base, "{token}");
+                    let raw = normalize_form_type(&token);
+                    assert_eq!(raw.ends_with('A'), amends, "{token}");
+                    let real_token = match suffix {
+                        "" => bare_is_filed,
+                        "T" => has_t,
+                        _ => *base != "F99",
+                    };
+                    if real_token {
+                        assert!(
+                            form::table_for_form_type(&raw).is_some(),
+                            "{token} should dispatch to a table"
+                        );
+                    }
+                }
+            }
+        }
+        // Sub-form and schedule tokens are left alone, even when they end
+        // in a designator letter.
+        for token in [
+            "F3ZT", "TEXT", "SA11AI", "SB21B", "SA17A", "SC/10", "H4", "F1S", "F2S", "F3PS",
+            "F3P31", "F3S", "F65", "F8II",
+        ] {
+            let stripped = strip_ant_suffix(token);
+            assert!(
+                stripped == token || token == "F3ZT",
+                "{token} -> {stripped}"
+            );
+        }
+        assert_eq!(strip_ant_suffix("F3ZT"), "F3Z");
     }
 
     #[test]

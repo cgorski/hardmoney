@@ -2,7 +2,7 @@ canonical,^8.5|8.4|8.3|8.2|8.1|8.0,,^7.0|6.4,
 form_type,1,FORM TYPE,1,FORM TYPE
 filer_committee_id_number,2,FILER COMMITTEE ID NUMBER,2,FILER COMMITTEE ID NUMBER
 transaction_id,3,TRANSACTION ID ,3,TRANSACTION ID 
-back_reference_tran_id_number,4,BACK REFERENCE TRAN ID NUMBER,4,BACK REFERENCE TRAN ID NUMBER
+back_reference_tran_id,4,BACK REFERENCE TRAN ID NUMBER,4,BACK REFERENCE TRAN ID NUMBER
 back_reference_sched_name,5,BACK REFERENCE SCHED NAME,5,BACK REFERENCE SCHED NAME
 entity_type,6,ENTITY TYPE,6,ENTITY TYPE
 lobbyist_registrant_organization_name,7,LOBBYIST/REGISTRANT ORGANIZATION NAME,7,LOBBYIST/REGISTRANT ORGANIZATION NAME
@@ -37,8 +37,8 @@ donor_candidate_office,34,,35,DONOR CANDIDATE OFFICE
 donor_candidate_state,35,,36,DONOR CANDIDATE STATE 
 donor_candidate_district,36,,37,DONOR CANDIDATE DISTRICT
 conduit_name,37,,38,CONDUIT NAME
-conduit_street1,38,,39,CONDUIT STREET1
-conduit_street2,39,,40,CONDUIT STREET2
+conduit_street_1,38,,39,CONDUIT STREET1
+conduit_street_2,39,,40,CONDUIT STREET2
 conduit_city,40,,41,CONDUIT CITY
 conduit_state,41,,42,CONDUIT STATE
 conduit_zip_code,42,,43,CONDUIT ZIP

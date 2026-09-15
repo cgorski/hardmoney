@@ -63,9 +63,7 @@ def main(argv: Sequence[str]) -> int:
 
     receipts = df.filter(~pl.col("is_memo") & (pl.col("form_type") == "SA11AI"))
     total = receipts["amount"].sum()
-    cover = filing.summary.amount("col_a_individual_contributions_itemized") \
-        if "col_a_individual_contributions_itemized" in filing.summary \
-        else filing.summary.amount("col_a_individuals_itemized")
+    cover = filing.summary.amount("col_a_individuals_itemized")
     print(f"\nsum of non-memo SA11AI amounts: {total} ({type(total).__name__}); cover 11(a)(i): {cover}; "
           f"equal: {total == cover}")
 

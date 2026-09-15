@@ -14,10 +14,15 @@ use crate::parser::utils::normalize_field;
 
 /// The parsed `HDR` record of an electronic filing.
 ///
-/// String fields are trimmed but otherwise as filed; columns the physical
+/// String fields are normalised like every other field (surrounding ASCII
+/// whitespace and one pair of wrapping quotes removed, see
+/// [`crate::parser::utils`]) but otherwise as filed; columns the physical
 /// line did not carry are empty (older software omitted the trailing
 /// report-id/number/comment columns entirely). `fec_version_raw` keeps the
 /// wire spelling (`"3.00"`) while [`Header::version`] is the parsed value.
+/// Nothing but the version is validated here: `record_type` and `ef_type`
+/// are kept even when they are not `HDR`/`FEC` (`hardmoney validate`
+/// reports that).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
@@ -46,7 +51,16 @@ pub struct Header {
 }
 
 impl Header {
-    /// Parses a header row that has already been split into raw fields.
+    /// Parses a header row that has already been split into raw fields
+    /// (`["HDR", "FEC", "8.5", software, version, ...]`).
+    ///
+    /// Fails with [`FecError::UnknownElectronicHeaderVersion`] -- carrying
+    /// the raw third field -- if that field is not a well-formed version
+    /// (see [`SpecVersion`]) or names a paper-conversion (`P…`) or
+    /// out-of-range (outside 3.x-8.x) version; an empty or too-short row
+    /// fails the same way with an empty string. Every other column is
+    /// optional and blank when absent, so a two-column row `["HDR",
+    /// "FEC"]` fails only because its version is blank.
     pub fn from_fields(fields: &[&str]) -> Result<Self> {
         let field = |i: usize| {
             fields

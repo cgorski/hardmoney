@@ -166,7 +166,7 @@ FROM filings WHERE chain_unresolved;
 and ingest the missing originals (`bulk-load-filing <n>` downloads by
 id). The flag clears itself when they land.
 
-## Batch loads: `--no-resolve` and `resolve_all_amendment_chains`
+## Batch loads: `--no-resolve` and `bulk-resolve-chains`
 
 Resolving after every insert is one indexed `UPDATE` over the chain (a
 handful of rows), so it is the right default. For a scripted load of many
@@ -177,9 +177,14 @@ the end:
 for f in filings/*.fec; do
   hardmoney bulk-load-filing --schema nightly --no-resolve "$f"
 done
+hardmoney bulk-resolve-chains --schema nightly
 ```
 
-then, from Rust:
+```text
+namespace 'nightly': amendment chains recomputed for 4,812 filing(s); 3 amendment(s) still name an original that is not ingested (chain_unresolved)
+```
+
+or, from Rust:
 
 ```rust
 # async fn run(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
@@ -198,6 +203,13 @@ rows have NULL in every derived column until then. The per-chain
 to one key. The library equivalents of the flag are
 `bulk::ingest::ChainResolution::{Resolve, Defer}` on
 `ingest_filing_bytes_with` / `ingest_filing_with`.
+
+Concurrent ingests are safe: the resolver takes a transaction-scoped
+advisory lock on the chain's original id, so two amendments to one
+report arriving at the same moment (an `efile watch --ingest` and a
+backfill, say) are resolved one after the other and exactly one ends up
+`most_recent`. Without the lock, each would have computed the chain from
+a snapshot missing the other's row.
 
 ## Over the REST API
 

@@ -19,18 +19,26 @@ use regex::Regex;
 
 use crate::parser::tables::Table;
 
-/// Top-level filing form types this crate processes end-to-end. These are
-/// the forms that can appear on a filing's *summary* (second) line; body
+/// Top-level filing form types this crate processes end-to-end, as *base*
+/// forms (no `N`/`A`/`T` designator -- see
+/// [`strip_ant_suffix`](crate::parser::filing::strip_ant_suffix)). These
+/// are the forms that can appear on a filing's *cover* (second) line; body
 /// lines (schedules, sub-forms, `TEXT` records) are dispatched separately.
-///
+/// None ends in `A`, `N`, or `T`, which is what makes designator stripping
+/// unambiguous.
 pub static ALLOWED_TOP_LEVEL_FORMS: &[&str] = &[
     "F3", "F3X", "F3P", "F9", "F5", "F24", "F6", "F7", "F4", "F3L", "F13", "F99", "F1", "F1M",
     "F2", "F8", "F10",
 ];
 
+/// Whether `base_form` (case-insensitive, **already stripped** of its
+/// designator: `"F3X"`, not `"F3XN"`) is in
+/// [`ALLOWED_TOP_LEVEL_FORMS`]. A blank or designator-bearing token is
+/// `false`; callers with a raw token go through
+/// [`Filing::is_allowed`](crate::Filing::is_allowed).
 #[must_use]
 pub fn is_allowed_top_level_form(base_form: &str) -> bool {
-    ALLOWED_TOP_LEVEL_FORMS.contains(&base_form.to_uppercase().as_str())
+    ALLOWED_TOP_LEVEL_FORMS.contains(&base_form.trim().to_ascii_uppercase().as_str())
 }
 
 /// `(form_type_regex, table)` pairs, tried in order; the first match wins.
@@ -135,7 +143,9 @@ static DISPATCH: LazyLock<Vec<CompiledDispatch>> = LazyLock::new(|| {
 });
 
 /// Finds which [`Table`] a raw `form_type` token (column 0 of a line, e.g.
-/// `"SA11AI"`) should be parsed with.
+/// `"SA11AI"`) should be parsed with. Case-insensitive; surrounding
+/// whitespace is ignored. `None` for a blank token, for `HDR` (the header
+/// is not a body record), and for anything no pattern matches.
 #[must_use]
 pub fn table_for_form_type(form_type: &str) -> Option<Table> {
     DISPATCH
@@ -235,6 +245,10 @@ mod tests {
     fn unknown_form_type_is_none() {
         assert_eq!(table_for_form_type("ZZZ"), None);
         assert_eq!(table_for_form_type(""), None);
+        assert_eq!(table_for_form_type("   "), None);
+        assert_eq!(table_for_form_type("HDR"), None);
+        assert_eq!(table_for_form_type("[BEGINTEXT]"), None);
+        assert_eq!(table_for_form_type(" sa11ai "), Some(Table::SchA));
     }
 
     #[test]

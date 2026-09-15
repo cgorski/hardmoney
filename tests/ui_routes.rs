@@ -520,6 +520,92 @@ async fn malformed_documents_are_400_with_a_message() {
             .unwrap()
             .contains("F3X, F3, F3P")
     );
+
+    // A record whose `table` and form-type token disagree: 400, naming
+    // both, never a 500.
+    let (status, _, body) = post_json(
+        &app,
+        "/tools/write",
+        &json!({
+            "version": "8.5",
+            "summary": { "table": "F3X", "fields": { "form_type": "F3XN" } },
+            "lines": [ { "table": "SchB", "fields": { "form_type": "SA11AI", "expenditure_amount": "1.00" } } ]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let msg = json(&body)["error"].as_str().unwrap().to_string();
+    assert_eq!(
+        msg,
+        "line 3: table 'SchB' does not match form type 'SA11AI', which is a SchA record"
+    );
+
+    // The document's `version` and the header's `fec_version_raw` disagree.
+    let (status, _, body) = post_json(
+        &app,
+        "/tools/write",
+        &json!({
+            "version": "8.5",
+            "header": { "fec_version_raw": "6.4" },
+            "summary": { "table": "F3X", "fields": { "form_type": "F3XN" } }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let msg = json(&body)["error"].as_str().unwrap().to_string();
+    assert!(msg.contains("6.4") && msg.contains("8.5"), "{msg}");
+}
+
+/// A JSON document is bounded by what it would *write*, not by its own
+/// size: 2,000 sixteen-byte records (`{"table":"SchA"}`) would build
+/// 2,000 full-width (45-cell) Schedule A lines, so with a small cap they
+/// are refused before any is built -- ahead of every per-line check.
+#[tokio::test]
+async fn documents_that_would_write_past_the_cap_are_413() {
+    let lines: Vec<Value> = (0..2_000).map(|_| json!({ "table": "SchA" })).collect();
+    let doc = json!({
+        "version": "8.5",
+        "summary": { "table": "F3X", "fields": { "form_type": "F3XN" } },
+        "lines": lines
+    });
+    // The JSON itself is under this cap; the written filing is not.
+    let cap = 80 * 1024;
+    let app = app_with_limit(cap);
+    let json_len = serde_json::to_vec(&doc).unwrap().len();
+    assert!(json_len < cap, "{json_len}");
+    for route in ["/tools/write", "/tools/validate", "/tools/reconcile"] {
+        let (status, _, body) = post_json(&app, route, &doc).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{route}");
+        let msg = json(&body)["error"].as_str().unwrap().to_string();
+        assert!(msg.contains("2001 record(s)"), "{msg}");
+        assert!(msg.contains("81920 byte limit"), "{msg}");
+    }
+
+    // With room to write it, the same records are checked one by one: a
+    // schedule record needs its form-type token (there is no default one).
+    let roomy = app_with_limit(1 << 20);
+    let (status, _, body) = post_json(&roomy, "/tools/write", &doc).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(
+        json(&body)["error"],
+        "line 3: fields.form_type is required for a SchA record (the form-type token as filed, for example SA11AI)"
+    );
+    let lines: Vec<Value> = (0..2_000)
+        .map(|_| json!({ "table": "SchA", "fields": { "form_type": "SA11AI" } }))
+        .collect();
+    let doc = json!({
+        "version": "8.5",
+        "summary": { "table": "F3X", "fields": { "form_type": "F3XN" } },
+        "lines": lines
+    });
+    let (status, _, body) = post_json(&roomy, "/tools/write", &doc).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.len() > cap, "the written file really is that big");
 }
 
 // ---------------------------------------------------------------------------

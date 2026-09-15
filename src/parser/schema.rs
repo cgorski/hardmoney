@@ -94,11 +94,14 @@ impl SpecVersion {
         self.paper
     }
 
+    /// The major component (`8` for 8.5, `3` for `3.00`).
     #[must_use]
     pub const fn major(self) -> u8 {
         self.major
     }
 
+    /// The first digit of the minor component (`5` for 8.5, `0` for
+    /// `3.00`, `5` for `8.5.0.1`).
     #[must_use]
     pub const fn minor(self) -> u8 {
         self.minor
@@ -140,11 +143,16 @@ impl FromStr for SpecVersion {
         let minor = match parts.next() {
             None => 0,
             Some(m) => {
-                let first = m.bytes().next().ok_or_else(err)?;
-                if !m.bytes().all(|b| b.is_ascii_digit()) {
+                if m.is_empty() || !m.bytes().all(|b| b.is_ascii_digit()) {
                     return Err(err());
                 }
-                first - b'0'
+                // Every byte is an ASCII digit, so the first one is in
+                // b'0'..=b'9' and the subtraction cannot underflow; the
+                // `checked_sub` merely makes that visible to the reader.
+                m.bytes()
+                    .next()
+                    .and_then(|b| b.checked_sub(b'0'))
+                    .ok_or_else(err)?
             }
         };
         // Anything after the minor component is a build number; it must be
@@ -205,9 +213,17 @@ pub struct FieldDef {
 /// number of delimited cells a writer must emit.
 #[derive(Debug)]
 pub struct Layout {
+    /// The table this layout belongs to.
     pub table: Table,
+    /// Every spec version this layout applies to (never empty; disjoint
+    /// from every other layout of the same table).
     pub versions: &'static [SpecVersion],
+    /// The fields present at these versions, in table order, each with its
+    /// 0-based column. Columns are distinct; not every column below
+    /// `width` need be named.
     pub fields: &'static [FieldDef],
+    /// One more than the highest column: the number of cells a writer
+    /// emits for a record of this layout.
     pub width: u16,
     #[doc(hidden)]
     pub by_name: &'static [u16],
@@ -238,6 +254,15 @@ impl Layout {
     #[must_use]
     pub fn field(&self, name: &str) -> Option<&'static FieldDef> {
         self.index_of(name).and_then(|i| self.fields.get(i))
+    }
+
+    /// The name of the field at column 0 -- the record's dispatch token:
+    /// `form_type` on every table except `TEXT`, whose token field is
+    /// `rec_type`. `None` only if a layout had no column-0 field, which the
+    /// bundled data never does.
+    #[must_use]
+    pub fn token_field(&self) -> Option<&'static str> {
+        self.fields.iter().find(|f| f.column == 0).map(|f| f.name)
     }
 
     /// The FEC specification for `name` at the bundled spec version, if the
@@ -337,9 +362,11 @@ pub struct FieldSpec {
     pub canonical: Option<&'static str>,
     /// The FEC's field description, e.g. `"CONTRIBUTOR ORGANIZATION NAME"`.
     pub description: &'static str,
+    /// The declared data type (`A/N-200` -> [`FieldKind::AlphaNumeric`]).
     pub kind: FieldKind,
     /// Maximum length in characters, from the type (`A/N-200` -> 200).
     pub max_len: Option<u16>,
+    /// Whether, and how hard, the FEC requires the field.
     pub required: Requirement,
     /// The spec's sample value, e.g. `"C00123456"`.
     pub sample: Option<&'static str>,
