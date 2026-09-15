@@ -56,18 +56,13 @@ jobs:
       - run: cargo build --all-features
 
   test:
-    name: cargo test --all-features (Postgres ${{ matrix.postgres }})
+    name: cargo test --all-features (Postgres 18)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # 18 = Aurora PostgreSQL's newest major (the deployment target).
-        # 15 = what the FEC itself runs (fecfile-web-api / openFEC CI) and
-        #      the oldest version this crate promises to support in practice.
-        postgres: ["18", "15"]
     services:
       postgres:
-        image: postgres:${{ matrix.postgres }}
+        # Aurora PostgreSQL's newest major (18.x) is the deployment target;
+        # test against the same major only.
+        image: postgres:18
         env:
           POSTGRES_USER: hardmoney
           POSTGRES_PASSWORD: hardmoney

@@ -52,7 +52,7 @@ cargo install hardmoney            # CLI (needs Postgres for the ETL/API parts)
 hardmoney = { version = "1", default-features = false, features = ["fetch"] }
 ```
 
-Rust 1.94+. Postgres 14+ (tested on 18, Aurora's newest major).
+Rust 1.94+. Postgres 18 (Aurora PostgreSQL's newest major); older majors may work but are untested.
 
 ## Sixty-second tour
 

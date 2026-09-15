@@ -29,7 +29,6 @@
   compile time; without this Cargo could ship stale SQL).
 - `bulk-restore-dump` also pins its `pg_trgm`/`btree_gin` extensions to
   `public`.
-- CI now tests against Postgres 15 (what the FEC runs) as well as 18.
 
 ## 1.0.0 — 2026-09-15
 
