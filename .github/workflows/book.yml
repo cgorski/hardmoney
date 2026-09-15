@@ -28,9 +28,19 @@ jobs:
       - name: Install mdBook
         run: |
           mkdir -p "$HOME/.cargo/bin"
-          curl -sSL https://github.com/rust-lang/mdBook/releases/download/v0.4.52/mdbook-v0.4.52-x86_64-unknown-linux-gnu.tar.gz \
+          curl -sSL https://github.com/rust-lang/mdBook/releases/download/v0.5.2/mdbook-v0.5.2-x86_64-unknown-linux-gnu.tar.gz \
             | tar -xz -C "$HOME/.cargo/bin"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # Renders the ```mermaid blocks in book/src/architecture.md. The two
+      # pins must move together: mdbook-mermaid 0.17.x targets mdBook 0.5.x
+      # (0.16.x was for 0.4.x and fails under 0.5 with "Unable to parse the
+      # input").
+      - name: Install mdbook-mermaid
+        run: |
+          curl -sSL https://github.com/badboy/mdbook-mermaid/releases/download/v0.17.1/mdbook-mermaid-v0.17.1-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz -C "$HOME/.cargo/bin"
+          mdbook-mermaid --version
 
       - name: Build book
         run: mdbook build book

@@ -17,6 +17,7 @@ use axum::http::{Request, StatusCode};
 use hardmoney::Cycle;
 use hardmoney::api::ApiConfig;
 use hardmoney::bulk::dump::{self, DumpError, RestoreOptions, TocKind};
+use hardmoney::bulk::preflight::{self, PreflightInput, Status};
 use hardmoney::bulk::{self, Input, LoadMode, LoadOptions};
 use hardmoney::db::{self, DbConfig, Namespace};
 use sqlx::PgPool;
@@ -871,6 +872,14 @@ async fn relation_exists(pool: &PgPool, name: &str) -> bool {
     exists
 }
 
+/// Serialises the tests that restore or drop the shared
+/// `disclosure.fec_fitem_sched_e`: this one and the `dumps` CLI
+/// round-trip below. Other tests tolerate the table and its views
+/// vanishing under them, but two restores racing (or a drop under a
+/// restore) would not.
+static DUMP_TABLE_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 /// One test, in sequence, because every restore drops and recreates the
 /// shared `disclosure.fec_fitem_sched_e` (other tests tolerate the view
 /// vanishing under them, but two restores racing would not).
@@ -885,6 +894,7 @@ async fn schedule_e_dump_restores_views_indexes_and_compares() {
         eprintln!("skipping: pg_restore not on PATH");
         return;
     }
+    let _shared_table = DUMP_TABLE_LOCK.lock().await;
     let t = TestNs::new(&url, "dump").await;
     let cache_dir =
         std::env::temp_dir().join(format!("hardmoney-it-dump-cache-{}", std::process::id()));
@@ -1183,6 +1193,378 @@ async fn schedule_e_dump_restores_views_indexes_and_compares() {
         assert_eq!(cmp.only_raw, vec!["SE.4825"]);
         assert!(cmp.amount_mismatches.is_empty());
     }
+
+    let _ = std::fs::remove_dir_all(&cache_dir);
+    t.drop().await;
+}
+
+// ---------------------------------------------------------------------------
+// The guided `hardmoney dumps` commands
+// ---------------------------------------------------------------------------
+
+/// `preflight::run` against the real server: every check is present and
+/// says something true about this machine, with or without a URL.
+#[tokio::test]
+async fn dumps_preflight_runs_against_the_real_database() {
+    let url = require_db!();
+    let t = TestNs::new(&url, "pf").await;
+    let cache_dir =
+        std::env::temp_dir().join(format!("hardmoney-it-pf-cache-{}", std::process::id()));
+    let today = Cycle::new(2026).unwrap();
+    let needs = preflight::estimate(
+        &dump::SCHEDULE_E,
+        dump::SCHEDULE_E.approx_size_bytes,
+        true,
+        &[],
+        false,
+        today,
+    );
+
+    // -- A fully configured, migrated namespace ----------------------------
+    let pf = preflight::run(&PreflightInput {
+        database_url: Some(&url),
+        namespace: &t.ns,
+        cache_dir: &cache_dir,
+        needs: Some(&needs),
+    })
+    .await;
+    let names: Vec<&str> = pf.checks.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec![
+            "pg_restore",
+            "database",
+            "connection",
+            "Postgres version",
+            "disclosure schema",
+            "extensions",
+            "disk space for downloads",
+            "disk space for the database",
+            "namespace",
+        ],
+        "{pf}"
+    );
+    let get = |name: &str| pf.get(name).unwrap();
+    assert_eq!(get("database").status, Status::Pass, "{pf}");
+    assert_eq!(get("connection").status, Status::Pass, "{pf}");
+    // CI and the developers' machines run Postgres 18.
+    assert_eq!(get("Postgres version").status, Status::Pass, "{pf}");
+    assert!(
+        get("Postgres version").detail.contains("Postgres 1"),
+        "{pf}"
+    );
+    // The test role owns the database, so the schema exists or is creatable.
+    assert_eq!(get("disclosure schema").status, Status::Pass, "{pf}");
+    assert_ne!(get("extensions").status, Status::Fail, "{pf}");
+    // A 43 MB download fits on any CI disk.
+    assert_eq!(get("disk space for downloads").status, Status::Pass, "{pf}");
+    assert!(
+        get("disk space for downloads")
+            .detail
+            .contains("needs about 43.4 MB"),
+        "{pf}"
+    );
+    assert_ne!(
+        get("disk space for the database").status,
+        Status::Fail,
+        "{pf}"
+    );
+    assert_eq!(get("namespace").status, Status::Pass, "{pf}");
+    assert!(get("namespace").detail.contains(t.ns.as_str()), "{pf}");
+    // pg_restore: whatever this machine has, described truthfully.
+    let pgr = get("pg_restore");
+    if pg_restore_available() {
+        assert_ne!(pgr.status, Status::Fail, "{pf}");
+    } else {
+        assert_eq!(pgr.status, Status::Fail, "{pf}");
+        assert!(pgr.fix.as_deref().unwrap().contains("install"), "{pf}");
+    }
+    // Every non-pass carries a fix; Display shows the symbols.
+    for c in &pf.checks {
+        assert_eq!(c.fix.is_some(), c.status != Status::Pass, "{c:?}");
+    }
+    let text = pf.to_string();
+    assert!(text.contains("✓ connection: connected to"), "{text}");
+    assert!(pf.passed() || !pg_restore_available(), "{text}");
+
+    // -- No URL: the database check fails with the createdb recipe and the
+    //    connection-dependent checks are not attempted.
+    let pf = preflight::run(&PreflightInput {
+        database_url: None,
+        namespace: &t.ns,
+        cache_dir: &cache_dir,
+        needs: None,
+    })
+    .await;
+    assert_eq!(pf.get("database").unwrap().status, Status::Fail);
+    assert!(
+        pf.get("database")
+            .unwrap()
+            .fix
+            .as_deref()
+            .unwrap()
+            .contains("createdb fec")
+    );
+    assert!(pf.get("connection").is_none());
+    assert!(pf.get("namespace").is_none());
+    assert!(pf.get("disk space for downloads").is_some());
+    assert!(!pf.passed());
+
+    // -- Nothing listening: a plain explanation, quickly.
+    let started = std::time::Instant::now();
+    let pf = preflight::run(&PreflightInput {
+        database_url: Some("postgres://nobody@127.0.0.1:1/nothing"),
+        namespace: &t.ns,
+        cache_dir: &cache_dir,
+        needs: None,
+    })
+    .await;
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "took {:?}",
+        started.elapsed()
+    );
+    let conn = pf.get("connection").unwrap();
+    assert_eq!(conn.status, Status::Fail, "{pf}");
+    assert!(
+        conn.detail.contains("not running at 127.0.0.1:1") || conn.detail.contains("timed out"),
+        "{pf}"
+    );
+    assert!(conn.fix.is_some());
+
+    // -- A namespace that has never had schema-init: a warning that names
+    //    the command.
+    let fresh = Namespace::new(format!("t_pf_fresh_{}", std::process::id())).unwrap();
+    let pf = preflight::run(&PreflightInput {
+        database_url: Some(&url),
+        namespace: &fresh,
+        cache_dir: &cache_dir,
+        needs: None,
+    })
+    .await;
+    let ns = pf.get("namespace").unwrap();
+    assert_eq!(ns.status, Status::Warn, "{pf}");
+    assert!(ns.detail.contains("not been set up"), "{pf}");
+    assert!(
+        ns.fix
+            .as_deref()
+            .unwrap()
+            .contains(&format!("schema-init --schema {fresh}")),
+        "{pf}"
+    );
+    assert!(pf.passed() || !pg_restore_available());
+    let admin = db::connect(&DbConfig::new(&url)).await.unwrap();
+    db::drop_namespace(&admin, &fresh).await.unwrap();
+
+    let _ = std::fs::remove_dir_all(&cache_dir);
+    t.drop().await;
+}
+
+/// Runs the built `hardmoney` binary with `dumps <args> --json` plus the
+/// database flags, returning (success, stdout JSON, stderr).
+fn run_dumps_cli(
+    bin: &str,
+    url: &str,
+    ns: &Namespace,
+    cache_dir: &std::path::Path,
+    args: &[&str],
+) -> (bool, serde_json::Value, String) {
+    let output = std::process::Command::new(bin)
+        .arg("dumps")
+        .args(args)
+        .args(["--database-url", url, "--schema", ns.as_str()])
+        .arg("--cache-dir")
+        .arg(cache_dir)
+        .arg("--json")
+        .env_remove("DATABASE_URL")
+        .env_remove("HARDMONEY_SCHEMA")
+        .env_remove("HARDMONEY_CACHE_DIR")
+        .output()
+        .expect("run hardmoney");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let json = serde_json::from_str(&stdout).unwrap_or(serde_json::Value::Null);
+    (output.status.success(), json, stderr)
+}
+
+/// The guided CLI end to end against the real Schedule E archive:
+/// `dumps check`, `dumps import independent-expenditures --yes --dump-file`
+/// (with `--explain` first), `dumps status`, `dumps remove --yes`. Holds
+/// the shared-table lock because `remove` drops
+/// `disclosure.fec_fitem_sched_e`.
+#[tokio::test]
+async fn dumps_cli_imports_reports_and_removes_schedule_e() {
+    let url = require_db!();
+    let Some(dump_path) = local_schedule_e_dump() else {
+        eprintln!("skipping: tmp/agent-db/dumps/schedule_e.dump not present");
+        return;
+    };
+    if !pg_restore_available() {
+        eprintln!("skipping: pg_restore not on PATH");
+        return;
+    }
+    let Some(bin) = option_env!("CARGO_BIN_EXE_hardmoney") else {
+        eprintln!("skipping: the hardmoney binary was not built (cli feature off)");
+        return;
+    };
+    let _shared_table = DUMP_TABLE_LOCK.lock().await;
+    let t = TestNs::new(&url, "dumpscli").await;
+    let cache_dir = std::env::temp_dir().join(format!(
+        "hardmoney-it-dumpscli-cache-{}",
+        std::process::id()
+    ));
+    let dump_arg = dump_path.to_string_lossy().to_string();
+    let run = |args: &[&str]| run_dumps_cli(bin, &url, &t.ns, &cache_dir, args);
+
+    // -- check ---------------------------------------------------------------
+    let (ok, json, err) = run(&["check", "--offline", "--for", "independent-expenditures"]);
+    assert!(ok, "{err}");
+    assert_eq!(json["ok"], true, "{json}");
+    assert_eq!(json["sized_for"], "independent-expenditures");
+    let checks = json["checks"].as_array().unwrap();
+    assert!(
+        checks
+            .iter()
+            .any(|c| c["name"] == "connection" && c["status"] == "pass"),
+        "{json}"
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|c| c["name"] == "namespace" && c["status"] == "pass"),
+        "{json}"
+    );
+    assert!(
+        json["needs"]["download_bytes"].as_u64().unwrap() > 0,
+        "{json}"
+    );
+
+    // -- import --explain: the real command, nothing changed ---------------
+    let (ok, json, err) = run(&[
+        "import",
+        "independent-expenditures",
+        "--explain",
+        "--dump-file",
+        &dump_arg,
+    ]);
+    assert!(ok, "{err}");
+    assert_eq!(json["explain"], true, "{json}");
+    let cmds = json["pg_restore_commands"].as_array().unwrap();
+    assert_eq!(cmds.len(), 1, "{json}");
+    let cmd = cmds[0].as_str().unwrap();
+    assert!(
+        cmd.starts_with("pg_restore --no-owner --no-acl -d "),
+        "{cmd}"
+    );
+    assert!(cmd.ends_with(&dump_arg), "{cmd}");
+    // --explain records nothing.
+    assert_eq!(
+        count(
+            &t.pool,
+            "SELECT count(*) FROM loads WHERE source LIKE 'dump:%'"
+        )
+        .await,
+        0
+    );
+    assert_eq!(json["plan"][0]["tables"][0], "disclosure.fec_fitem_sched_e");
+    assert_eq!(json["plan"][0]["download_needed"], false);
+
+    // -- import --yes ----------------------------------------------------------
+    let (ok, json, err) = run(&[
+        "import",
+        "independent-expenditures",
+        "--yes",
+        "--dump-file",
+        &dump_arg,
+    ]);
+    assert!(ok, "stdout: {json}\nstderr: {err}");
+    assert_eq!(json["ok"], true, "{json}");
+    let imported = &json["imports"][0];
+    assert_eq!(imported["name"], "independent-expenditures");
+    assert_eq!(imported["table"], "disclosure.fec_fitem_sched_e");
+    let rows = imported["rows"].as_i64().unwrap();
+    assert!(rows > 100_000, "{json}");
+    assert_eq!(imported["data_only"], false);
+    assert_eq!(imported["recorded"], true);
+    assert!(
+        imported["indexes_created"].is_null(),
+        "a whole restore adds no indexes: {json}"
+    );
+    assert_eq!(
+        count(&t.pool, "SELECT count(*) FROM disclosure.fec_fitem_sched_e").await,
+        rows
+    );
+    assert!(relation_exists(&t.pool, "independent_expenditures").await);
+    assert!(relation_exists(&t.pool, "dump_schedule_e").await);
+    assert_eq!(
+        count(
+            &t.pool,
+            "SELECT count(*) FROM loads WHERE source = 'dump:schedule_e'"
+        )
+        .await,
+        1
+    );
+    // --dump-file never touches the cache.
+    assert!(!cache_dir.join("schedule_e.dump").exists());
+
+    // -- status ------------------------------------------------------------------
+    let (ok, json, err) = run(&["status", "--offline"]);
+    assert!(ok, "{err}");
+    assert_eq!(json["offline"], true);
+    assert_eq!(json["database"]["reachable"], true, "{json}");
+    assert_eq!(json["database"]["namespace"], t.ns.as_str());
+    let dumps = json["dumps"].as_array().unwrap();
+    assert_eq!(dumps.len(), 4);
+    let e = dumps
+        .iter()
+        .find(|d| d["name"] == "independent-expenditures")
+        .unwrap();
+    assert_eq!(e["table"], "disclosure.fec_fitem_sched_e");
+    assert_eq!(e["database"]["exists"], true, "{e}");
+    assert!(e["database"]["approx_rows"].as_i64().unwrap() > 0, "{e}");
+    assert_eq!(e["last_import"]["rows"].as_i64().unwrap(), rows, "{e}");
+    assert_eq!(e["last_import"]["mode"], "restore");
+    assert!(e["fec"].is_null(), "--offline makes no HEAD request: {e}");
+    assert_eq!(e["downloaded"]["complete_bytes"], serde_json::Value::Null);
+    let b = dumps.iter().find(|d| d["name"] == "disbursements").unwrap();
+    assert_eq!(b["database"]["exists"], false, "{b}");
+
+    // -- remove --yes ----------------------------------------------------------
+    let (ok, json, err) = run(&["remove", "independent-expenditures", "--yes"]);
+    assert!(ok, "{err}");
+    let removed = &json["removed"][0];
+    assert_eq!(removed["table"], "disclosure.fec_fitem_sched_e");
+    assert_eq!(removed["table_dropped"], true, "{json}");
+    assert_eq!(removed["file_deleted"], false, "nothing was cached: {json}");
+    assert!(!relation_exists(&t.pool, "disclosure.fec_fitem_sched_e").await);
+    assert!(!relation_exists(&t.pool, "independent_expenditures").await);
+    // History is kept.
+    assert_eq!(
+        count(
+            &t.pool,
+            "SELECT count(*) FROM loads WHERE source = 'dump:schedule_e'"
+        )
+        .await,
+        1
+    );
+    let (ok, json, err) = run(&["remove", "independent-expenditures", "--yes"]);
+    assert!(ok, "{err}");
+    assert_eq!(json["removed"].as_array().unwrap().len(), 0, "{json}");
+
+    // -- refusals are friendly ---------------------------------------------------
+    let (ok, _, err) = run(&["import", "committees", "--cycles", "2026", "--explain"]);
+    assert!(!ok);
+    assert!(err.contains("--cycles does not apply"), "{err}");
+    let (ok, _, err) = run(&[
+        "import",
+        "independent-expenditures",
+        "--yes",
+        "--dump-file",
+        "/nonexistent.dump",
+    ]);
+    assert!(!ok);
+    assert!(err.contains("cannot be read"), "{err}");
+    assert!(err.contains("--dump-file"), "{err}");
 
     let _ = std::fs::remove_dir_all(&cache_dir);
     t.drop().await;

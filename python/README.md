@@ -89,6 +89,10 @@ except hardmoney.FecError as e:
 
 Full documentation, with captured output, is in the
 [Python chapter of the hardmoney book](https://cgorski.github.io/hardmoney/python.html).
+Thirty-five runnable examples (parsing, validating, reconciling, editing,
+pandas/Parquet/SQLite interop, a Django-style pre-submission check, and
+more) are in [`examples/`](examples/README.md), with a walkthrough in the
+[Python cookbook](https://cgorski.github.io/hardmoney/python-cookbook.html).
 
 ## Why a Python package
 

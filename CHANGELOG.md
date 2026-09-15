@@ -1,7 +1,47 @@
 # Changelog
 
-## Unreleased
+## 2.2.0 — 2026-09-15
 
+- **`hardmoney dumps`: a guided import of the FEC's Postgres dump files**
+  for people who have not used Postgres or a terminal much. `hardmoney
+  dumps` alone is the "where am I" screen (the four files with today's
+  sizes from fec.gov, which are downloaded, which are in the database,
+  what to run next). `dumps check` runs the prerequisites, one `✓`/`!`/`✗`
+  line each with a plain fix: `pg_restore` on `PATH` and version 15 or
+  newer (the archives are written by Postgres 15), a database URL (or
+  the `createdb`/`export DATABASE_URL` recipe when there is none), the
+  connection (refused, missing database, unknown user, bad password,
+  each explained), server version, the `disclosure` schema exists or is
+  creatable, `pg_trgm`/`btree_gin` available, free disk where downloads
+  go and at the server's data directory (tolerating `SHOW
+  data_directory` being denied or the server being remote) against what
+  the import needs, and the namespace's `schema-init` (offered). `dumps
+  import committees | independent-expenditures | receipts |
+  disbursements | all-small [--cycles] [--yes] [--explain]
+  [--dump-file]` prints a plan in words (bytes to download, rows, table,
+  database, disk, and time ranges scaled from the FEC's own published
+  timings), asks, downloads with a progress bar, restores with a
+  heartbeat line every 30 seconds, adds hardmoney's indexes for a
+  cycle-selective restore (`receipts`/`disbursements` default to the
+  current cycle, data only), and ends with rows, time, `hardmoney query`
+  and `psql` commands to try, and where the data lives; `--explain`
+  prints the exact `pg_restore` command and SQL and exits. `dumps
+  status` (rows, indexes, cycles, last import and its source file,
+  downloads, and whether fec.gov has a newer file), `dumps update
+  [--yes]` (re-import what has a newer file; prints a cron line), and
+  `dumps remove` (drop the table and the download, after confirming).
+  Every command takes `--json`; every error says what to do next before
+  the raw message. Library: `hardmoney::bulk::preflight` (`run ->
+  Preflight { checks: Vec<Check { name, status, detail, fix }> }` with
+  `Display`, the `check_*` functions, `parse_pg_version`,
+  `free_disk_space`/`judge_space`, `estimate -> ImportNeeds`,
+  `explain_connect_error`, `redact_url`) and, in `bulk::dump`,
+  `plan_restore_offline`, `pg_restore_command`, `drop_restored`,
+  `evict_cached`, `RemoteDump::is_newer_than`,
+  `RestoreRecord::source_version`. Book: *The FEC's Postgres dump files*
+  now opens with the three commands and the vocabulary; new tutorial
+  *Importing the FEC's database dumps, from nothing* with the real
+  session; `dumps` in the CLI reference.
 - **The FEC's Postgres dumps, first-class** (`hardmoney::bulk::dump`).
   `bulk-restore-dump` gains `--cycles 2024,2026` (restore only those
   two-year periods of `schedule_a_full` / `schedule_b_full`: the parent

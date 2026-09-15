@@ -8,6 +8,53 @@
 hardmoney reads, writes, checks, and loads U.S. federal campaign-finance
 data. It is a Rust library, a command-line tool, and a Python package.
 
+FEC data enters on the left, passes through the crate's modules, and
+reaches people through the API, exports, the CLI, and Python:
+
+```mermaid
+flowchart LR
+    subgraph Sources[FEC sources]
+        Docquery["docquery .fec files"]
+        Feed["e-file RSS feed and daily zips"]
+        BulkZip["bulk-download zips"]
+        Dumps["pg_dump archives"]
+        OpenFec["openFEC API"]
+    end
+    subgraph Hm[hardmoney]
+        Parser["parser: Filing, to_fec"]
+        Checks["validate, reconcile"]
+        Export["export: CSV, JSONL, Parquet, SQLite"]
+        Loader["bulk loader, dump restore, ingest"]
+        Pg[("Postgres namespaces")]
+        Api["REST API and web UI"]
+        Cli["CLI"]
+        Py["Python package"]
+    end
+    subgraph Who[Consumers]
+        Journalists
+        Researchers
+        Filers["filers and vendors"]
+        Scripts
+    end
+    OpenFec -->|"names filings"| Docquery
+    Docquery --> Parser
+    Feed --> Parser
+    BulkZip --> Loader
+    Dumps --> Loader
+    Parser --> Checks
+    Parser --> Export
+    Parser --> Loader
+    Parser --> Py
+    Loader --> Pg
+    Pg --> Api
+    Api --> Cli
+    Api --> Journalists
+    Export --> Researchers
+    Checks --> Filers
+    Cli --> Scripts
+    Py --> Scripts
+```
+
 It parses every FEC electronic filing format since 2001, writes filings
 back out, validates them against the FEC's own acceptance rules, checks a
 report's cover-page totals against its schedules, loads the FEC's bulk

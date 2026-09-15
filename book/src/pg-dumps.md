@@ -1,17 +1,161 @@
 # The FEC's Postgres dump files
 
-The FEC publishes four `pg_dump` archives of tables from its own
-disclosure database. Two of them are small and worth restoring routinely;
-the other two are the complete itemized receipt and disbursement history
-since 1975 and need planning. This chapter records what is in those
-files (checked against the real archives in September 2026) and how
-`hardmoney bulk-restore-dump` and its companions `bulk-dump-info`,
-`bulk-dump-index`, and `bulk-dump-compare` handle them.
+The FEC publishes four tables from its own database as Postgres dump
+files: committee history, independent expenditures, itemized receipts,
+and itemized disbursements, refreshed every weekend. hardmoney loads
+them into your own Postgres database. This chapter starts with the
+three commands that do it and what they say back, then explains the
+choices they make, and ends with the reference material: what is inside
+each archive, the FEC's processed columns, and the lower-level
+`bulk-restore-dump` commands.
 
-If you only want independent expenditures, the short version is in
-[Loading bulk data](./bulk-etl.md#an-alternative-restoring-the-fecs-own-database-dumps)
-and the
-[independent expenditures tutorial](./tutorial-independent-expenditures.md).
+## Run these three commands
+
+With Postgres installed and a database created (the
+[tutorial](./tutorial-dumps.md) covers that from nothing, on macOS and
+Ubuntu):
+
+```bash
+export DATABASE_URL=postgres://you@localhost/fec   # your login name, your database
+hardmoney dumps check
+hardmoney dumps import all-small
+```
+
+`check` looks at your computer and the database and prints one line per
+thing an import needs, `✓`, `!`, or `✗`, each with a fix. `import
+all-small` downloads the two small files (14 MB and 43 MB), shows a
+plan with disk and time estimates, asks for a `y`, and loads them.
+About a minute later you have `dump_committee_history` (262,276 rows in
+September 2026) and `dump_schedule_e` (549,525 rows) to query:
+
+```text
+$ psql "$DATABASE_URL" -c "SELECT count(*) FROM dump_schedule_e;"
+ count
+--------
+ 549525
+(1 row)
+```
+
+The words a beginner meets along the way, once each:
+
+- A **dump** is a file Postgres can turn back into a table, rows and
+  all. `pg_restore`, which comes with Postgres, does the turning;
+  hardmoney runs it for you.
+- A **schema** is a named folder of tables inside a database. The FEC's
+  files insist on landing in one called `disclosure`; hardmoney creates
+  it.
+- A **namespace** is hardmoney's word for the schema where its own
+  tables and its friendly views live. The default is `public`. The
+  `disclosure` tables are shared by every namespace; the views over
+  them are made per namespace.
+- A **view** is a saved query that behaves like a table.
+  `dump_schedule_e` and `independent_expenditures` are views over
+  `disclosure.fec_fitem_sched_e`.
+- A **partition** is a separate table holding one slice of a bigger
+  one. The FEC splits its two large tables into one partition per
+  two-year election cycle, which is what makes them loadable a cycle at
+  a time.
+- An **index** is a lookup structure that makes searching a table by a
+  column fast, at the cost of disk and load time.
+
+## The `dumps` commands
+
+| command | what it does |
+|---|---|
+| `hardmoney dumps` | Where am I: the four files with today's sizes from fec.gov, which are downloaded, which are in the database, and what to run next. |
+| `hardmoney dumps check [--for WHAT] [--cycles ...]` | Preflight: `pg_restore` present and version 15 or newer; a database URL; the connection; server version; the `disclosure` schema exists or can be created; `pg_trgm` and `btree_gin` available; free disk where downloads go and where Postgres keeps its data, against what the import needs; the namespace set up (offers to run `schema-init`). |
+| `hardmoney dumps import WHAT [--cycles Y,Y] [--yes] [--explain] [--dump-file PATH] [--jobs N]` | The import. Runs the checks, prints the plan, asks, downloads with a progress bar, restores with a heartbeat line every 30 seconds, adds hardmoney's indexes where the FEC's were skipped, then prints rows, time, and three commands to try. |
+| `hardmoney dumps status [--offline]` | What is imported (rows, indexes, cycles, when, from which fec.gov file), what is downloaded, and whether fec.gov has a newer file. |
+| `hardmoney dumps update [--yes]` | Re-imports whatever is imported when fec.gov has a newer file. Prints a cron line. |
+| `hardmoney dumps remove WHAT [--yes] [--keep-file]` | Drops the table and deletes the download, after asking. |
+
+`WHAT` is `committees`, `independent-expenditures`, `receipts`,
+`disbursements`, or `all-small` (the first two). The technical names
+(`committee_history`, `schedule_e`, `schedule_a_full`,
+`schedule_b_full`) are accepted too. Every command takes `--json` for
+scripts, and `--database-url`, `--schema`, `--cache-dir` before or
+after the subcommand. Full `--help` text is in the
+[CLI reference](./cli-reference.md#dumps).
+
+### What `import` decides for you
+
+- **The small files are loaded whole**, indexes and all, because they
+  take seconds either way.
+- **`receipts` and `disbursements` are loaded one cycle at a time**,
+  the current cycle unless `--cycles` says otherwise, and without the
+  FEC's own indexes. Loading a partition with `pg_restore --table`
+  never restores indexes, and the FEC's 34 per partition are most of
+  the 35 hours its README quotes; hardmoney adds three per partition
+  afterwards (unique `sub_id`, committee plus date, and a trigram index
+  on the name column when `pg_trgm` is available). Run again with
+  `--cycles 2024` to add a cycle; the ones you have are left alone.
+- **The whole large file is downloaded even for one cycle.** The FEC
+  does not offer per-cycle files. The download resumes if it is
+  interrupted and is kept for the next cycle you add.
+- **Estimates are the FEC's numbers, scaled.** The plan's download
+  times assume 2 to 25 MB/s; restore times take the FEC's published
+  rates (about 6 minutes per gigabyte of archive data-only, 44 with the
+  FEC's indexes) times the share of the archive a recent cycle is, then
+  halve and double them for the range. Disk inside Postgres is about
+  five times the archive bytes restored. They are for choosing between
+  "before lunch" and "over the weekend", and the plan says so.
+- **Confirmation** is asked when there is a terminal to ask on. `--yes`
+  skips it; so does `--json`. `dumps remove` always insists on one or
+  the other.
+- **The namespace is set up if it is not.** An import needs `schema-init`
+  to have run so the import can be recorded and the views made;
+  `import` asks and runs it.
+- **Errors say what to do.** Every failure prints a sentence about what
+  happened and a "what to do" line before the raw Postgres or
+  `pg_restore` message, which is kept underneath for whoever needs it.
+
+### `--explain`: no magic
+
+`hardmoney dumps import receipts --explain` prints the plan and then
+the exact statements and `pg_restore` command that would run, and
+exits. Captured while writing this (the disk checks failed on the
+laptop, and the plan is printed anyway):
+
+```text
+What will run, exactly:
+  receipts:
+    CREATE SCHEMA IF NOT EXISTS disclosure;
+    DROP TABLE IF EXISTS disclosure.fec_fitem_sched_a_2025_2026 CASCADE;
+    pg_restore --no-owner --no-acl --table=fec_fitem_sched_a --table=fec_fitem_sched_a_2025_2026 -d postgres://chris.gorski@localhost/fec /Users/chris.gorski/.cache/hardmoney/dumps/schedule_a_full.dump
+    CREATE UNIQUE INDEX hm_fec_fitem_sched_a_2025_2026_sub_id_uidx ON disclosure.fec_fitem_sched_a_2025_2026 (sub_id);
+    CREATE INDEX hm_fec_fitem_sched_a_2025_2026_cmte_dt_idx ON disclosure.fec_fitem_sched_a_2025_2026 (cmte_id, contb_receipt_dt);
+    CREATE INDEX hm_fec_fitem_sched_a_2025_2026_contbr_nm_trgm_idx ON disclosure.fec_fitem_sched_a_2025_2026 USING gin (contbr_nm gin_trgm_ops);  -- skipped if pg_trgm is unavailable
+    (then hardmoney recreates the view dump_schedule_a in namespace 'public' and records the import in its loads table)
+```
+
+That `pg_restore` line is the FEC README's own recipe (name the parent
+table and the partitions wanted) with the table names filled in. A
+password in the URL is shown as `***`.
+
+### The checks, and what each failure means
+
+| check | passes when | if not |
+|---|---|---|
+| `pg_restore` | on `PATH`, version 15 or newer (the archives were written by Postgres 15's `pg_dump`) | install the Postgres client tools; the fix line names the package for your OS |
+| `database` | `DATABASE_URL` or `--database-url` is a Postgres URL | `createdb fec`, then `export DATABASE_URL=postgres://you@localhost/fec` |
+| `connection` | one connection opens | the fix names the cause: Postgres not running, database not created, unknown user, wrong password, wrong host |
+| `Postgres version` | server 15 or newer (10 to 14 is a warning) | upgrade the server |
+| `disclosure schema` | exists and you can create tables in it, or you can create it | the `GRANT` or `CREATE SCHEMA` for an administrator to run |
+| `extensions` | `pg_trgm` and `btree_gin` are available (warning only) | optional: install the contrib package |
+| `disk space for downloads` | free space at `--cache-dir` is at least 1.2 times the download | free space, or `--cache-dir` on a bigger disk |
+| `disk space for the database` | free space at the server's data directory is at least 1.2 times the estimated table size; a warning if the server will not say where that is (needs superuser) or is on another machine | free space there, or fewer `--cycles` |
+| `namespace` | `schema-init` has run (warning only) | `check` and `import` offer to run it |
+
+The same checks are `hardmoney::bulk::preflight::run` in the library,
+returning a `Preflight` of typed `Check`s with a `Display`, so a program
+can run them too.
+
+---
+
+The rest of this chapter is the reference: what is in the archives,
+how the FEC's processed columns relate to the raw `.fec` fields, and
+the `bulk-restore-dump` family of commands that `dumps` is built on and
+that scripts may prefer.
 
 ## What the FEC publishes
 
@@ -528,6 +672,18 @@ Everything above is `hardmoney::bulk::dump`:
 - `create_indexes(&pool, &SCHEDULE_A, &cycles) -> IndexReport`.
 - `table_state(&pool, &source)`, `restore_history(&pool)`.
 - `compare_filing(&pool, filing_id) -> CompareReport`.
+- For the guided commands: `plan_restore_offline` (the plan without the
+  archive, for `--explain`), `pg_restore_command` (the exact argument
+  list), `drop_restored`, `evict_cached`, and
+  `RemoteDump::is_newer_than` (ETag, then `Last-Modified`).
+
+The checks and estimates are `hardmoney::bulk::preflight`:
+`run(&PreflightInput { database_url, namespace, cache_dir, needs })
+-> Preflight` (a `Vec<Check { name, status: Pass | Warn | Fail, detail,
+fix }>` with `Display`), the individual `check_*` functions,
+`parse_pg_version`, `free_disk_space` and `judge_space`, and
+`estimate(&source, archive_bytes, download_needed, &cycles, data_only,
+today) -> ImportNeeds` (download and database bytes, time ranges).
 
 Errors are `DumpError` (`MissingPartition`, `NotPartitioned`,
 `Incomplete`, `LargeDumpNotAllowed`, `TableMissing`,

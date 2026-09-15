@@ -5,11 +5,20 @@ authors = ["cgorski"]
 language = "en"
 src = "src"
 
+# Mermaid diagrams (the architecture chapter) are rendered by mdbook-mermaid.
+# `mermaid.min.js` and `mermaid-init.js` were written by
+# `mdbook-mermaid install book`. The mdbook and mdbook-mermaid versions must
+# move together: mdbook 0.5.x needs mdbook-mermaid 0.17.x (pinned in
+# .github/workflows/book.yml).
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
 [output.html]
 git-repository-url = "https://github.com/cgorski/hardmoney"
 edit-url-template = "https://github.com/cgorski/hardmoney/edit/main/book/{path}"
 default-theme = "light"
 preferred-dark-theme = "navy"
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
 
 [output.html.fold]
 enable = true

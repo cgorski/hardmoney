@@ -13,6 +13,7 @@ pub mod dump;
 pub mod error;
 pub mod ingest;
 pub mod loader;
+pub mod preflight;
 pub mod source;
 
 pub use error::{BulkError, Result};

@@ -14,6 +14,10 @@ certain design decisions were made, and how to go from "I have a `.fec`
 file" or "I want a searchable database of committees" to a working
 program.
 
+For a one-page map of where each kind of FEC data enters the crate and
+which module, command, and table handles it, see
+[How data flows through hardmoney](./architecture.md).
+
 If you'd rather start from a concrete goal than from the concepts, the
 [Tutorials](./tutorials.md) section has five end-to-end walkthroughs.
 Each is written for one kind of reader (a reporter, a research team, a

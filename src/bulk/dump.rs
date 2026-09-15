@@ -1981,6 +1981,152 @@ pub async fn compare_filing(pool: &PgPool, filing_id: i64) -> Result<CompareRepo
     })
 }
 
+// ---------------------------------------------------------------------------
+// Helpers for the guided `hardmoney dumps` commands
+// ---------------------------------------------------------------------------
+
+impl RemoteDump {
+    /// Whether the server's file is a different (newer) one than `local`,
+    /// where `local` is what was recorded when the file was downloaded or
+    /// restored. ETags are compared when both sides have one, else
+    /// `Last-Modified` dates; `None` when neither side has anything to
+    /// compare, or the local side has nothing recorded at all.
+    #[must_use]
+    pub fn is_newer_than(&self, local: &RemoteDump) -> Option<bool> {
+        if let (Some(a), Some(b)) = (&self.etag, &local.etag) {
+            return Some(a != b);
+        }
+        match (self.last_modified, local.last_modified) {
+            (Some(remote), Some(local)) => Some(remote > local),
+            _ => None,
+        }
+    }
+
+    /// Whether anything is recorded (an ETag or a date).
+    #[must_use]
+    pub fn has_validator(&self) -> bool {
+        self.etag.is_some() || self.last_modified.is_some()
+    }
+}
+
+impl RestoreRecord {
+    /// The FEC file this restore came from, as recorded (`source_etag`,
+    /// `source_last_modified`; no size), for comparing with
+    /// [`remote_info`] via [`RemoteDump::is_newer_than`]. Empty for a
+    /// restore from a local file.
+    #[must_use]
+    pub fn source_version(&self) -> RemoteDump {
+        RemoteDump {
+            size: None,
+            etag: self.source_etag.clone(),
+            last_modified: self.source_last_modified,
+        }
+    }
+}
+
+/// Deletes `source`'s cached archive and its `.partial` and `.meta`
+/// sidecars from `cache_dir`, so the next [`download`] fetches the FEC's
+/// current file. Returns whether any file was removed. Missing files are
+/// not an error; any other I/O failure is.
+pub fn evict_cached(source: &DumpSource, cache_dir: &Path) -> std::io::Result<bool> {
+    let dest = cache_path(source, cache_dir);
+    let mut removed = false;
+    for path in [dest.clone(), partial_path(&dest), meta_path(&dest)] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed = true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(removed)
+}
+
+/// Drops `disclosure.<table>` for `source` (`CASCADE`: its per-cycle
+/// child tables and every namespace's views over it go too), then
+/// rebuilds this namespace's views so the ones for other dumps remain.
+/// Returns whether the table existed. The `loads` history is kept.
+pub async fn drop_restored(pool: &PgPool, source: &DumpSource) -> Result<bool> {
+    let existed = table_exists(pool, source.disclosure_table).await?;
+    if existed {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP TABLE IF EXISTS disclosure.{} CASCADE",
+            source.disclosure_table
+        )))
+        .execute(pool)
+        .await?;
+    }
+    crate::db::ensure_views(pool).await?;
+    Ok(existed)
+}
+
+/// The plan [`restore_with`] will settle on, worked out without the
+/// archive: child-table names come from [`partition_table`] instead of
+/// the table of contents. For showing someone the `pg_restore` command
+/// before a 90 GB download starts. `parent_exists` as for
+/// [`plan_restore`].
+///
+/// Fails with [`DumpError::NotPartitioned`] if cycles were requested for
+/// a single-table dump and [`DumpError::LargeDumpNotAllowed`] for a whole
+/// large dump without `allow_large`. A cycle the real archive turns out
+/// not to have is caught later by [`plan_restore`].
+pub fn plan_restore_offline(
+    source: &DumpSource,
+    options: &RestoreOptions,
+    parent_exists: bool,
+) -> Result<RestorePlan> {
+    if options.cycles.is_empty() {
+        if source.is_large && !options.allow_large {
+            return Err(DumpError::LargeDumpNotAllowed {
+                name: source.name,
+                size: fmt_bytes(source.approx_size_bytes),
+            });
+        }
+        return Ok(RestorePlan {
+            tables: Vec::new(),
+            partitions: Vec::new(),
+            data_only: options.data_only,
+            jobs: options.jobs,
+        });
+    }
+    if !source.partitioned_by_cycle {
+        return Err(DumpError::NotPartitioned { name: source.name });
+    }
+    let partitions: Vec<Partition> = options
+        .cycles
+        .iter()
+        .map(|c| Partition {
+            cycle: *c,
+            table: partition_table(source.disclosure_table, *c),
+        })
+        .collect();
+    let mut tables = Vec::with_capacity(partitions.len().saturating_add(1));
+    if !parent_exists {
+        tables.push(source.disclosure_table.to_string());
+    }
+    tables.extend(partitions.iter().map(|p| p.table.clone()));
+    Ok(RestorePlan {
+        tables,
+        partitions,
+        data_only: true,
+        jobs: options.jobs,
+    })
+}
+
+/// The complete command line [`restore_with`] runs for `plan`, as one
+/// string per argument: `pg_restore`, the plan's arguments, `-d`, the
+/// database URL, and the archive path. Exactly what
+/// `hardmoney dumps import --explain` prints.
+#[must_use]
+pub fn pg_restore_command(plan: &RestorePlan, database_url: &str, dump_path: &Path) -> Vec<String> {
+    let mut argv = Vec::with_capacity(plan.tables.len().saturating_add(6));
+    argv.push("pg_restore".to_string());
+    argv.extend(plan.pg_restore_args());
+    argv.push("-d".to_string());
+    argv.push(database_url.to_string());
+    argv.push(dump_path.display().to_string());
+    argv
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2584,5 +2730,200 @@ mod tests {
         };
         assert_eq!(r.matched(), 0);
         assert!(r.newer_than_dump());
+    }
+}
+
+#[cfg(test)]
+mod guided_helper_tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "hardmoney-dump-guided-{tag}-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn remote_newer_than_local() {
+        let at = |s: &str| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        let remote = RemoteDump {
+            size: Some(1),
+            etag: Some("b".into()),
+            last_modified: Some(at("2026-09-20T11:00:00Z")),
+        };
+        let same = RemoteDump {
+            etag: Some("b".into()),
+            ..RemoteDump::default()
+        };
+        let older = RemoteDump {
+            etag: Some("a".into()),
+            last_modified: Some(at("2026-09-13T11:00:00Z")),
+            size: None,
+        };
+        assert_eq!(remote.is_newer_than(&same), Some(false));
+        assert_eq!(remote.is_newer_than(&older), Some(true));
+        // ETag wins even when the dates would disagree.
+        let same_tag_older_date = RemoteDump {
+            etag: Some("b".into()),
+            last_modified: Some(at("2020-01-01T00:00:00Z")),
+            size: None,
+        };
+        assert_eq!(remote.is_newer_than(&same_tag_older_date), Some(false));
+        // Dates only.
+        let dated = RemoteDump {
+            last_modified: Some(at("2026-09-13T11:00:00Z")),
+            ..RemoteDump::default()
+        };
+        assert_eq!(remote.is_newer_than(&dated), Some(true));
+        assert_eq!(dated.is_newer_than(&remote), Some(false));
+        // Nothing to compare.
+        assert_eq!(remote.is_newer_than(&RemoteDump::default()), None);
+        assert_eq!(RemoteDump::default().is_newer_than(&remote), None);
+        assert!(remote.has_validator());
+        assert!(dated.has_validator());
+        assert!(!RemoteDump::default().has_validator());
+        assert!(
+            !RemoteDump {
+                size: Some(3),
+                ..RemoteDump::default()
+            }
+            .has_validator()
+        );
+    }
+
+    #[test]
+    fn evict_removes_every_cache_file() {
+        let dir = scratch("evict");
+        assert!(
+            !evict_cached(&SCHEDULE_E, &dir).unwrap(),
+            "nothing there yet"
+        );
+        let dest = cache_path(&SCHEDULE_E, &dir);
+        std::fs::write(&dest, b"x").unwrap();
+        std::fs::write(partial_path(&dest), b"y").unwrap();
+        std::fs::write(meta_path(&dest), b"etag=z\n").unwrap();
+        assert!(cached(&SCHEDULE_E, &dir).complete_bytes.is_some());
+        assert!(evict_cached(&SCHEDULE_E, &dir).unwrap());
+        let after = cached(&SCHEDULE_E, &dir);
+        assert!(after.complete_bytes.is_none());
+        assert!(after.partial_bytes.is_none());
+        assert_eq!(after.meta, RemoteDump::default());
+        assert!(!evict_cached(&SCHEDULE_E, &dir).unwrap());
+        // Another dump's files in the same directory are untouched.
+        let other = cache_path(&COMMITTEE_HISTORY, &dir);
+        std::fs::write(&other, b"keep").unwrap();
+        assert!(!evict_cached(&SCHEDULE_E, &dir).unwrap());
+        assert!(other.is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn offline_plan_matches_the_toc_plan() {
+        let c2024 = Cycle::new(2024).unwrap();
+        let c2026 = Cycle::new(2026).unwrap();
+        let opts = RestoreOptions::new().cycles([c2026, c2024]).jobs(2);
+        let plan = plan_restore_offline(&SCHEDULE_A, &opts, false).unwrap();
+        assert_eq!(
+            plan.tables,
+            vec![
+                "fec_fitem_sched_a",
+                "fec_fitem_sched_a_2023_2024",
+                "fec_fitem_sched_a_2025_2026"
+            ]
+        );
+        assert!(plan.data_only);
+        assert_eq!(plan.jobs, 2);
+        assert_eq!(plan.partitions.len(), 2);
+        let with_parent = plan_restore_offline(&SCHEDULE_A, &opts, true).unwrap();
+        assert_eq!(
+            with_parent.tables,
+            vec!["fec_fitem_sched_a_2023_2024", "fec_fitem_sched_a_2025_2026"]
+        );
+
+        // Same answer as the TOC-based planner when the archive has the
+        // cycles.
+        let listing = "\
+1; 1259 1 TABLE disclosure fec_fitem_sched_a fec
+2; 1259 2 TABLE disclosure fec_fitem_sched_a_2023_2024 fec
+3; 1259 3 TABLE disclosure fec_fitem_sched_a_2025_2026 fec
+";
+        let toc = DumpToc::parse(listing);
+        assert_eq!(plan_restore(&SCHEDULE_A, &toc, &opts, false).unwrap(), plan);
+
+        // Whole small dump.
+        let whole = plan_restore_offline(&SCHEDULE_E, &RestoreOptions::new(), false).unwrap();
+        assert!(whole.tables.is_empty());
+        assert!(!whole.data_only);
+        let data_only =
+            plan_restore_offline(&SCHEDULE_E, &RestoreOptions::new().data_only(true), false)
+                .unwrap();
+        assert!(data_only.data_only);
+
+        // Refusals.
+        let err = plan_restore_offline(&SCHEDULE_E, &RestoreOptions::new().cycles([c2024]), false)
+            .unwrap_err();
+        assert!(matches!(err, DumpError::NotPartitioned { .. }), "{err}");
+        let err = plan_restore_offline(&SCHEDULE_A, &RestoreOptions::new(), false).unwrap_err();
+        assert!(
+            matches!(err, DumpError::LargeDumpNotAllowed { .. }),
+            "{err}"
+        );
+        assert!(
+            plan_restore_offline(&SCHEDULE_A, &RestoreOptions::new().allow_large(true), false)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn command_line_is_what_restore_runs() {
+        let plan = plan_restore_offline(
+            &SCHEDULE_A,
+            &RestoreOptions::new().cycles([Cycle::new(2026).unwrap()]),
+            false,
+        )
+        .unwrap();
+        let argv = pg_restore_command(
+            &plan,
+            "postgres://u@localhost/fec",
+            Path::new("/tmp/schedule_a_full.dump"),
+        );
+        assert_eq!(
+            argv,
+            vec![
+                "pg_restore",
+                "--no-owner",
+                "--no-acl",
+                "--table=fec_fitem_sched_a",
+                "--table=fec_fitem_sched_a_2025_2026",
+                "-d",
+                "postgres://u@localhost/fec",
+                "/tmp/schedule_a_full.dump",
+            ]
+        );
+        let whole =
+            plan_restore_offline(&SCHEDULE_E, &RestoreOptions::new().data_only(true), false)
+                .unwrap();
+        let argv = pg_restore_command(&whole, "postgres://u@localhost/fec", Path::new("e.dump"));
+        assert_eq!(
+            argv,
+            vec![
+                "pg_restore",
+                "--no-owner",
+                "--no-acl",
+                "--section=pre-data",
+                "--section=data",
+                "-d",
+                "postgres://u@localhost/fec",
+                "e.dump",
+            ]
+        );
     }
 }

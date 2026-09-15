@@ -30,6 +30,7 @@ Commands:
   bulk-load-all      Load every bulk source for one cycle
   bulk-restore-dump  Restore one of the FEC's own official pg_dump archives
   bulk-load-filing   Ingest a single raw `.fec` filing directly
+  dumps              Import the FEC's Postgres dump files (guided)
   filings            Find filings via the FEC's API and fetch, validate, or ingest them
   efile              Follow the FEC's electronic filing feed
   serve              Run the REST API server
@@ -526,6 +527,192 @@ the command exits 1 asking for `--filing-id`. For a numeric argument,
 the filing is downloaded from `docquery.fec.gov` and that number is the
 id unless `--filing-id` overrides it. See
 [Bulk ETL](./bulk-etl.md#ingesting-a-single-filing-directly-for-precise-schedule-e-data).
+
+## `dumps`
+
+The guided way to import the FEC's Postgres dump files; see
+[The FEC's Postgres dump files](./pg-dumps.md) and the
+[tutorial](./tutorial-dumps.md). The four flags in the group's own
+`--help` (`--database-url`, `--schema`, `--cache-dir`, `--json`) are
+accepted by every subcommand, before or after it. `--database-url` is
+optional here: without it, `dumps` and `dumps check` explain how to
+create a database instead of failing.
+
+```text
+$ hardmoney dumps --help
+Import the FEC's Postgres dump files (guided)
+
+Usage: hardmoney dumps [OPTIONS] [COMMAND]
+
+Commands:
+  check   Check that this computer and the database are ready: pg_restore, the connection, permissions, disk space, and the namespace
+  import  Download one of the FEC's files and load it into the database, after showing a plan with time and disk estimates
+  status  What is imported, what is downloaded, and whether fec.gov has newer files than you have
+  update  Re-import whatever is already imported when fec.gov has a newer file (the FEC refreshes them every weekend)
+  remove  Drop an imported table and delete its downloaded file
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --database-url <URL>  Postgres connection URL, e.g. postgres://you@localhost/fec. Read from DATABASE_URL (or a .env file in the current folder) when not given [env: DATABASE_URL=]
+      --schema <SCHEMA>     Namespace (Postgres schema) for hardmoney's own tables and the friendly views. The FEC's tables always land in the `disclosure` schema, which every namespace shares. Default: public [env: HARDMONEY_SCHEMA=] [default: public]
+      --cache-dir <DIR>     Folder where downloaded dump files are kept between runs (an interrupted download resumes from there) [env: HARDMONEY_CACHE_DIR=] [default: /Users/chris.gorski/.cache/hardmoney/dumps]
+      --json                Print one JSON object instead of text (for scripts). Implies no questions are asked
+  -h, --help                Print help
+```
+
+With no subcommand, `hardmoney dumps` prints the overview: the four
+files with today's sizes from fec.gov (approximate, marked `~`, when
+offline), which are downloaded, which are in the database with row
+counts and import dates, and the commands to run next.
+
+### `dumps check`
+
+```text
+$ hardmoney dumps check --help
+Check that this computer and the database are ready: pg_restore, the connection, permissions, disk space, and the namespace
+
+Usage: hardmoney dumps check [OPTIONS]
+
+Options:
+      --database-url <URL>  Postgres connection URL, e.g. postgres://you@localhost/fec. Read from DATABASE_URL (or a .env file in the current folder) when not given [env: DATABASE_URL=]
+      --for <WHAT>          Size the disk-space checks for this import (same names as `dumps import`). Default: all-small
+      --cycles <YEARS>      For receipts and disbursements: the cycles the sizing assumes. Default: the current cycle
+      --schema <SCHEMA>     Namespace (Postgres schema) for hardmoney's own tables and the friendly views. The FEC's tables always land in the `disclosure` schema, which every namespace shares. Default: public [env: HARDMONEY_SCHEMA=] [default: public]
+      --cache-dir <DIR>     Folder where downloaded dump files are kept between runs (an interrupted download resumes from there) [env: HARDMONEY_CACHE_DIR=] [default: /Users/chris.gorski/.cache/hardmoney/dumps]
+      --offline             Do not ask fec.gov for current file sizes; use the approximate ones
+      --json                Print one JSON object instead of text (for scripts). Implies no questions are asked
+  -y, --yes                 If the namespace is not set up yet, run `schema-init` without asking
+  -h, --help                Print help
+```
+
+Prints one line per check (`✓` pass, `!` warning, `✗` failure) with a
+`fix:` line under anything that is not a pass, then offers to run
+`schema-init` if the namespace needs it. Exits 1 if any check failed.
+The checks, in order: `pg_restore`, `database`, `connection`,
+`Postgres version`, `disclosure schema`, `extensions`, `disk space for
+downloads`, `disk space for the database`, `namespace`. With `--json`,
+the object has `ok`, `worst`, `checks` (each with `name`, `status`,
+`detail`, `fix`), and `needs`.
+
+### `dumps import`
+
+```text
+$ hardmoney dumps import --help
+Download one of the FEC's files and load it into the database, after showing a plan with time and disk estimates
+
+Usage: hardmoney dumps import [OPTIONS] <WHAT>
+
+Arguments:
+  <WHAT>  What to import: committees, independent-expenditures, receipts, disbursements, or all-small (the first two, a few minutes). The technical names (committee_history, schedule_e, schedule_a_full, schedule_b_full) work too
+
+Options:
+      --cycles <YEARS>      For receipts and disbursements: which two-year election cycles to load, e.g. 2024,2026. Default: the current cycle. Run again with other cycles to add them
+      --database-url <URL>  Postgres connection URL, e.g. postgres://you@localhost/fec. Read from DATABASE_URL (or a .env file in the current folder) when not given [env: DATABASE_URL=]
+      --schema <SCHEMA>     Namespace (Postgres schema) for hardmoney's own tables and the friendly views. The FEC's tables always land in the `disclosure` schema, which every namespace shares. Default: public [env: HARDMONEY_SCHEMA=] [default: public]
+  -y, --yes                 Do not ask for confirmation
+      --cache-dir <DIR>     Folder where downloaded dump files are kept between runs (an interrupted download resumes from there) [env: HARDMONEY_CACHE_DIR=] [default: /Users/chris.gorski/.cache/hardmoney/dumps]
+      --explain             Print the plan and the exact pg_restore command(s) that would run, then exit without changing anything
+      --dump-file <PATH>    Load from a dump file you already have instead of downloading
+      --json                Print one JSON object instead of text (for scripts). Implies no questions are asked
+      --jobs <N>            pg_restore parallel workers (helps when loading several cycles) [default: 1]
+  -h, --help                Print help
+```
+
+Runs the checks (stops if any fail, unless `--explain`), prints the
+plan (what is downloaded, how many rows into which table in which
+database, disk and time estimates), and asks `Continue? [y/N]` unless
+`--yes` is given or stdin is not a terminal. If the namespace has not
+had `schema-init`, it asks and runs it. Then, per dump: download with a
+progress bar (resuming a partial file), `pg_restore` with a progress
+line every 30 seconds, and, for a cycle-selective restore, hardmoney's
+indexes. Finishes with rows and time per dump, commands to try (a
+`hardmoney query` where one applies, `psql` one-liners against the
+views), and where the data and the downloaded file live. The small
+dumps are restored whole; `receipts` and `disbursements` default to the
+current cycle, data only, followed by `bulk-dump-index`. `--dump-file`
+applies to one dump, so not to `all-small`. With `--json`, the object
+has `ok`, `elapsed_secs`, `imports` (each with `name`, `dump`, `table`,
+`tables`, `cycles`, `rows`, `data_only`, `indexes_created`,
+`dump_path`, `recorded`, `elapsed_secs`), and `checks`; with
+`--explain`, `plan`, `pg_restore_commands`, and `statements` instead of
+`imports`.
+
+### `dumps status`
+
+```text
+$ hardmoney dumps status --help
+What is imported, what is downloaded, and whether fec.gov has newer files than you have
+
+Usage: hardmoney dumps status [OPTIONS]
+
+Options:
+      --database-url <URL>  Postgres connection URL, e.g. postgres://you@localhost/fec. Read from DATABASE_URL (or a .env file in the current folder) when not given [env: DATABASE_URL=]
+      --offline             Do not contact fec.gov (skip the "newer file available" check)
+      --schema <SCHEMA>     Namespace (Postgres schema) for hardmoney's own tables and the friendly views. The FEC's tables always land in the `disclosure` schema, which every namespace shares. Default: public [env: HARDMONEY_SCHEMA=] [default: public]
+      --cache-dir <DIR>     Folder where downloaded dump files are kept between runs (an interrupted download resumes from there) [env: HARDMONEY_CACHE_DIR=] [default: /Users/chris.gorski/.cache/hardmoney/dumps]
+      --json                Print one JSON object instead of text (for scripts). Implies no questions are asked
+  -h, --help                Print help
+```
+
+Per dump: the table and view, whether it is in the database (estimated
+rows, index count, cycles present, when it was imported and from which
+fec.gov file, from the namespace's `loads` table), whether it is
+downloaded, and what fec.gov has now, with "NEWER than what you
+imported" when the ETag or `Last-Modified` differs. With `--json`, the
+object has `dumps` (each with `name`, `dump`, `table`, `view`, `fec`,
+`downloaded`, `database`, `last_import`, `fec_has_newer`), `database`,
+`cache_dir`, and `offline`.
+
+### `dumps update`
+
+```text
+$ hardmoney dumps update --help
+Re-import whatever is already imported when fec.gov has a newer file (the FEC refreshes them every weekend)
+
+Usage: hardmoney dumps update [OPTIONS]
+
+Options:
+      --database-url <URL>  Postgres connection URL, e.g. postgres://you@localhost/fec. Read from DATABASE_URL (or a .env file in the current folder) when not given [env: DATABASE_URL=]
+  -y, --yes                 Do not ask for confirmation (for cron)
+      --jobs <N>            pg_restore parallel workers [default: 1]
+      --schema <SCHEMA>     Namespace (Postgres schema) for hardmoney's own tables and the friendly views. The FEC's tables always land in the `disclosure` schema, which every namespace shares. Default: public [env: HARDMONEY_SCHEMA=] [default: public]
+      --cache-dir <DIR>     Folder where downloaded dump files are kept between runs (an interrupted download resumes from there) [env: HARDMONEY_CACHE_DIR=] [default: /Users/chris.gorski/.cache/hardmoney/dumps]
+      --json                Print one JSON object instead of text (for scripts). Implies no questions are asked
+  -h, --help                Print help
+```
+
+For each imported dump, compares the fec.gov file's ETag (then
+`Last-Modified`) with what the last import recorded (or, failing that,
+the downloaded file's sidecar). Dumps with a newer file are re-imported
+the way they were imported (the same cycles for a split table), after
+the old download is deleted so the new one is fetched; dumps imported
+from a local file with nothing recorded are reported and skipped.
+Always prints a `crontab` line (Monday 06:00) for unattended use.
+
+### `dumps remove`
+
+```text
+$ hardmoney dumps remove --help
+Drop an imported table and delete its downloaded file
+
+Usage: hardmoney dumps remove [OPTIONS] <WHAT>
+
+Arguments:
+  <WHAT>  What to remove (same names as `dumps import`)
+
+Options:
+      --database-url <URL>  Postgres connection URL, e.g. postgres://you@localhost/fec. Read from DATABASE_URL (or a .env file in the current folder) when not given [env: DATABASE_URL=]
+  -y, --yes                 Do not ask for confirmation
+      --keep-file           Drop the table but keep the downloaded file
+      --schema <SCHEMA>     Namespace (Postgres schema) for hardmoney's own tables and the friendly views. The FEC's tables always land in the `disclosure` schema, which every namespace shares. Default: public [env: HARDMONEY_SCHEMA=] [default: public]
+      --cache-dir <DIR>     Folder where downloaded dump files are kept between runs (an interrupted download resumes from there) [env: HARDMONEY_CACHE_DIR=] [default: /Users/chris.gorski/.cache/hardmoney/dumps]
+      --json                Print one JSON object instead of text (for scripts). Implies no questions are asked
+  -h, --help                Print help
+```
+
+Says what it will drop (table, estimated rows, partitions) and delete
+(the downloaded file and its sidecars), then asks. Without a terminal
+it refuses unless `--yes` is given. The `loads` history is kept.
 
 ## `filings`
 

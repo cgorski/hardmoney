@@ -2,12 +2,14 @@
 
 [Introduction](./intro.md)
 
+- [How data flows through hardmoney](./architecture.md)
 - [Installation](./installation.md)
 - [Quick start](./quick-start.md)
 - [Tutorials](./tutorials.md)
   - [Who is funding a candidate?](./tutorial-journalist.md)
   - [Loading a full election cycle (and keeping it fresh)](./tutorial-researcher.md)
   - [Tracking independent expenditures for or against a candidate](./tutorial-independent-expenditures.md)
+  - [Importing the FEC's database dumps, from nothing](./tutorial-dumps.md)
   - [Parsing filings in Rust: from bytes to exact dollars](./tutorial-rust-library.md)
   - [What hardmoney does with messy FEC data](./tutorial-fec-data-quality.md)
 - [Parsing a filing, explained](./parsing-explained.md)
@@ -21,6 +23,7 @@
 - [Reconciling a filing](./reconciling.md)
 - [Validating a filing](./validating.md)
 - [Python](./python.md)
+  - [Python cookbook](./python-cookbook.md)
 - [Finding filings: openFEC and the e-file feed](./discovery.md)
 - [Loading bulk data into Postgres](./bulk-etl.md)
   - [Namespaces: many sessions, one database](./namespaces.md)

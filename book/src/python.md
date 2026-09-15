@@ -14,6 +14,12 @@ assert filing.validate().is_acceptable
 assert filing.reconcile().balances
 ```
 
+This chapter is the reference. For worked examples with their output
+(top donors, memo entries, a CSV validation report, a CI exit code,
+pandas and Parquet, a Django-style pre-submission check, and more), see
+the [Python cookbook](./python-cookbook.md); the scripts are in
+`python/examples/` in the repository.
+
 ## Why a Python package
 
 Python is where FEC data users are. The Rust crate `feco3` has ten times

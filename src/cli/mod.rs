@@ -3,6 +3,7 @@
 
 pub mod bulk;
 pub mod db_args;
+pub mod dumps;
 pub mod efile;
 pub mod export;
 pub mod filings;
@@ -69,6 +70,8 @@ enum Command {
     BulkDumpCompare(bulk::BulkDumpCompareArgs),
     /// Ingest a single raw `.fec` filing directly.
     BulkLoadFiling(bulk::BulkLoadFilingArgs),
+    /// Import the FEC's Postgres dump files (guided).
+    Dumps(dumps::DumpsArgs),
     /// Find filings via the FEC's API and fetch, validate, or ingest them.
     Filings(filings::FilingsArgs),
     /// Follow the FEC's electronic filing feed.
@@ -100,6 +103,7 @@ pub async fn run() -> CliResult {
         Command::BulkDumpIndex(a) => bulk::dump_index(a).await,
         Command::BulkDumpCompare(a) => bulk::dump_compare(a).await,
         Command::BulkLoadFiling(a) => bulk::load_filing(a).await,
+        Command::Dumps(a) => dumps::run(a).await,
         Command::Filings(a) => filings::run(a).await,
         Command::Efile(a) => efile::run(a).await,
         Command::Serve(a) => serve::run(a).await,
