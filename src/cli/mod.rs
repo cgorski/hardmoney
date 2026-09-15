@@ -61,6 +61,12 @@ enum Command {
     BulkLoadAll(bulk::BulkLoadAllArgs),
     /// Restore one of the FEC's own official pg_dump archives.
     BulkRestoreDump(bulk::BulkRestoreDumpArgs),
+    /// Show the FEC's dump files: remote size and date, cache, database state, restores.
+    BulkDumpInfo(bulk::BulkDumpInfoArgs),
+    /// Create hardmoney's indexes on a restored dump table.
+    BulkDumpIndex(bulk::BulkDumpIndexArgs),
+    /// Compare an ingested filing's raw Schedule E lines with the FEC's processed dump rows.
+    BulkDumpCompare(bulk::BulkDumpCompareArgs),
     /// Ingest a single raw `.fec` filing directly.
     BulkLoadFiling(bulk::BulkLoadFilingArgs),
     /// Find filings via the FEC's API and fetch, validate, or ingest them.
@@ -90,6 +96,9 @@ pub async fn run() -> CliResult {
         Command::BulkLoad(a) => bulk::load(a).await,
         Command::BulkLoadAll(a) => bulk::load_all(a).await,
         Command::BulkRestoreDump(a) => bulk::restore_dump(a).await,
+        Command::BulkDumpInfo(a) => bulk::dump_info(a).await,
+        Command::BulkDumpIndex(a) => bulk::dump_index(a).await,
+        Command::BulkDumpCompare(a) => bulk::dump_compare(a).await,
         Command::BulkLoadFiling(a) => bulk::load_filing(a).await,
         Command::Filings(a) => filings::run(a).await,
         Command::Efile(a) => efile::run(a).await,

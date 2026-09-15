@@ -16,6 +16,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hardmoney::Cycle;
 use hardmoney::api::ApiConfig;
+use hardmoney::bulk::dump::{self, DumpError, RestoreOptions, TocKind};
 use hardmoney::bulk::{self, Input, LoadMode, LoadOptions};
 use hardmoney::db::{self, DbConfig, Namespace};
 use sqlx::PgPool;
@@ -840,5 +841,349 @@ async fn f99_and_report_number_zero_originals_stand_alone() {
     assert_eq!(from, chrono::NaiveDate::from_ymd_opt(2026, 8, 1));
     assert_eq!(through, chrono::NaiveDate::from_ymd_opt(2026, 8, 31));
 
+    t.drop().await;
+}
+
+// ---------------------------------------------------------------------------
+// The FEC's pg_dump archives
+// ---------------------------------------------------------------------------
+
+/// The FEC's real `fec_fitem_sched_e.dump` (43 MB, 13 Sept 2026), kept
+/// outside the repository. Absent on CI, so the dump test skips there.
+fn local_schedule_e_dump() -> Option<PathBuf> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp/agent-db/dumps/schedule_e.dump");
+    path.is_file().then_some(path)
+}
+
+fn pg_restore_available() -> bool {
+    std::process::Command::new("pg_restore")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+async fn relation_exists(pool: &PgPool, name: &str) -> bool {
+    let (exists,): (bool,) = sqlx::query_as("SELECT to_regclass($1::text) IS NOT NULL")
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    exists
+}
+
+/// One test, in sequence, because every restore drops and recreates the
+/// shared `disclosure.fec_fitem_sched_e` (other tests tolerate the view
+/// vanishing under them, but two restores racing would not).
+#[tokio::test]
+async fn schedule_e_dump_restores_views_indexes_and_compares() {
+    let url = require_db!();
+    let Some(dump_path) = local_schedule_e_dump() else {
+        eprintln!("skipping: tmp/agent-db/dumps/schedule_e.dump not present");
+        return;
+    };
+    if !pg_restore_available() {
+        eprintln!("skipping: pg_restore not on PATH");
+        return;
+    }
+    let t = TestNs::new(&url, "dump").await;
+    let cache_dir =
+        std::env::temp_dir().join(format!("hardmoney-it-dump-cache-{}", std::process::id()));
+
+    // -- Table of contents of the real archive -----------------------------
+    let toc = dump::read_toc(&dump_path).unwrap();
+    assert!(toc.has_table("fec_fitem_sched_e"), "{toc:?}");
+    assert!(toc.archive_created.is_some());
+    // One table, its data, its primary key, and the trigger whose function
+    // is not in the archive. No per-cycle child tables, no indexes.
+    assert_eq!(toc.count(&TocKind::Table), 1);
+    assert_eq!(toc.count(&TocKind::TableData), 1);
+    assert_eq!(toc.count(&TocKind::Constraint), 1);
+    assert_eq!(toc.count(&TocKind::Trigger), 1);
+    assert_eq!(toc.count(&TocKind::Index), 0);
+    assert!(toc.partitions("fec_fitem_sched_e").is_empty());
+
+    // -- Errors before anything touches the database -----------------------
+    let err = dump::restore_with(
+        &t.pool,
+        &url,
+        &dump::SCHEDULE_E,
+        &cache_dir,
+        &RestoreOptions::new().dump_file(Some(PathBuf::from("/nonexistent/x.dump"))),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, DumpError::DumpFileMissing(_)), "{err}");
+    let err = dump::restore_with(
+        &t.pool,
+        &url,
+        &dump::SCHEDULE_E,
+        &cache_dir,
+        &RestoreOptions::new()
+            .dump_file(Some(dump_path.clone()))
+            .cycles([Cycle::new(2024).unwrap()]),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, DumpError::NotPartitioned { .. }), "{err}");
+    let err = dump::restore_with(
+        &t.pool,
+        &url,
+        &dump::SCHEDULE_A,
+        &cache_dir,
+        &RestoreOptions::new(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(err, DumpError::LargeDumpNotAllowed { .. }),
+        "{err}"
+    );
+
+    // -- Full restore from the local file ----------------------------------
+    let from_file = RestoreOptions::new().dump_file(Some(dump_path.clone()));
+    let r1 = dump::restore_with(&t.pool, &url, &dump::SCHEDULE_E, &cache_dir, &from_file)
+        .await
+        .unwrap();
+    assert_eq!(r1.table, "fec_fitem_sched_e");
+    assert_eq!(r1.tables, vec!["fec_fitem_sched_e"]);
+    assert!(r1.cycles.is_empty());
+    assert!(!r1.data_only);
+    assert!(r1.rows > 100_000, "rows = {}", r1.rows);
+    assert_eq!(r1.load_ids.len(), 1);
+    assert_eq!(r1.dump_path, dump_path);
+    // The expected ignorable error: the trigger function is not in the dump.
+    assert!(
+        r1.warnings
+            .iter()
+            .any(|w| w.contains("fec_fitem_sched_e_insert")),
+        "{:?}",
+        r1.warnings
+    );
+    assert_eq!(
+        count(&t.pool, "SELECT count(*) FROM disclosure.fec_fitem_sched_e").await,
+        r1.rows
+    );
+    assert_eq!(
+        count(
+            &t.pool,
+            "SELECT count(*) FROM pg_index WHERE indrelid = 'disclosure.fec_fitem_sched_e'::regclass AND indisprimary"
+        )
+        .await,
+        1
+    );
+
+    // Views in this namespace: the hardmoney-named one and the FEC-named
+    // one with `cycle`; none for the dumps that are not restored.
+    assert!(relation_exists(&t.pool, "independent_expenditures").await);
+    assert!(relation_exists(&t.pool, "dump_schedule_e").await);
+    assert!(!relation_exists(&t.pool, "dump_schedule_a").await);
+    assert!(!relation_exists(&t.pool, "dump_schedule_b").await);
+    assert!(!relation_exists(&t.pool, "dump_committee_history").await);
+    assert_eq!(
+        count(&t.pool, "SELECT count(*) FROM independent_expenditures").await,
+        r1.rows
+    );
+    let (cycle_type,): (String,) = sqlx::query_as(
+        "SELECT data_type::text FROM information_schema.columns \
+         WHERE table_schema = current_schema() AND table_name = 'dump_schedule_e' AND column_name = 'cycle'",
+    )
+    .fetch_one(&t.pool)
+    .await
+    .unwrap();
+    assert_eq!(cycle_type, "integer");
+    assert_eq!(
+        count(
+            &t.pool,
+            "SELECT count(*) FROM dump_schedule_e WHERE cycle <> election_cycle::int"
+        )
+        .await,
+        0
+    );
+    assert!(count(&t.pool, "SELECT count(DISTINCT cycle) FROM dump_schedule_e").await > 10);
+    // FEC column names survive in the view.
+    assert!(
+        count(
+            &t.pool,
+            "SELECT count(*) FROM dump_schedule_e WHERE exp_amt IS NOT NULL"
+        )
+        .await
+            > 0
+    );
+
+    // The restore was recorded in this namespace's `loads`.
+    assert_eq!(
+        count(
+            &t.pool,
+            "SELECT count(*) FROM loads WHERE source = 'dump:schedule_e' AND mode = 'restore' AND cycle IS NULL AND source_url IS NULL"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        count(
+            &t.pool,
+            "SELECT row_count FROM loads WHERE source = 'dump:schedule_e'"
+        )
+        .await,
+        r1.rows
+    );
+
+    // -- A second restore is a clean refresh -------------------------------
+    let r2 = dump::restore_with(&t.pool, &url, &dump::SCHEDULE_E, &cache_dir, &from_file)
+        .await
+        .unwrap();
+    assert_eq!(r2.rows, r1.rows);
+    assert!(
+        !r2.warnings.iter().any(|w| w.contains("already exists")),
+        "{:?}",
+        r2.warnings
+    );
+    assert!(relation_exists(&t.pool, "independent_expenditures").await);
+    assert_eq!(
+        count(
+            &t.pool,
+            "SELECT count(*) FROM loads WHERE source = 'dump:schedule_e'"
+        )
+        .await,
+        2
+    );
+
+    // -- Data-only restore, then hardmoney's indexes -----------------------
+    let r3 = dump::restore_with(
+        &t.pool,
+        &url,
+        &dump::SCHEDULE_E,
+        &cache_dir,
+        &from_file.clone().data_only(true),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r3.rows, r1.rows);
+    assert!(r3.data_only);
+    assert_eq!(
+        r3.indexes_skipped, 0,
+        "the Schedule E archive has no INDEX entries"
+    );
+    assert_eq!(
+        count(
+            &t.pool,
+            "SELECT count(*) FROM pg_index WHERE indrelid = 'disclosure.fec_fitem_sched_e'::regclass"
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        count(
+            &t.pool,
+            "SELECT count(*) FROM loads WHERE source = 'dump:schedule_e' AND mode = 'restore-data-only'"
+        )
+        .await,
+        1
+    );
+
+    let err = dump::create_indexes(&t.pool, &dump::SCHEDULE_E, &[Cycle::new(2024).unwrap()])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DumpError::NotPartitioned { .. }), "{err}");
+    let err = dump::create_indexes(&t.pool, &dump::COMMITTEE_HISTORY, &[])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DumpError::TableMissing { .. }), "{err}");
+
+    let ix = dump::create_indexes(&t.pool, &dump::SCHEDULE_E, &[])
+        .await
+        .unwrap();
+    assert_eq!(ix.tables, vec!["fec_fitem_sched_e"]);
+    let created: Vec<&str> = ix.created.iter().map(|c| c.name.as_str()).collect();
+    for expected in [
+        "hm_fec_fitem_sched_e_sub_id_uidx",
+        "hm_fec_fitem_sched_e_cmte_dt_idx",
+        "hm_fec_fitem_sched_e_cand_idx",
+        "hm_fec_fitem_sched_e_file_num_idx",
+    ] {
+        assert!(created.contains(&expected), "{created:?}");
+    }
+    // The trigram index depends on pg_trgm being installable here.
+    assert_eq!(
+        ix.created.len() + ix.skipped.len(),
+        dump::SCHEDULE_E.indexes.len(),
+        "{ix:?}"
+    );
+    assert!(ix.existing.is_empty());
+    let ix2 = dump::create_indexes(&t.pool, &dump::SCHEDULE_E, &[])
+        .await
+        .unwrap();
+    assert!(ix2.created.is_empty(), "{ix2:?}");
+    assert_eq!(ix2.existing.len(), ix.created.len());
+
+    let state = dump::table_state(&t.pool, &dump::SCHEDULE_E).await.unwrap();
+    assert!(state.exists);
+    assert!(state.partitions.is_empty());
+    assert_eq!(state.index_count, i64::try_from(ix.created.len()).unwrap());
+    let absent = dump::table_state(&t.pool, &dump::SCHEDULE_B).await.unwrap();
+    assert!(!absent.exists);
+
+    // -- A full restore on top of the indexed table skips the duplicate
+    //    unique index (the archive's primary key covers sub_id).
+    dump::restore_with(&t.pool, &url, &dump::SCHEDULE_E, &cache_dir, &from_file)
+        .await
+        .unwrap();
+    let ix3 = dump::create_indexes(&t.pool, &dump::SCHEDULE_E, &[])
+        .await
+        .unwrap();
+    assert!(
+        ix3.skipped
+            .iter()
+            .any(|s| s.name == "hm_fec_fitem_sched_e_sub_id_uidx"
+                && s.reason.contains("primary key")),
+        "{ix3:?}"
+    );
+
+    let history = dump::restore_history(&t.pool).await.unwrap();
+    assert_eq!(history.len(), 4);
+    assert!(
+        history
+            .iter()
+            .all(|h| h.dump == "schedule_e" && h.cycle.is_none())
+    );
+    assert_eq!(history[0].mode, "restore");
+    assert_eq!(history[1].mode, "restore-data-only");
+    assert!(
+        history
+            .windows(2)
+            .all(|w| w[0].restored_at >= w[1].restored_at)
+    );
+
+    // -- Raw filing vs. the FEC's processed rows ---------------------------
+    let err = dump::compare_filing(&t.pool, 424242).await.unwrap_err();
+    assert!(matches!(err, DumpError::FilingNotIngested(424242)), "{err}");
+
+    let bytes = std::fs::read(fixture("F24N_2011823.fec")).unwrap();
+    bulk::ingest_filing_bytes(&t.pool, 2011823, &bytes, &hardmoney::ParseOptions::LENIENT)
+        .await
+        .unwrap();
+    let cmp = dump::compare_filing(&t.pool, 2011823).await.unwrap();
+    assert_eq!(cmp.filing_id, 2011823);
+    assert_eq!(cmp.form_type, "F24N");
+    assert_eq!(cmp.committee_id.as_deref(), Some("C00912865"));
+    assert_eq!(cmp.raw_rows, 1);
+    assert_eq!(cmp.raw_total.to_string(), "1074900.00");
+    assert!(cmp.dump_newest_file_num.is_some());
+    // The dump holds no Form 24 rows, and this filing postdates the local
+    // archive anyway; either way the accounting must balance.
+    assert_eq!(
+        cmp.matched() + i64::try_from(cmp.only_raw.len()).unwrap(),
+        cmp.raw_rows
+    );
+    assert_eq!(
+        cmp.matched() + i64::try_from(cmp.only_dump.len()).unwrap(),
+        cmp.dump_rows
+    );
+    if cmp.dump_rows == 0 {
+        assert_eq!(cmp.only_raw, vec!["SE.4825"]);
+        assert!(cmp.amount_mismatches.is_empty());
+    }
+
+    let _ = std::fs::remove_dir_all(&cache_dir);
     t.drop().await;
 }

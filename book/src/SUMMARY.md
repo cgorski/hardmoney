@@ -27,6 +27,7 @@
   - [Reloading: replace, append, and `--if-changed`](./reloading.md)
   - [Dates: two FEC formats, twin columns](./dates.md)
   - [Amendments: which version of a report is current?](./amendments.md)
+  - [The FEC's Postgres dump files](./pg-dumps.md)
 - [The REST API](./rest-api.md)
   - [Hardening the API](./api-hardening.md)
   - [The browser UI](./web-ui.md)

@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+- **The FEC's Postgres dumps, first-class** (`hardmoney::bulk::dump`).
+  `bulk-restore-dump` gains `--cycles 2024,2026` (restore only those
+  two-year periods of `schedule_a_full` / `schedule_b_full`: the parent
+  plus the named child tables, discovered from `pg_restore --list` so
+  new cycles need no code change; a cycle the archive lacks is an error
+  before anything is dropped; lifts `--allow-large`), `--no-indexes`
+  (`--section=pre-data --section=data`, the FEC's 5 h instead of 35 h
+  for Schedule A), `--dump-file PATH` (restore an archive you already
+  have; its table of contents is checked first), and `--jobs`.
+  Downloads resume: a dropped connection keeps `<name>.dump.partial`,
+  the next run sends `Range` plus `If-Range` with the saved ETag, and
+  the file is renamed to `.dump` only when its length matches
+  `Content-Length`. New `bulk-dump-info` (the four dumps' current size
+  and `Last-Modified` from `HEAD`, cache state, database state with
+  estimated rows, index count, and cycles present, and the restores
+  recorded in the namespace), `bulk-dump-index <name> [--cycles]`
+  (hardmoney's few indexes per restored table: unique `sub_id`,
+  committee id plus date, trigram on the name column when `pg_trgm` is
+  available, `s_o_cand_id` and `file_num` on Schedule E; idempotent),
+  and `bulk-dump-compare <filing_id>` (an ingested filing's raw Schedule
+  E lines against the FEC's processed `fec_fitem_sched_e` rows for the
+  same `file_num`: counts, totals, transaction ids on one side only,
+  amount mismatches, and whether the filing postdates the dump). Every
+  restore is recorded in `loads` (source `dump:<name>`, one row per
+  cycle, mode `restore` / `restore-data-only`). `db::ensure_views` now
+  also creates `dump_schedule_a`, `dump_schedule_b`, `dump_schedule_e`,
+  and `dump_committee_history` (the FEC's column names plus `cycle`)
+  for whichever dump tables exist, and tolerates a table dropped by a
+  concurrent restore; new `db::ensure_dump_views`. Library: `DumpToc`,
+  `TocEntry`, `read_toc`, `partition_table`, `partition_cycle`,
+  `RestoreOptions`, `restore_with`, `plan_restore`, `download`,
+  `cached`, `remote_info`, `create_indexes`, `table_state`,
+  `restore_history`, `compare_filing`, and `DumpError` (converts into
+  `BulkError`; `restore` keeps its 2.x signature). `DumpSource` is now
+  `#[non_exhaustive]` with `partitioned_by_cycle` and `indexes`. Book:
+  *The FEC's Postgres dump files* (what the real archives contain, the
+  80 processed Schedule E columns against the raw `.fec` fields, the
+  per-cycle child tables, the FEC's own timings, and that the Schedule E
+  dump has no Form 24 rows).
 - **Browser UI** (`hardmoney serve --ui`, roadmap §5). A filing
   workbench at `/ui`: drop a `.fec` or fetch one by filing id, read the
   header and cover page, see validation findings grouped by severity with

@@ -222,11 +222,22 @@ impl MigrationStatus {
     }
 }
 
-/// Creates the `independent_expenditures` view over the FEC's own
-/// `disclosure.fec_fitem_sched_e` (restored by `hardmoney bulk-restore-dump
-/// schedule_e`) if that table exists; otherwise a no-op. Idempotent: uses
-/// `DROP VIEW` + `CREATE VIEW` because Postgres refuses `CREATE OR REPLACE`
-/// when a column's type changes.
+/// Creates this namespace's views over the FEC's own dump tables in
+/// `disclosure` (restored by `hardmoney bulk-restore-dump`), each only if
+/// its table exists; otherwise a no-op for that view:
+///
+/// | view | over | columns |
+/// |---|---|---|
+/// | `independent_expenditures` | `fec_fitem_sched_e` | hardmoney names (`payee_name`, `expenditure_amt`, ...) |
+/// | `dump_schedule_a` | `fec_fitem_sched_a` | the FEC's names, plus `cycle` (`two_year_transaction_period::int`) |
+/// | `dump_schedule_b` | `fec_fitem_sched_b` | the FEC's names, plus `cycle` |
+/// | `dump_schedule_e` | `fec_fitem_sched_e` | the FEC's names, plus `cycle` (`election_cycle::int`) |
+/// | `dump_committee_history` | `ofec_committee_history` | the FEC's names (it already has `cycle`) |
+///
+/// Idempotent: uses `DROP VIEW` + `CREATE VIEW` because Postgres refuses
+/// `CREATE OR REPLACE` when a column's type changes. A table dropped by a
+/// concurrent restore between the existence check and the `CREATE` is
+/// tolerated (the view is simply not created; the restore recreates it).
 ///
 /// Lives outside the migration set because it depends on out-of-band state
 /// (whether the dump has been restored) and must be re-run after a restore.
@@ -234,7 +245,61 @@ pub async fn ensure_views(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::raw_sql(INDEPENDENT_EXPENDITURES_VIEW_SQL)
         .execute(pool)
         .await?;
+    ensure_dump_views(pool).await
+}
+
+/// Creates the `dump_*` views listed on [`ensure_views`] (and nothing
+/// else). Called by `ensure_views`; exposed for callers that restored a
+/// dump through their own `pg_restore` and want only these.
+pub async fn ensure_dump_views(pool: &PgPool) -> Result<(), sqlx::Error> {
+    for (view, table, cycle_expr) in DUMP_VIEWS {
+        let sql = dump_view_sql(view, table, cycle_expr);
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+            .execute(pool)
+            .await?;
+    }
     Ok(())
+}
+
+/// `(view name, disclosure table, cycle column expression or None)`.
+const DUMP_VIEWS: [(&str, &str, Option<&str>); 4] = [
+    (
+        "dump_schedule_a",
+        "fec_fitem_sched_a",
+        Some("two_year_transaction_period::int"),
+    ),
+    (
+        "dump_schedule_b",
+        "fec_fitem_sched_b",
+        Some("two_year_transaction_period::int"),
+    ),
+    (
+        "dump_schedule_e",
+        "fec_fitem_sched_e",
+        Some("election_cycle::int"),
+    ),
+    ("dump_committee_history", "ofec_committee_history", None),
+];
+
+/// The `DO` block that (re)creates one `dump_*` view if its table exists.
+/// Only compile-time constants are interpolated.
+fn dump_view_sql(view: &str, table: &str, cycle_expr: Option<&str>) -> String {
+    let select = match cycle_expr {
+        Some(expr) => format!("SELECT t.*, t.{expr} AS cycle FROM disclosure.{table} t"),
+        None => format!("SELECT t.* FROM disclosure.{table} t"),
+    };
+    format!(
+        "DO $$\n\
+         BEGIN\n\
+             IF to_regclass('disclosure.{table}') IS NOT NULL THEN\n\
+                 EXECUTE 'DROP VIEW IF EXISTS {view}';\n\
+                 EXECUTE 'CREATE VIEW {view} AS {select}';\n\
+             END IF;\n\
+         EXCEPTION WHEN undefined_table THEN\n\
+             NULL;\n\
+         END\n\
+         $$;"
+    )
 }
 
 const INDEPENDENT_EXPENDITURES_VIEW_SQL: &str = r#"
@@ -269,6 +334,8 @@ BEGIN
             FROM disclosure.fec_fitem_sched_e
         ';
     END IF;
+EXCEPTION WHEN undefined_table THEN
+    NULL;
 END
 $$;
 "#;

@@ -265,8 +265,8 @@ instead.
 
 ## An alternative: restoring the FEC's own database dumps
 
-For a couple of specific tables, the FEC also publishes ready-made
-Postgres `pg_dump` archives (updated Saturdays) rather than requiring you
+For four specific tables, the FEC also publishes ready-made Postgres
+`pg_dump` archives (refreshed every weekend) rather than requiring you
 to parse CSVs yourself. `bulk-restore-dump` downloads and restores one of
 these directly; it needs `pg_restore` on your `PATH`:
 
@@ -277,31 +277,42 @@ hardmoney bulk-restore-dump --schema book_demo committee_history
 
 ```text
 restored 549525 rows into disclosure.fec_fitem_sched_e (dump cached at /Users/you/.cache/hardmoney/dumps/schedule_e.dump)
-independent_expenditures view refreshed in namespace 'book_demo'
+pg_restore reported 3 non-fatal message(s); first: pg_restore: error: could not execute query: ERROR:  function disclosure.fec_fitem_sched_e_insert() does not exist
+views over disclosure refreshed in namespace 'book_demo'
 ```
 
-(Illustrative: the output format is taken from the code, and 549,525 is
-the real row count of the `schedule_e` dump restored into this book's
-database, covering report years 1975 through 2026, but the restore
-command itself was not re-run while writing this chapter, and the FEC's
-weekly refresh will change the number.) A few things to know:
+(The September 2026 file; the FEC's weekly refresh changes the row
+count.) A few things to know:
 
 - `schedule_e` (~43 MB, independent expenditures 1975-present) and
   `committee_history` (~14 MB) are small enough to restore routinely.
   `schedule_a_full` (~90 GB) and `schedule_b_full` (~39 GB) are the
-  complete, un-cycle-limited itemized histories, and `bulk-restore-dump`
-  refuses to start on either unless you pass `--allow-large` explicitly.
+  complete itemized histories since 1975, split into one child table
+  per two-year period. Restore the periods you need with
+  `--cycles 2024,2026` (data only; add indexes afterwards with
+  `bulk-dump-index`), or the whole archive with `--allow-large`, with
+  `--no-indexes` to skip the FEC's indexes (the FEC's figures: 5 hours
+  instead of 35 for Schedule A). `--dump-file PATH` restores a file you
+  already have.
 - Downloads are cached under `~/.cache/hardmoney/dumps` (honouring
-  `XDG_CACHE_HOME`; override with `--cache-dir` or `HARDMONEY_CACHE_DIR`),
-  written to a `.partial` file and renamed only on completion, so an
-  interrupted download is never mistaken for a good one.
+  `XDG_CACHE_HOME`; override with `--cache-dir` or `HARDMONEY_CACHE_DIR`).
+  An interrupted download leaves a `.partial` file that the next run
+  resumes with an HTTP `Range` request; the file is renamed to `.dump`
+  only when its length matches the server's `Content-Length`.
+  `bulk-dump-info` lists the four dumps with their current size and
+  date on fec.gov, what is cached, and what is in the database.
 - The dump always lands in the `disclosure` schema, whatever `--schema`
   you pass, because the FEC's own DDL hard-codes it. It's reference data
-  shared by every namespace; what is per-namespace is the
-  `independent_expenditures` view that hardmoney creates over it
-  (`db::ensure_views`, run after every `schema-init`, every `serve`
-  start, and every restore). The REST API's `/independent-expenditures`
-  route reads that view.
+  shared by every namespace; what is per-namespace are the views that
+  hardmoney creates over it (`db::ensure_views`, run after every
+  `schema-init`, every `serve` start, and every restore):
+  `independent_expenditures` with hardmoney's column names, which the
+  REST API's `/independent-expenditures` route reads, and
+  `dump_schedule_e`, `dump_schedule_a`, `dump_schedule_b`,
+  `dump_committee_history` with the FEC's own column names plus `cycle`.
+- Every restore is recorded in the namespace's `loads` table (source
+  `dump:schedule_e`, mode `restore` or `restore-data-only`, one row per
+  cycle), so `schema-status` and `bulk-dump-info` show it.
 - Re-running a restore drops the table first, so it's a clean weekly
   refresh rather than a pile of "already exists" errors.
 - `pg_restore` itself exits non-zero for an expected, ignorable warning
@@ -310,6 +321,14 @@ weekly refresh will change the number.) A few things to know:
   table exists and has rows afterwards, and exits 0 when it does. Any
   messages `pg_restore` emitted are summarized on stderr
   (`pg_restore reported N non-fatal message(s); first: ...`).
+- `bulk-dump-compare <filing_id>` puts an ingested filing's raw Schedule
+  E lines next to the FEC's processed rows for the same filing in the
+  dump: counts, totals, and transaction ids on one side only.
+
+What is actually in these archives (their table of contents, the 80
+processed columns of Schedule E, the per-cycle child tables, the FEC's
+own restore timings) and the full set of options are in
+[The FEC's Postgres dump files](./pg-dumps.md).
 
 ## Ingesting a single filing directly, for precise Schedule E data
 
