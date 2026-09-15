@@ -30,6 +30,8 @@ Commands:
   bulk-load-all      Load every bulk source for one cycle
   bulk-restore-dump  Restore one of the FEC's own official pg_dump archives
   bulk-load-filing   Ingest a single raw `.fec` filing directly
+  filings            Find filings via the FEC's API and fetch, validate, or ingest them
+  efile              Follow the FEC's electronic filing feed
   serve              Run the REST API server
   query              Search loaded data from the terminal (same results as the REST API)
   spec               Export or diff the machine-readable FEC format specification
@@ -45,10 +47,11 @@ Database commands read DATABASE_URL (or --database-url) and an optional HARDMONE
 ## The two flags every database command shares
 
 Every subcommand except `parse`, `write`, `reconcile`, `validate`,
-`export`, and `spec` (which work on files and bundled data, with no
-database) takes
+`export`, `spec`, `filings`, and `efile` (which work on files, bundled
+data, and the FEC's public endpoints, with no database) takes
 these, so they're described once here and shown verbatim in each block
-below:
+below. `filings` and `efile` accept the same two flags but need them only
+with `--ingest`:
 
 | Flag | Environment variable | Default | Meaning |
 |---|---|---|---|
@@ -524,6 +527,160 @@ the filing is downloaded from `docquery.fec.gov` and that number is the
 id unless `--filing-id` overrides it. See
 [Bulk ETL](./bulk-etl.md#ingesting-a-single-filing-directly-for-precise-schedule-e-data).
 
+## `filings`
+
+```text
+$ hardmoney filings --help
+Find filings via the FEC's API and fetch, validate, or ingest them
+
+Usage: hardmoney filings [OPTIONS]
+
+Options:
+      --committee <ID>               Committee id, e.g. C00554709
+      --candidate <ID>               Candidate id, e.g. H4CA11114
+      --cycle <CYCLE>                Two-year cycle, e.g. 2026
+      --form-type <FORM>             Base form type, e.g. F3X, F3, F24 (no amendment suffix)
+      --report-type <CODE>           Report type code, e.g. Q2, 12G, M9
+      --most-recent                  Only the latest version of each report
+      --since <DATE>                 Only filings received on or after this date (YYYY-MM-DD)
+      --until <DATE>                 Only filings received on or before this date (YYYY-MM-DD)
+      --limit <N>                    Stop after this many filings (pages are fetched as needed)
+      --json                         Print the records as a JSON array (openFEC's field names) instead of a table. With an action flag, each record gains an `actions` object
+      --fetch <DIR>                  Download each filing's raw .fec (cache-first) into this directory as <id>.fec
+      --validate                     Run the FEC's acceptance rules on each filing and print the error/warning counts
+      --reconcile                    Recompute each report's cover-page totals from its schedules and print whether it balances
+      --ingest                       Ingest each filing into Postgres (needs --database-url)
+      --database-url <DATABASE_URL>  Postgres connection URL for --ingest. Include a username: postgres://user@host/db [env: DATABASE_URL=]
+      --schema <SCHEMA>              Namespace (Postgres schema) for --ingest. Default: public [env: HARDMONEY_SCHEMA=] [default: public]
+      --cache-dir <CACHE_DIR>        Where downloaded filings and daily archives are kept across runs [env: HARDMONEY_CACHE_DIR=] [default: /Users/chris.gorski/.cache/hardmoney]
+  -h, --help                         Print help
+```
+
+Queries openFEC's `/filings/` with an API key from `FEC_API_KEY` or
+`~/fec_api_key.txt` (exit 1 with both locations named if neither has
+one). Without any filter the command refuses to run unless `--limit` is
+given. Results are newest first; the table shows `file_number`, `form`,
+`report`, `coverage`, `receipt_date`, `amend` (openFEC's
+`amendment_version`), `most_recent`, `total_receipts`, and `committee`.
+Paper filings have negative file numbers and are marked `(paper)`; the
+action flags skip them. The `--cache-dir` default shown is
+`$XDG_CACHE_HOME/hardmoney` if that variable is set, else
+`~/.cache/hardmoney`. See
+[Finding Filings](./discovery.md).
+
+## `efile`
+
+```text
+$ hardmoney efile --help
+Follow the FEC's electronic filing feed
+
+Usage: hardmoney efile <COMMAND>
+
+Commands:
+  watch        Poll the e-filing RSS feed and process every filing not seen before
+  backfill     Walk the FEC's daily e-filing archives over a date range
+  cache-info   Show where the download cache is and what it holds
+  cache-clear  Delete cached raw filings and daily archives
+  help         Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+```
+
+None of these needs an API key. See [Finding Filings](./discovery.md).
+
+### `efile watch`
+
+```text
+$ hardmoney efile watch --help
+Poll the e-filing RSS feed and process every filing not seen before
+
+Usage: hardmoney efile watch [OPTIONS]
+
+Options:
+      --interval <SECONDS>           Seconds between polls [default: 300]
+      --once                         Poll once and exit (exit 1 if the poll or any filing failed)
+      --form-type <FORMS>            Only these form types, comma-separated; a base type matches its amendments too (F3X matches F3XN, F3XA, F3XT)
+      --committee <IDS>              Only filings by these committee ids, comma-separated
+      --mark-seen                    Record every id currently in the feed as seen, without processing anything, then exit: "start following from now"
+      --exec <PROGRAM>               After the other actions, run `PROGRAM <id> <path-to-cached-fec>` with HARDMONEY_FILING_ID and HARDMONEY_FILING_PATH in its environment. A non-zero exit is reported as a failure
+      --json                         One JSON object per new filing (JSON Lines) instead of text
+      --out <DIR>                    Copy each filing's raw .fec into this directory as <id>.fec
+      --validate                     Run the FEC's acceptance rules on each filing and print the error/warning counts
+      --reconcile                    Recompute each report's cover-page totals from its schedules and print whether it balances
+      --ingest                       Ingest each filing into Postgres (needs --database-url)
+      --database-url <DATABASE_URL>  Postgres connection URL for --ingest. Include a username: postgres://user@host/db [env: DATABASE_URL=]
+      --schema <SCHEMA>              Namespace (Postgres schema) for --ingest. Default: public [env: HARDMONEY_SCHEMA=] [default: public]
+      --cache-dir <CACHE_DIR>        Where downloaded filings and daily archives are kept across runs [env: HARDMONEY_CACHE_DIR=] [default: /Users/chris.gorski/.cache/hardmoney]
+  -h, --help                         Print help
+```
+
+Seen ids live in `<cache-dir>/efile-seen.txt`; every new id is recorded,
+whether or not the filters selected it. Without `--once` the command
+runs until interrupted, reporting (not exiting on) failed polls and
+failed filings. One line per processed filing goes to stdout (`id`,
+form type as filed, committee id, publication time, committee name, then
+indented action results); the per-poll summary goes to stderr.
+
+### `efile backfill`
+
+```text
+$ hardmoney efile backfill --help
+Walk the FEC's daily e-filing archives over a date range
+
+Usage: hardmoney efile backfill [OPTIONS] --from <DATE>
+
+Options:
+      --from <DATE>                  First day to read (YYYYMMDD or YYYY-MM-DD; archives exist from 2001-02-01 through yesterday)
+      --to <DATE>                    Last day to read, inclusive [default: --from]
+      --form-type <FORMS>            Only these form types, comma-separated; a base type matches its amendments too (F3X matches F3XN, F3XA, F3XT)
+      --json                         One JSON object per filing (JSON Lines) instead of text
+      --out <DIR>                    Copy each filing's raw .fec into this directory as <id>.fec
+      --validate                     Run the FEC's acceptance rules on each filing and print the error/warning counts
+      --reconcile                    Recompute each report's cover-page totals from its schedules and print whether it balances
+      --ingest                       Ingest each filing into Postgres (needs --database-url)
+      --database-url <DATABASE_URL>  Postgres connection URL for --ingest. Include a username: postgres://user@host/db [env: DATABASE_URL=]
+      --schema <SCHEMA>              Namespace (Postgres schema) for --ingest. Default: public [env: HARDMONEY_SCHEMA=] [default: public]
+      --cache-dir <CACHE_DIR>        Where downloaded filings and daily archives are kept across runs [env: HARDMONEY_CACHE_DIR=] [default: /Users/chris.gorski/.cache/hardmoney]
+  -h, --help                         Print help
+```
+
+Archives are cached under `<cache-dir>/efile/YYYYMMDD.zip`. A day with no
+archive (today; the odd holiday) is reported and skipped, and the command
+exits 1 at the end if any day was unavailable or any filing failed.
+
+### `efile cache-info`
+
+```text
+$ hardmoney efile cache-info --help
+Show where the download cache is and what it holds
+
+Usage: hardmoney efile cache-info [OPTIONS]
+
+Options:
+      --json                   Print JSON instead of text
+      --cache-dir <CACHE_DIR>  Where downloaded filings and daily archives are kept across runs [env: HARDMONEY_CACHE_DIR=] [default: /Users/chris.gorski/.cache/hardmoney]
+  -h, --help                   Print help
+```
+
+### `efile cache-clear`
+
+```text
+$ hardmoney efile cache-clear --help
+Delete cached raw filings and daily archives
+
+Usage: hardmoney efile cache-clear [OPTIONS]
+
+Options:
+      --seen                   Also forget which e-filings `watch` has already processed
+      --cache-dir <CACHE_DIR>  Where downloaded filings and daily archives are kept across runs [env: HARDMONEY_CACHE_DIR=] [default: /Users/chris.gorski/.cache/hardmoney]
+  -h, --help                   Print help
+```
+
+Removes `<cache-dir>/filings/` and `<cache-dir>/efile/` only; `dumps/`
+(from `bulk-restore-dump`) and, without `--seen`, `efile-seen.txt` are
+left alone.
+
 ## `serve`
 
 ```text
@@ -862,5 +1019,5 @@ name, column | from, to}]}], unchanged: [table, ...]}`.
 | Code | Meaning |
 |---|---|
 | 0 | success (including `bulk-load --if-changed` skipping an unchanged file, `bulk-restore-dump` succeeding despite `pg_restore`'s expected warnings, and `validate` finding only warnings without `--strict-warnings`) |
-| 1 | a runtime error: parse failure, database error, refused replace, pending migrations, `bulk-load-all` with at least one failed source, `schema-drop` without `--yes`, `write --check` with a record that does not round-trip, `reconcile` with a disagreeing line (or an unsupported form), `validate` with an error finding (or any finding under `--strict-warnings`), a non-2xx API response from `query`, a `spec` version or table the bundled data does not have, `export` to an unwritable path or `export --include-filing-id` on a file name with no id |
-| 2 | invalid command-line usage (clap): unknown flag, odd `--cycle`, invalid `--schema` name, `query --limit` outside 1-500, an unknown `spec` table name or malformed version, an unknown `export --only` token or `--format` |
+| 1 | a runtime error: parse failure, database error, refused replace, pending migrations, `bulk-load-all` with at least one failed source, `schema-drop` without `--yes`, `write --check` with a record that does not round-trip, `reconcile` with a disagreeing line (or an unsupported form), `validate` with an error finding (or any finding under `--strict-warnings`), a non-2xx API response from `query`, a `spec` version or table the bundled data does not have, `export` to an unwritable path or `export --include-filing-id` on a file name with no id, `filings` with no API key, no filter and no `--limit`, an openFEC error, or a filing whose download/parse/ingest failed, `efile watch --once` with a failed poll or filing, `efile backfill` with an unavailable day or a failed filing |
+| 2 | invalid command-line usage (clap): unknown flag, odd `--cycle`, invalid `--schema` name, `query --limit` outside 1-500, an unknown `spec` table name or malformed version, an unknown `export --only` token or `--format`, a malformed `--since`/`--until`/`--from`/`--to` date |

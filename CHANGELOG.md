@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **Filing discovery: openFEC and the e-file feed** (`hardmoney::fec`,
+  behind `fetch`; the openFEC client also needs `serde`). `OpenFec`
+  queries `/filings/` (processed metadata: amendment chains,
+  `most_recent`, cover-page totals, paper filings with their negative
+  file numbers) and `/efile/filings/` (raw, minutes after receipt) with
+  a `FilingsQuery`/`EfileQuery` builder and an auto-paginating
+  `filings_all`; the key comes from `FEC_API_KEY` or
+  `~/fec_api_key.txt`, is redacted from `Debug` and every error, and 429s
+  are retried per `Retry-After` (three times, 60 s cap) before
+  `FecApiError::RateLimited`. `EfileFeed::poll` parses the FEC's
+  e-filing RSS feed, `daily_zip_filings` reads the daily
+  `electronic/YYYYMMDD.zip` archives, and `fetch_filing_bytes` downloads
+  a raw `.fec` through a shared `Cache` (`~/.cache/hardmoney/filings/`,
+  `HARDMONEY_CACHE_DIR`). New commands: `hardmoney filings` (query,
+  table or `--json`, then `--fetch DIR`/`--validate`/`--reconcile`/
+  `--ingest` per filing) and `hardmoney efile watch|backfill|cache-info|
+  cache-clear` (poll the feed with a persistent seen list, `--once`,
+  `--exec PROGRAM`; walk daily archives by date range). The `fetch`
+  feature now also enables `zip` (for the archives). Book: *Finding
+  Filings*.
 - **Amendment-chain resolution for ingested filings** (migration
   `0003_amendment_chains.sql`). `filings` gains `report_id`,
   `report_code`, `coverage_from`, `coverage_through`, `amendment_number`

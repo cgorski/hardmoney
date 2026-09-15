@@ -93,7 +93,10 @@ dotenvy = { version = "0.15", optional = true }
 
 [features]
 default = ["fetch", "bulk", "api", "cli", "export"]
-fetch = ["dep:ureq"]
+# `zip` is here as well as in `bulk` because the `fec` module (behind
+# `fetch`) reads the FEC's daily e-filing archives; `deflate` only, so the
+# parser-only build stays free of tokio/sqlx/axum.
+fetch = ["dep:ureq", "dep:zip"]
 serde = ["dep:serde", "dep:serde_json", "rust_decimal/serde", "compact_str/serde"]
 export = ["dep:arrow", "dep:parquet", "dep:rusqlite", "serde"]
 bulk = ["dep:sqlx", "dep:whoami", "dep:zip", "dep:tokio", "dep:ureq", "dep:indicatif", "serde"]

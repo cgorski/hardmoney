@@ -60,6 +60,9 @@ pub mod api;
 #[cfg(feature = "export")]
 pub mod export;
 
+#[cfg(feature = "fetch")]
+pub mod fec;
+
 #[cfg(feature = "bulk")]
 pub mod cycle;
 

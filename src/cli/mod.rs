@@ -3,7 +3,9 @@
 
 pub mod bulk;
 pub mod db_args;
+pub mod efile;
 pub mod export;
+pub mod filings;
 pub mod parse;
 pub mod query;
 pub mod reconcile;
@@ -61,6 +63,10 @@ enum Command {
     BulkRestoreDump(bulk::BulkRestoreDumpArgs),
     /// Ingest a single raw `.fec` filing directly.
     BulkLoadFiling(bulk::BulkLoadFilingArgs),
+    /// Find filings via the FEC's API and fetch, validate, or ingest them.
+    Filings(filings::FilingsArgs),
+    /// Follow the FEC's electronic filing feed.
+    Efile(efile::EfileArgs),
     /// Run the REST API server.
     Serve(serve::ServeArgs),
     /// Search loaded data from the terminal (same results as the REST API).
@@ -85,6 +91,8 @@ pub async fn run() -> CliResult {
         Command::BulkLoadAll(a) => bulk::load_all(a).await,
         Command::BulkRestoreDump(a) => bulk::restore_dump(a).await,
         Command::BulkLoadFiling(a) => bulk::load_filing(a).await,
+        Command::Filings(a) => filings::run(a).await,
+        Command::Efile(a) => efile::run(a).await,
         Command::Serve(a) => serve::run(a).await,
         Command::Query(a) => query::run(a).await,
         Command::Spec(a) => spec::run(a),

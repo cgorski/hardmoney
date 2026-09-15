@@ -20,6 +20,7 @@
 - [Exporting a Filing](./exporting.md)
 - [Reconciling a Filing](./reconciling.md)
 - [Validating a Filing](./validating.md)
+- [Finding Filings: openFEC and the E-File Feed](./discovery.md)
 - [Loading Bulk Data into Postgres](./bulk-etl.md)
   - [Namespaces: Many Sessions, One Database](./namespaces.md)
   - [Reloading: Replace, Append, and `--if-changed`](./reloading.md)

@@ -1,0 +1,94 @@
+{
+ "api_version": "1.0",
+ "pagination": {
+  "count": 586073,
+  "is_count_exact": false,
+  "page": 1,
+  "pages": 195358,
+  "per_page": 3
+ },
+ "results": [
+  {
+   "amended_by": null,
+   "amendment_chain": [
+    2011929
+   ],
+   "amendment_number": 0,
+   "amends_file": null,
+   "beginning_image_number": "202609149904205943",
+   "committee_id": "C00946749",
+   "committee_name": "DEMOCRATIC COUNTY EXECUTIVE COMMITTEE OF PHILADELPHIA",
+   "coverage_end_date": null,
+   "coverage_start_date": null,
+   "csv_url": "https://docquery.fec.gov/csv/929/2011929.csv",
+   "ending_image_number": "202609149904205944",
+   "fec_file_id": "FEC-2011929",
+   "fec_url": "https://docquery.fec.gov/dcdev/posted/2011929.fec",
+   "file_number": 2011929,
+   "filed_date": "2026-09-14",
+   "form_type": "F99",
+   "html_url": "https://docquery.fec.gov/cgi-bin/forms/C00946749/2011929/",
+   "is_amended": false,
+   "load_timestamp": "2026-09-14T22:50:41",
+   "most_recent": true,
+   "most_recent_filing": 2011929,
+   "pdf_url": "https://docquery.fec.gov/pdf/943/202609149904205943/202609149904205943.pdf",
+   "receipt_date": "2026-09-14T22:50:35"
+  },
+  {
+   "amended_by": null,
+   "amendment_chain": [
+    2011928
+   ],
+   "amendment_number": 0,
+   "amends_file": null,
+   "beginning_image_number": "202609149904205942",
+   "committee_id": "C00944389",
+   "committee_name": "WHEEL DOG PAC",
+   "coverage_end_date": null,
+   "coverage_start_date": null,
+   "csv_url": "https://docquery.fec.gov/csv/928/2011928.csv",
+   "ending_image_number": "202609149904205942",
+   "fec_file_id": "FEC-2011928",
+   "fec_url": "https://docquery.fec.gov/dcdev/posted/2011928.fec",
+   "file_number": 2011928,
+   "filed_date": "2026-09-14",
+   "form_type": "F24N",
+   "html_url": "https://docquery.fec.gov/cgi-bin/forms/C00944389/2011928/",
+   "is_amended": false,
+   "load_timestamp": "2026-09-14T22:47:42",
+   "most_recent": true,
+   "most_recent_filing": 2011928,
+   "pdf_url": "https://docquery.fec.gov/pdf/942/202609149904205942/202609149904205942.pdf",
+   "receipt_date": "2026-09-14T22:47:37"
+  },
+  {
+   "amended_by": null,
+   "amendment_chain": [
+    2011927
+   ],
+   "amendment_number": 0,
+   "amends_file": null,
+   "beginning_image_number": "202609149904205840",
+   "committee_id": "C00365122",
+   "committee_name": "VISA, INC. POLITICAL ACTION COMMITTEE",
+   "coverage_end_date": "2026-08-31",
+   "coverage_start_date": "2026-08-01",
+   "csv_url": "https://docquery.fec.gov/csv/927/2011927.csv",
+   "document_description": "SEPTEMBER MONTHLY 2026",
+   "ending_image_number": "202609149904205941",
+   "fec_file_id": "FEC-2011927",
+   "fec_url": "https://docquery.fec.gov/dcdev/posted/2011927.fec",
+   "file_number": 2011927,
+   "filed_date": "2026-09-14",
+   "form_type": "F3XN",
+   "html_url": "https://docquery.fec.gov/cgi-bin/forms/C00365122/2011927/",
+   "is_amended": false,
+   "load_timestamp": "2026-09-14T22:36:07",
+   "most_recent": true,
+   "most_recent_filing": 2011927,
+   "pdf_url": "https://docquery.fec.gov/pdf/840/202609149904205840/202609149904205840.pdf",
+   "receipt_date": "2026-09-14T22:36:02"
+  }
+ ]
+}
