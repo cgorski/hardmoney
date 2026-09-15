@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib.metadata
+
 import pytest
 
 import hardmoney
@@ -9,7 +11,9 @@ import hardmoney
 
 def test_bundled_spec_version() -> None:
     assert hardmoney.BUNDLED_SPEC_VERSION == "8.5"
-    assert hardmoney.__version__ == "2.0.0"
+    # The extension's version is the crate version, which must match the
+    # installed distribution's metadata (pyproject.toml).
+    assert hardmoney.__version__ == importlib.metadata.version("hardmoney")
 
 
 def test_tables() -> None:

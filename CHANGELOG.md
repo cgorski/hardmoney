@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.0 — 2026-09-15
 
 - **Python bindings** (`python/`, PyPI package `hardmoney`, PyO3 0.29 +
   maturin, one `abi3` wheel per platform for CPython >= 3.9). A
