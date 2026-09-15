@@ -27,6 +27,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)] // clap subcommand tree; parsed once, boxing gains nothing
 enum Command {
     /// Parse a single `.fec` filing and print a JSON summary.
     Parse(parse::ParseArgs),
