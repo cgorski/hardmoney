@@ -51,6 +51,27 @@
   per `Table`, plus a `filings` table). Streams through `FilingReader`,
   so a 135 MB filing exports in constant memory. Book: *Exporting a
   Filing*.
+- **`hardmoney validate --oracle webcheck`** (and
+  `hardmoney::parser::webcheck`, behind `fetch`): submits the file to the
+  FEC's own WebCheck validator, prints its findings after ours (`ERROR
+  SB21B #020 Date of Expenditure {Election CFO}: ...` -- WebCheck gives
+  no line numbers), and diffs the two by record type, field number and
+  message template: `N matched, M only ours, K only theirs`. Exit status
+  is unchanged unless `--strict-oracle` (exit 1 on any disagreement);
+  `--json` gains `oracle` and `oracle_diff`. Uses WebCheck's public,
+  credential-free upload channel (what the WebCheck page itself calls);
+  `--webcheck-api-key`/`WEBCHECK_API_KEY` (and `--webcheck-email`)
+  switch to the vendor SOAP service, which rejects every request without
+  a key and is untested past that check. `WebCheck::submit ->
+  OracleReport { findings: Vec<OracleFinding>, .. }`, `diff(&Validation,
+  &OracleReport) -> OracleDiff`, `WebCheckError { Transport, Http,
+  SoapFault, Rejected, Deferred, Unparseable }`; hand-rolled base64,
+  multipart and response scanning, no new dependencies. Against the live
+  service (2026-09-15) every accepted fixture passes and eight of the
+  ten `tests/fixtures/invalid/` files diff clean; the two that do not
+  (header amendment fields, a second cover record) are attributed to
+  different lines by the two validators and are written up in the book.
+  Book: *Validating a Filing* -- "Comparing with the FEC's WebCheck".
 
 ## 2.0.0 — 2026-09-15
 

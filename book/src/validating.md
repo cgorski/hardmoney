@@ -28,9 +28,20 @@ Arguments:
   <PATH>  Path to a `.fec` file
 
 Options:
-      --json             Print the findings as a JSON document instead of one line each
-      --strict-warnings  Exit 1 on warnings too, not only on errors
-  -h, --help             Print help
+      --json
+          Print the findings as a JSON document instead of one line each
+      --strict-warnings
+          Exit 1 on warnings too, not only on errors
+      --oracle <ORACLE>
+          Also submit the file to an external validator and diff its findings against ours. Sends the file over the network [possible values: webcheck]
+      --strict-oracle
+          With `--oracle`, exit 1 if the oracle and hardmoney disagree on any finding
+      --webcheck-api-key <WEBCHECK_API_KEY>
+          FEC vendor API key for WebCheck's SOAP service. Without it the credential-free upload channel (what the WebCheck web page uses) is taken. Ignored without `--oracle webcheck` [env: WEBCHECK_API_KEY]
+      --webcheck-email <WEBCHECK_EMAIL>
+          Contact e-mail to pass WebCheck's SOAP service (it e-mails results for files over 20 MB). Ignored without `--webcheck-api-key` [env: WEBCHECK_EMAIL]
+  -h, --help
+          Print help (see more with '--help')
 ```
 
 A clean filing prints one line and exits 0:
@@ -442,6 +453,161 @@ WARN  line 5 ZZZ form_type: Unrecognized Form Type / Record Ignored ('ZZZ': unkn
 
 (`/tmp/with_junk.fec` is the fixture-plus-one-bad-line file built in
 [Strict vs. Lenient Parsing](./strict-vs-lenient.md).)
+
+## Comparing with the FEC's WebCheck
+
+Everything above is hardmoney's reading of the FEC's rules. The FEC's own
+reading is a web service: [WebCheck](https://efoservices.fec.gov/webcheck/),
+the validator the Electronic Filing Office runs on every submission,
+exposed so filers can check a file first. (FECfile+, the FEC's own
+browser tool, has no validator step; its team tells users to download
+the `.fec` and run it through WebCheck.) `--oracle webcheck` sends your
+file there, prints WebCheck's findings after ours, and diffs the two:
+
+```text
+$ hardmoney validate tests/fixtures/invalid/field_too_long.fec --oracle webcheck
+ERROR line 3 SA11AI contributor_last_name: CONTRIBUTOR LAST NAME exceeds maximum length of 30 (31 characters)
+ERROR line 4 SB21B payee_organization_name: PAYEE ORGANIZATION NAME exceeds maximum length of 200 (201 characters)
+NOT ACCEPTABLE: F3XA, 6 body line(s), 2 error(s), 0 warning(s)
+       2 error   field_too_long
+
+--- WebCheck (tests/fixtures/invalid/field_too_long.fec) ---
+ERROR SA11AI #008 Contributor Last Name {YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY, DAVID BROCK}: exceeds maximum length of 30
+ERROR SB21B #007 Recipient Organization Name {XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX...}: exceeds maximum length of 200
+WebCheck NOT ACCEPTABLE (ERRORS): 2 error(s), 0 warning(s), filing type F3XA
+
+--- Diff: hardmoney vs. WebCheck ---
+Matched (2):
+  ERROR line 3 SA11AI contributor_last_name: CONTRIBUTOR LAST NAME exceeds maximum length of 30 (31 characters)
+    ~ ERROR SA11AI #008 Contributor Last Name {YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY, DAVID BROCK}: exceeds maximum length of 30
+  ERROR line 4 SB21B payee_organization_name: PAYEE ORGANIZATION NAME exceeds maximum length of 200 (201 characters)
+    ~ ERROR SB21B #007 Recipient Organization Name {XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX...}: exceeds maximum length of 200
+Only ours (0):
+Only theirs (0):
+2 matched, 0 only ours, 0 only theirs
+error: validation failed with 2 error(s) and 0 warning(s)
+```
+
+WebCheck does not report line numbers. It identifies a record by its
+type and a name in braces (the payee, the contributor, a city) and a
+field by its 1-based number and the FEC's label -- `#008 Contributor
+Last Name` -- so a WebCheck finding prints as `SEVERITY FORM_TYPE #NNN
+label {item}: message` where ours prints `SEVERITY line N FORM_TYPE
+field: message`. The diff pairs findings by record type, field number
+(ours from the bundled spec's column) and message template (ours from
+`Rule::fec_message`; a template matches when its words appear in order in
+WebCheck's message, so `Tran ID is NOT UNIQUE - This one is same as
+other(s)` matches `Tran ID 'SB21B.4120' is NOT UNIQUE - This one is same
+as other(s)`). Anything unpaired is listed under `Only ours` or `Only
+theirs`; a matched pair whose severities differ is marked `[severity
+differs]`. The summary line is `N matched, M only ours, K only theirs`.
+
+The exit status is still decided by *our* errors (and
+`--strict-warnings`): the oracle is evidence, not a verdict. Add
+`--strict-oracle` to exit 1 on any disagreement -- the mode for a vendor
+check that both validators say the same thing. A network or service
+failure is reported on stderr and exits 1, since the oracle was asked
+for. With `--json`, the document gains `oracle` (WebCheck's verdict,
+counts, filing type, committee id and findings) and `oracle_diff`
+(`matched` count, `only_ours`, `only_theirs`).
+
+The file leaves your machine. `--oracle` is never on by default.
+
+### What the FEC's validator says about our fixtures
+
+Run on 2026-09-15 against the live service: every one of the accepted
+fixtures in `tests/fixtures/` comes back `SUCCESS` with no messages, as
+it should. On the ten `invalid/` fixtures, eight diff clean -- the
+same field, the same rule. The two that do not are instructive:
+
+- `amendment_missing_ids.fec` (an F3XA whose header has no report id or
+  amendment number). We report two HDR errors -- `Amended filing must
+  have an ID of the "Original"` and `... an "Amendment Number"` (FEC
+  #17, #9) -- and a warning for an embedded quote. WebCheck reports one
+  error on the cover: `F3XA #001 Form Type: Header (HDR) inconsistent
+  with Orig/Amend status` (#8), and nothing about the quote. Same
+  defect, attributed to different lines under different rules; `0
+  matched, 3 only ours, 1 only theirs`.
+- `multi_form.fec` (a second cover record, F3XN, inside an F3XA). Both
+  flag the F3XN's empty treasurer name. We put `Multi-Form Filings are
+  NOT Allowed` on the offending F3XN line; WebCheck puts it on the F3XA
+  cover and *also* rejects the F3XN as `Schedule does not belong with
+  Form F3XA`. `1 matched, 1 only ours, 2 only theirs`.
+
+Two more things the live service taught us, both encoded in the
+`webcheck` module. Its wording departs from the FEC's published list in
+places -- `Filing Format must be Version 8.5` rather than `Filing must
+be in the current FEC format`, `No Match Found for Back-Reference to
+Schedule/TranID - SA11AI.9999` rather than `Back-Reference TRAN-ID does
+not match Sched TRAN-ID`, `$5,500.00 not a Valid Amount of Expenditure
+value` rather than `Invalid Amount format` -- and those observed
+alternates are matched too. And it is not always deterministic: the
+same eight-character committee id drew `ID# 'C0094412' NOT Correct FEC
+ID# Format` on some submissions and `An FEC 'C9xxxxxxx' ID must be used
+to file Form 5` on others.
+
+A superseded-format filing shows the deliberate difference described
+above. `F3XN_210000_v5.3.fec` is one `current_format` *warning* to us;
+WebCheck fails it (`HDR #003 FEC Version#: Filing Format must be Version
+8.5`, paired with ours and marked `[severity differs]`) and, having
+parsed a 5.3 file with 8.5 column positions, reports two hundred more
+misaligned-field messages -- `200 only theirs`, and exit 1 under
+`--strict-oracle`.
+
+### Two channels, one credential-free
+
+WebCheck has two entry points. The public **upload** (`POST
+/webcheck/services/upload`, `multipart/form-data`) is what the WebCheck
+page itself calls; it needs no account and answers at once with the
+HTML fragment the page renders, which is what `--oracle webcheck` uses.
+Files over 20 MB get their results by e-mail instead, which is reported
+as an error rather than an empty report.
+
+The **SOAP service** (`POST /webcheck/services/validate`, operation
+`validate(arg0: string, arg1: string, arg2: base64Binary) -> string`,
+WSDL at `?wsdl`) is the interface for registered filing vendors and
+requires a vendor API key: every request without one, whatever the
+arguments, is answered `Error! API Key is invalid` (with a pointer to
+Vendor Registration). Pass `--webcheck-api-key` (or `WEBCHECK_API_KEY`)
+and optionally `--webcheck-email` to use it. The client sends the key as
+`arg0` and the e-mail as `arg1`, decodes the JSON the service returns
+inside `<return>`, and follows a results URL if one is given -- but the
+WSDL loses the parameter names and nobody on this project holds a key,
+so the path past the key check is untested. If you have one and it does
+not work, the argument order in `webcheck::soap_envelope` is the first
+thing to try.
+
+### From Rust
+
+```rust,no_run
+use hardmoney::Filing;
+use hardmoney::parser::webcheck::{WebCheck, diff};
+
+let bytes = std::fs::read("filing.fec")?;
+let ours = Filing::parse_bytes(&bytes)?.validate();
+let theirs = WebCheck::new().submit("filing.fec", &bytes, None)?;
+println!("{theirs}");                 // WebCheck's findings and verdict
+let d = diff(&ours, &theirs);
+println!("{d}");                      // Matched / Only ours / Only theirs
+assert!(d.is_empty(), "the two validators disagree");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`WebCheck::submit` returns an `OracleReport` -- `raw` (the response as
+received), `result` (`SUCCESS`/`ERRORS`), the counts WebCheck itself
+stated, `filing_type`, `committee_id`, and `findings: Vec<OracleFinding>`
+(`line_no: Option<u64>`, `severity`, `form_type`, `item`, `field_no`,
+`field_label`, `message`). It fails with a `WebCheckError`: `Transport`,
+`Http { status, .. }`, `SoapFault { code, string }`, `Rejected {
+message }` (the invalid-key answer), `Deferred { message }` (results by
+e-mail), or `Unparseable { snippet }`. Parsing never panics on an
+unexpected shape; the report also carries `counts_disagree()`, true if
+the counts WebCheck stated differ from the findings parsed -- the alarm
+for a changed response format. `parse_upload_response` and
+`parse_soap_response` are public so the parsing can be tested on
+captured responses, which `tests/webcheck_oracle.rs` does; the live
+tests there run with `HARDMONEY_NETWORK_TESTS=1 cargo test --test
+webcheck_oracle -- --ignored`.
 
 Together with the previous two chapters this completes the loop a filing
 vendor or a compliance team needs: parse, fix (`set`), **validate**,

@@ -62,6 +62,8 @@ pub mod tables;
 pub mod typed;
 pub mod utils;
 pub mod validate;
+#[cfg(feature = "fetch")]
+pub mod webcheck;
 pub mod writer;
 
 pub use error::{FecError, Result};
