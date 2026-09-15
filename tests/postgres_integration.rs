@@ -92,10 +92,13 @@ fn candidates_zip(rows: &[(&str, &str)]) -> PathBuf {
         zw.write_all(body.as_bytes()).unwrap();
         zw.finish().unwrap();
     }
+    // Unique per call: tests run in parallel threads and two of them build
+    // 2-row zips; naming by row count made them overwrite each other.
+    static ZIP_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let path = std::env::temp_dir().join(format!(
         "hardmoney-it-cn-{}-{}.zip",
         std::process::id(),
-        rows.len()
+        ZIP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     std::fs::write(&path, buf.into_inner()).unwrap();
     path
