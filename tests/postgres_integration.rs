@@ -248,7 +248,11 @@ async fn replace_reloads_exactly_and_append_conflicts() {
             .limit(None),
     )
     .await;
-    assert!(err.is_ok(), "2 rows is under the default threshold");
+    assert!(
+        err.is_ok(),
+        "2 rows is under the default threshold: {:?}",
+        err.err()
+    );
     let mut opts = LoadOptions::new(cycle);
     opts.confirm_threshold = 1;
     let err = bulk::load(&t.pool, src, Input::LocalFile(v2.clone()), opts)

@@ -215,7 +215,16 @@ pub async fn load(
         0
     };
 
-    let rows_loaded = copy_into_table(&mut tx, source, &staged.path).await?;
+    // On a COPY failure (e.g. duplicate key in append mode) roll back
+    // explicitly and await it, so the connection is returned to the pool
+    // in a clean state rather than mid-protocol.
+    let rows_loaded = match copy_into_table(&mut tx, source, &staged.path).await {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = tx.rollback().await;
+            return Err(e);
+        }
+    };
 
     let load_id: i64 = sqlx::query_scalar(
         "INSERT INTO loads (source, cycle, mode, row_count, row_limit, dates_nulled, \
