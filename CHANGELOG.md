@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.1 — 2026-09-15
+
+### Fixed
+- Migration 0002 installed `pg_trgm` into the *current namespace* (first on
+  `search_path`) instead of `public`. On a database where the extension was
+  not preinstalled, the second namespace to migrate failed with `operator
+  class "gin_trgm_ops" does not exist`, and dropping the first namespace
+  took the extension with it. The extension is now pinned to `public` and
+  the operator class is schema-qualified. Databases migrated by 1.0.0 are
+  fine if 0002 succeeded; if it failed, `hardmoney schema-init` will retry
+  it.
+- Added `build.rs` with `rerun-if-changed=migrations` so an edited
+  migration always triggers a rebuild (`sqlx::migrate!` embeds the SQL at
+  compile time; without this Cargo could ship stale SQL).
+- `bulk-restore-dump` also pins its `pg_trgm`/`btree_gin` extensions to
+  `public`.
+- CI now tests against Postgres 15 (what the FEC runs) as well as 18.
+
 ## 1.0.0 — 2026-09-15
 
 First stable release. Breaking changes from 0.1 throughout; 0.1 is not

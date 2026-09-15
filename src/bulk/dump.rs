@@ -134,7 +134,7 @@ pub async fn restore(
     // If unavailable, the table + data + primary key still restore.
     for ext in ["pg_trgm", "btree_gin"] {
         let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "CREATE EXTENSION IF NOT EXISTS {ext}"
+            "CREATE EXTENSION IF NOT EXISTS {ext} WITH SCHEMA public"
         )))
         .execute(pool)
         .await;
