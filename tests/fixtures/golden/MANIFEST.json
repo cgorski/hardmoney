@@ -1,0 +1,316 @@
+{
+  "pack": "hardmoney-golden",
+  "pack_version": "1",
+  "spec_version": "8.5",
+  "seed": "hardmoney-golden/1",
+  "committee_ids": [
+    {
+      "role": "pac",
+      "id": "C00002253",
+      "registry_name": "NATIONAL COUNCIL OF SAVINGS INSTITUTIONS (THRIFTPAC)"
+    },
+    {
+      "role": "affiliated_pac",
+      "id": "C00003459",
+      "registry_name": "CALIFORNIA LEAGUE OF SAVINGS INSTITUTIONS FEDPAC"
+    },
+    {
+      "role": "other_pac",
+      "id": "C00003020",
+      "registry_name": "CONNECTICUT MEDICAL POLITICAL ACTION COMMITTEE"
+    },
+    {
+      "role": "party_committee",
+      "id": "C00078733",
+      "registry_name": "ALEXANDRIA DEMOCRATIC FEDERAL CAMPAIGN COMMITTEE"
+    },
+    {
+      "role": "house_committee",
+      "id": "C00015669",
+      "registry_name": "WAMPLER FOR CONGRESS COMMITTEE"
+    },
+    {
+      "role": "presidential_committee",
+      "id": "C00100834",
+      "registry_name": "CRANE FOR PRESIDENT COMMITTEE"
+    },
+    {
+      "role": "exploratory_committee",
+      "id": "C00110601",
+      "registry_name": "GRAYSON FOR PRESIDENT 1984"
+    }
+  ],
+  "committee_ids_note": "WebCheck validates every committee id in a filing against the FEC's committee registry, so no fictitious id can pass it. These ids appear in the FEC's 1990 committee master and not in the 2024 one. The fixtures' committee names, addresses, transactions, and dates are invented and do not describe these committees.",
+  "generator": "examples/golden_fixtures.rs",
+  "regenerate": "cargo run --example golden_fixtures -- tests/fixtures/golden",
+  "verify": "cargo test --all-features --test golden_fixtures",
+  "license": "Apache-2.0 OR BSD-3-Clause; the FECfile+ transaction amounts are public domain (17 U.S.C. 105)",
+  "fixtures": [
+    {
+      "name": "f3x",
+      "file": "f3x.fec",
+      "form": "F3X",
+      "form_type": "F3XN",
+      "version": "8.5",
+      "body_lines": 38,
+      "bytes": 6469,
+      "sha256": "ce4da531ea9fac436c927087b7a296eb806a677203ae161ee62a894da4a01e48",
+      "description": "Form 3X (PAC/party quarterly) with Schedules A, B, C, D, E, F, H3 and H4; cover filled so every Column A and Column B line balances. The Column A lines FECfile+ computes match its test's expected values; 18(a), 18(c), 21(a)(i), 21(a)(ii), and the totals that include them carry the H3/H4-derived values FECfile+ stubs to zero.",
+      "provenance": "Synthetic. Transaction amounts, line tokens, and memo flags are FECfile+'s public-domain test set (fecgov/fecfile-web-api, django-backend/fecfiler/web_services/summary/tests/utils.py, asserted by reports/form_3x/tests/test_summary.py::test_calculate_summary_column_a); cash on hand January 1 (61) and unitemized individual receipts (3.77) come from the same test. Names, addresses, and dates are invented; the H3 and H4 records are hardmoney's addition. Committee ids are those of committees terminated decades ago (see committee_ids), used only because WebCheck checks ids against the FEC registry; no other content relates to them.",
+      "sidecars": [
+        "f3x.validation.json",
+        "f3x.reconciliation.json",
+        "f3x.expected_column_a.json"
+      ],
+      "expected": {
+        "acceptable": true,
+        "errors": 0,
+        "warnings": 0,
+        "findings": [],
+        "reconciliation": {
+          "checks": 69,
+          "disagreeing": 0,
+          "balances": true,
+          "lines": []
+        }
+      }
+    },
+    {
+      "name": "f3",
+      "file": "f3.fec",
+      "form": "F3",
+      "form_type": "F3N",
+      "version": "8.5",
+      "body_lines": 6,
+      "bytes": 1448,
+      "sha256": "3cdb504096165e531a996738742a656d6134842fd33fb985392971143688b99f",
+      "description": "Form 3 (House candidate quarterly) with SA11AI, SA11C, SB17, SB20A, a Schedule C candidate loan (SC/9) and a Schedule D debt (SD10); cover balanced.",
+      "provenance": "Synthetic. Every name, address, amount, and date is invented, shaped after FEC-accepted spec-8.5 filings in tests/fixtures/. Committee ids are those of committees terminated decades ago (see committee_ids), used only because WebCheck checks ids against the FEC registry; no other content relates to them.",
+      "sidecars": [
+        "f3.validation.json",
+        "f3.reconciliation.json"
+      ],
+      "expected": {
+        "acceptable": true,
+        "errors": 0,
+        "warnings": 0,
+        "findings": [],
+        "reconciliation": {
+          "checks": 50,
+          "disagreeing": 0,
+          "balances": true,
+          "lines": []
+        }
+      }
+    },
+    {
+      "name": "f3p",
+      "file": "f3p.fec",
+      "form": "F3P",
+      "form_type": "F3PN",
+      "version": "8.5",
+      "body_lines": 4,
+      "bytes": 1725,
+      "sha256": "d38794833c1e5a2ef9fbddb59271949edab46378946e06ada5b6100a43bd54fb",
+      "description": "Form 3P (presidential quarterly) with SA17A, SA18, SB23, SB28A; cover balanced, lines 14 and 15 derived from Column B as the spec says.",
+      "provenance": "Synthetic. Every name, address, amount, and date is invented, shaped after FEC-accepted spec-8.5 filings in tests/fixtures/. Committee ids are those of committees terminated decades ago (see committee_ids), used only because WebCheck checks ids against the FEC registry; no other content relates to them.",
+      "sidecars": [
+        "f3p.validation.json",
+        "f3p.reconciliation.json"
+      ],
+      "expected": {
+        "acceptable": true,
+        "errors": 0,
+        "warnings": 0,
+        "findings": [],
+        "reconciliation": {
+          "checks": 44,
+          "disagreeing": 0,
+          "balances": true,
+          "lines": []
+        }
+      }
+    },
+    {
+      "name": "f24",
+      "file": "f24.fec",
+      "form": "F24",
+      "form_type": "F24N",
+      "version": "8.5",
+      "body_lines": 2,
+      "bytes": 493,
+      "sha256": "fed9cce369afc65619e3a2398072806d5faa849b75fa4d92697d095aac3b35ff",
+      "description": "Form 24 (48-hour independent expenditure report) with two Schedule E lines.",
+      "provenance": "Synthetic. Every name, address, amount, and date is invented, shaped after FEC-accepted spec-8.5 filings in tests/fixtures/. Committee ids are those of committees terminated decades ago (see committee_ids), used only because WebCheck checks ids against the FEC registry; no other content relates to them.",
+      "sidecars": [
+        "f24.validation.json"
+      ],
+      "expected": {
+        "acceptable": true,
+        "errors": 0,
+        "warnings": 0,
+        "findings": [],
+        "reconciliation": null
+      }
+    },
+    {
+      "name": "f1m",
+      "file": "f1m.fec",
+      "form": "F1M",
+      "form_type": "F1MN",
+      "version": "8.5",
+      "body_lines": 0,
+      "bytes": 335,
+      "sha256": "faf7134e3c2d8d0fc0bfa879b3b84b5819272693f40fa160d79ba0587d4b099e",
+      "description": "Form 1M (notification of multicandidate status) naming five candidates.",
+      "provenance": "Synthetic. Every name, address, amount, and date is invented, shaped after FEC-accepted spec-8.5 filings in tests/fixtures/. Committee ids are those of committees terminated decades ago (see committee_ids), used only because WebCheck checks ids against the FEC registry; no other content relates to them.",
+      "sidecars": [
+        "f1m.validation.json"
+      ],
+      "expected": {
+        "acceptable": true,
+        "errors": 0,
+        "warnings": 0,
+        "findings": [],
+        "reconciliation": null
+      }
+    },
+    {
+      "name": "f99",
+      "file": "f99.fec",
+      "form": "F99",
+      "form_type": "F99",
+      "version": "8.5",
+      "body_lines": 0,
+      "bytes": 344,
+      "sha256": "802016f9b519beefade4a1145bbfb50646e95aab09fb2e1d0b60e2feb49f639d",
+      "description": "Form 99 (miscellaneous text) with a two-paragraph [BEGINTEXT] block.",
+      "provenance": "Synthetic. Every name, address, amount, and date is invented, shaped after FEC-accepted spec-8.5 filings in tests/fixtures/. Committee ids are those of committees terminated decades ago (see committee_ids), used only because WebCheck checks ids against the FEC registry; no other content relates to them.",
+      "sidecars": [
+        "f99.validation.json"
+      ],
+      "expected": {
+        "acceptable": true,
+        "errors": 0,
+        "warnings": 0,
+        "findings": [],
+        "reconciliation": null
+      }
+    },
+    {
+      "name": "f3x_cover_off_by_one_cent",
+      "file": "f3x_cover_off_by_one_cent.fec",
+      "form": "F3X",
+      "form_type": "F3XN",
+      "version": "8.5",
+      "body_lines": 38,
+      "bytes": 6469,
+      "sha256": "447314754f6f6c3757d07655bd5bcb4c8f399a4fb922f8e5e32a174a80d0f5b9",
+      "description": "f3x with Column A line 11(a)(i) reported as 10000.24 (the schedule sums to 10000.23). Validates with no findings, as the FEC's validator would accept it; reconcile flags 11(a)(i) (+0.01) and 11(a)(iii) (-0.01, its formula evaluated over the reported lines).",
+      "provenance": "Synthetic. Transaction amounts, line tokens, and memo flags are FECfile+'s public-domain test set (fecgov/fecfile-web-api, django-backend/fecfiler/web_services/summary/tests/utils.py, asserted by reports/form_3x/tests/test_summary.py::test_calculate_summary_column_a); cash on hand January 1 (61) and unitemized individual receipts (3.77) come from the same test. Names, addresses, and dates are invented; the H3 and H4 records are hardmoney's addition. Committee ids are those of committees terminated decades ago (see committee_ids), used only because WebCheck checks ids against the FEC registry; no other content relates to them.",
+      "sidecars": [
+        "f3x_cover_off_by_one_cent.validation.json",
+        "f3x_cover_off_by_one_cent.reconciliation.json"
+      ],
+      "expected": {
+        "acceptable": true,
+        "errors": 0,
+        "warnings": 0,
+        "findings": [],
+        "reconciliation": {
+          "checks": 69,
+          "disagreeing": 2,
+          "balances": false,
+          "lines": [
+            {
+              "column": "A",
+              "line": "11(a)(i)",
+              "reported": "10000.24",
+              "expected": "10000.23",
+              "delta": "0.01"
+            },
+            {
+              "column": "A",
+              "line": "11(a)(iii)",
+              "reported": "10004.00",
+              "expected": "10004.01",
+              "delta": "-0.01"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "f3x_duplicate_transaction_id",
+      "file": "f3x_duplicate_transaction_id.fec",
+      "form": "F3X",
+      "form_type": "F3XN",
+      "version": "8.5",
+      "body_lines": 38,
+      "bytes": 6470,
+      "sha256": "7d508c66cdb6c6ba123af142797385db0d306a2c381a43551814ef85be9fa42e",
+      "description": "f3x with line 4 (SA11B) reusing line 3's transaction id SA11AI.1. One duplicate_transaction_id error (FEC message #40) on line 4; the cover still balances.",
+      "provenance": "Synthetic. Transaction amounts, line tokens, and memo flags are FECfile+'s public-domain test set (fecgov/fecfile-web-api, django-backend/fecfiler/web_services/summary/tests/utils.py, asserted by reports/form_3x/tests/test_summary.py::test_calculate_summary_column_a); cash on hand January 1 (61) and unitemized individual receipts (3.77) come from the same test. Names, addresses, and dates are invented; the H3 and H4 records are hardmoney's addition. Committee ids are those of committees terminated decades ago (see committee_ids), used only because WebCheck checks ids against the FEC registry; no other content relates to them.",
+      "sidecars": [
+        "f3x_duplicate_transaction_id.validation.json",
+        "f3x_duplicate_transaction_id.reconciliation.json"
+      ],
+      "expected": {
+        "acceptable": false,
+        "errors": 1,
+        "warnings": 0,
+        "findings": [
+          {
+            "rule": "duplicate_transaction_id",
+            "severity": "error",
+            "line_no": 4,
+            "form_type": "SA11B",
+            "field": "transaction_id"
+          }
+        ],
+        "reconciliation": {
+          "checks": 69,
+          "disagreeing": 0,
+          "balances": true,
+          "lines": []
+        }
+      }
+    },
+    {
+      "name": "f3x_missing_required_field",
+      "file": "f3x_missing_required_field.fec",
+      "form": "F3X",
+      "form_type": "F3XN",
+      "version": "8.5",
+      "body_lines": 38,
+      "bytes": 6464,
+      "sha256": "fa16405b81c832eae1506757e9881994c4543516864bd60177eb0c3d728b0e77",
+      "description": "f3x with contributor_last_name blank on line 3 (SA11AI, an individual). One required_field_empty error (FEC message #3) on line 3; the cover still balances.",
+      "provenance": "Synthetic. Transaction amounts, line tokens, and memo flags are FECfile+'s public-domain test set (fecgov/fecfile-web-api, django-backend/fecfiler/web_services/summary/tests/utils.py, asserted by reports/form_3x/tests/test_summary.py::test_calculate_summary_column_a); cash on hand January 1 (61) and unitemized individual receipts (3.77) come from the same test. Names, addresses, and dates are invented; the H3 and H4 records are hardmoney's addition. Committee ids are those of committees terminated decades ago (see committee_ids), used only because WebCheck checks ids against the FEC registry; no other content relates to them.",
+      "sidecars": [
+        "f3x_missing_required_field.validation.json",
+        "f3x_missing_required_field.reconciliation.json"
+      ],
+      "expected": {
+        "acceptable": false,
+        "errors": 1,
+        "warnings": 0,
+        "findings": [
+          {
+            "rule": "required_field_empty",
+            "severity": "error",
+            "line_no": 3,
+            "form_type": "SA11AI",
+            "field": "contributor_last_name"
+          }
+        ],
+        "reconciliation": {
+          "checks": 69,
+          "disagreeing": 0,
+          "balances": true,
+          "lines": []
+        }
+      }
+    }
+  ]
+}

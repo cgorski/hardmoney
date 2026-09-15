@@ -1,0 +1,11 @@
+{
+  "file": "f99.fec",
+  "form_type": "F99",
+  "version": "8.5",
+  "line_count": 0,
+  "acceptable": true,
+  "errors": 0,
+  "warnings": 0,
+  "findings_by_rule": {},
+  "findings": []
+}

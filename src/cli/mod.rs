@@ -7,6 +7,7 @@ pub mod dumps;
 pub mod efile;
 pub mod export;
 pub mod filings;
+pub mod lag;
 pub mod parse;
 pub mod query;
 pub mod reconcile;
@@ -79,6 +80,8 @@ enum Command {
     Filings(filings::FilingsArgs),
     /// Follow the FEC's electronic filing feed.
     Efile(efile::EfileArgs),
+    /// How far behind is the FEC's processed data for a filing?
+    Lag(lag::LagArgs),
     /// Run the REST API server.
     Serve(serve::ServeArgs),
     /// Search loaded data from the terminal (same results as the REST API).
@@ -110,6 +113,7 @@ pub async fn run() -> CliResult {
         Command::Dumps(a) => dumps::run(a).await,
         Command::Filings(a) => filings::run(a).await,
         Command::Efile(a) => efile::run(a).await,
+        Command::Lag(a) => lag::run(a),
         Command::Serve(a) => serve::run(a).await,
         Command::Query(a) => query::run(a).await,
         Command::Spec(a) => spec::run(a),

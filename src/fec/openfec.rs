@@ -1,7 +1,12 @@
 //! A client for the parts of openFEC (<https://api.open.fec.gov/developers/>)
 //! that find filings: `/filings/` (processed metadata, with amendment
-//! chains and cover-page totals) and `/efile/filings/` (raw e-filing
-//! metadata, minutes after receipt).
+//! chains and cover-page totals), `/efile/filings/` (raw e-filing
+//! metadata, minutes after receipt), and `/operations-log/` (when the
+//! FEC finished loading each report's summary and its transactions).
+//!
+//! [`OpenFec::processing_status`] joins the three for a set of filing ids,
+//! which is how `hardmoney lag` measures how far the processed data is
+//! behind the raw e-filings.
 //!
 //! Requires the `serde` feature in addition to `fetch`.
 //!
@@ -250,6 +255,201 @@ impl OpenFec {
         self.get_json("efile/filings/", &query.query_string()?)
     }
 
+    /// One page of `/operations-log/`: the FEC's record of when each
+    /// report's summary and transactions finished loading.
+    pub fn operations_log(&self, query: &OperationsLogQuery) -> Result<Page<OperationsLogRecord>> {
+        self.get_json("operations-log/", &query.query_string()?)
+    }
+
+    /// Every `/operations-log/` row matching `query`, across pages.
+    pub fn operations_log_all(
+        &self,
+        query: &OperationsLogQuery,
+    ) -> Result<Vec<OperationsLogRecord>> {
+        let mut query = query.clone();
+        let mut out = Vec::new();
+        loop {
+            let page = self.operations_log(&query)?;
+            let more = page.has_more() && !page.results.is_empty();
+            out.extend(page.results);
+            if !more {
+                return Ok(out);
+            }
+            query.page = query.page.saturating_add(1);
+        }
+    }
+
+    /// The raw-filing URL openFEC publishes for `filing_id`: the `fec_url`
+    /// from `/efile/filings/` (available minutes after receipt), else from
+    /// `/filings/` (once processed). `Ok(None)` when neither endpoint knows
+    /// the filing or neither record carries a URL; an error only when a
+    /// request fails.
+    ///
+    /// This is the replacement for building the `docquery.fec.gov` URL by
+    /// hand ([`docquery_url`](super::docquery_url)), which the FEC has said
+    /// it is inventorying for retirement (`openFEC#6717`).
+    pub fn resolve_fec_url(&self, filing_id: u64) -> Result<Option<String>> {
+        let efile = self.efile_filings(&EfileQuery::new().file_number(filing_id).per_page(1))?;
+        if let Some(url) = efile.results.into_iter().find_map(|r| r.fec_url) {
+            return Ok(Some(url));
+        }
+        let processed = self.filings(&FilingsQuery::new().file_number(filing_id).per_page(1))?;
+        Ok(processed.results.into_iter().find_map(|r| r.fec_url))
+    }
+
+    /// Where the FEC's processing stands for each of `filing_ids`, joining
+    /// `/efile/filings/` (receipt), `/filings/` (processed metadata), and
+    /// `/operations-log/` (completion dates) on the filing number and its
+    /// beginning image number. Ids are looked up in batches of
+    /// [`PROCESSING_BATCH`], so `n` ids cost about `3 * ceil(n / 50)`
+    /// requests. Ids unknown to every endpoint come back with every field
+    /// `None` and `in_filings == false`. The result is in the order given.
+    pub fn processing_status(&self, filing_ids: &[u64]) -> Result<Vec<ProcessingStatus>> {
+        let mut out: Vec<ProcessingStatus> = filing_ids
+            .iter()
+            .map(|&id| ProcessingStatus::unknown(id))
+            .collect();
+        for batch in filing_ids.chunks(PROCESSING_BATCH) {
+            let efile = self.efile_filings(
+                &EfileQuery::new()
+                    .file_numbers(batch.iter().copied())
+                    .per_page(100),
+            )?;
+            for r in efile.results {
+                let Some(id) = r.filing_id() else { continue };
+                for s in out.iter_mut().filter(|s| s.filing_id == id) {
+                    s.committee_id = r.committee_id.clone();
+                    s.form_type = r.form_type.clone();
+                    s.received = r.receipt_date.or(s.received);
+                    s.fec_url = r.fec_url.clone().or(s.fec_url.take());
+                    s.beginning_image_number = r.beginning_image_number.clone();
+                    s.ending_image_number = r.ending_image_number.clone();
+                    s.in_efile = true;
+                }
+            }
+            let processed = self.filings(
+                &FilingsQuery::new()
+                    .file_numbers(batch.iter().copied())
+                    .sort(None::<String>)
+                    .per_page(100),
+            )?;
+            for r in processed.results {
+                let Some(id) = r.filing_id() else { continue };
+                for s in out.iter_mut().filter(|s| s.filing_id == id) {
+                    s.in_filings = true;
+                    s.committee_id = s.committee_id.take().or(r.committee_id.clone());
+                    s.form_type = s.form_type.take().or(r.form_type.clone());
+                    s.report_type = r.report_type.clone();
+                    s.received = s.received.or(r.receipt_date);
+                    s.fec_url = s.fec_url.take().or(r.fec_url.clone());
+                    s.sub_id = r.sub_id.clone();
+                    s.cycle = r.cycle;
+                    s.beginning_image_number = s
+                        .beginning_image_number
+                        .take()
+                        .or(r.beginning_image_number.clone());
+                    s.ending_image_number = s
+                        .ending_image_number
+                        .take()
+                        .or(r.ending_image_number.clone());
+                }
+            }
+            let images: Vec<String> = out
+                .iter()
+                .filter(|s| batch.contains(&s.filing_id))
+                .filter_map(|s| s.beginning_image_number.clone())
+                .collect();
+            if images.is_empty() {
+                continue;
+            }
+            let log = self.operations_log(
+                &OperationsLogQuery::new()
+                    .beginning_image_numbers(images)
+                    .per_page(100),
+            )?;
+            join_operations_log(&mut out, log.results);
+        }
+        Ok(out)
+    }
+
+    /// Processing status for every e-filed report `committee_id` filed in
+    /// `cycle` (every version, not only the most recent; `form_type`
+    /// narrows to one base form). Joins `/filings/` with `/operations-log/`
+    /// for the cycle's two report years, so a committee costs one
+    /// `/filings/` page per 100 filings plus one `/operations-log/` page per
+    /// 100 rows, whatever its size. Receipt times come from `/filings/`,
+    /// which records dates, not timestamps. Newest receipt first.
+    pub fn committee_processing_status(
+        &self,
+        committee_id: &str,
+        cycle: u16,
+        form_type: Option<&str>,
+    ) -> Result<Vec<ProcessingStatus>> {
+        let mut query = FilingsQuery::new().committee_id(committee_id).cycle(cycle);
+        if let Some(form) = form_type {
+            query = query.form_type(form);
+        }
+        let mut out: Vec<ProcessingStatus> = Vec::new();
+        for record in self.filings_all(&query) {
+            let record = record?;
+            let Some(id) = record.filing_id() else {
+                continue;
+            };
+            let mut s = ProcessingStatus::unknown(id);
+            s.in_filings = true;
+            s.committee_id = record.committee_id.clone();
+            s.form_type = record.form_type.clone();
+            s.report_type = record.report_type.clone();
+            s.received = record.receipt_date;
+            s.fec_url = record.fec_url.clone();
+            s.sub_id = record.sub_id.clone();
+            s.cycle = record.cycle;
+            s.beginning_image_number = record.beginning_image_number.clone();
+            s.ending_image_number = record.ending_image_number.clone();
+            out.push(s);
+        }
+        for year in [cycle.saturating_sub(1), cycle] {
+            let mut log = OperationsLogQuery::new()
+                .committee_id(committee_id)
+                .report_year(year);
+            if let Some(form) = form_type {
+                log = log.form_type(form);
+            }
+            join_operations_log(&mut out, self.operations_log_all(&log)?);
+        }
+        Ok(out)
+    }
+
+    /// How many processed rows a schedule endpoint holds for one filing,
+    /// found by the filing's image-number range (every itemized row
+    /// carries the image number of the page it was filed on). One request
+    /// with `per_page=1`; the answer is the endpoint's `pagination`, whose
+    /// `count` may be approximate when `is_count_exact` is `Some(false)`.
+    /// `cycle` is the filing's two-year period; omit it and openFEC
+    /// defaults to the current one.
+    pub fn processed_rows(
+        &self,
+        schedule: ScheduleEndpoint,
+        committee_id: &str,
+        image_range: (&str, &str),
+        cycle: Option<u16>,
+    ) -> Result<Pagination> {
+        if let Some(c) = cycle {
+            check_cycle(c)?;
+        }
+        let mut p: Vec<(&str, String)> = vec![
+            ("committee_id", committee_id.to_string()),
+            ("min_image_number", image_range.0.to_string()),
+            ("max_image_number", image_range.1.to_string()),
+        ];
+        if let Some(c) = cycle {
+            p.push((schedule.cycle_param(), c.to_string()));
+        }
+        p.push(("per_page", "1".to_string()));
+        let page: Page<serde_json::Value> = self.get_json(schedule.path(), &encode_params(&p))?;
+        Ok(page.pagination)
+    }
+
     /// GET + decode, with the 429 retry loop.
     fn get_json<T: DeserializeOwned>(&self, path: &str, query: &str) -> Result<T> {
         let url = self.url_with_key(path, query);
@@ -279,6 +479,65 @@ impl OpenFec {
             url: redact_url(&url),
             source,
         })
+    }
+}
+
+/// How many filing ids [`OpenFec::processing_status`] looks up per
+/// request. openFEC accepts repeated `file_number=` parameters; 50 keeps
+/// the URL well under common length limits even with 18-digit image
+/// numbers in the `/operations-log/` request.
+pub const PROCESSING_BATCH: usize = 50;
+
+/// Copies completion dates from `/operations-log/` rows onto the statuses
+/// with the same beginning image number.
+fn join_operations_log(out: &mut [ProcessingStatus], rows: Vec<OperationsLogRecord>) {
+    for r in rows {
+        let Some(image) = r.beginning_image_number.as_deref() else {
+            continue;
+        };
+        for s in out
+            .iter_mut()
+            .filter(|s| s.beginning_image_number.as_deref() == Some(image))
+        {
+            s.in_operations_log = true;
+            s.summary_data_complete = r.summary_data_complete_date;
+            s.transaction_data_complete = r.transaction_data_complete_date;
+            s.report_type = s.report_type.take().or(r.report_type.clone());
+        }
+    }
+}
+
+/// The itemized-transaction endpoints [`OpenFec::processed_rows`] counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display)]
+#[non_exhaustive]
+pub enum ScheduleEndpoint {
+    /// `/schedules/schedule_a/` (receipts).
+    #[strum(serialize = "SchA")]
+    A,
+    /// `/schedules/schedule_b/` (disbursements).
+    #[strum(serialize = "SchB")]
+    B,
+    /// `/schedules/schedule_e/` (independent expenditures).
+    #[strum(serialize = "SchE")]
+    E,
+}
+
+impl ScheduleEndpoint {
+    fn path(self) -> &'static str {
+        match self {
+            ScheduleEndpoint::A => "schedules/schedule_a/",
+            ScheduleEndpoint::B => "schedules/schedule_b/",
+            ScheduleEndpoint::E => "schedules/schedule_e/",
+        }
+    }
+
+    /// Schedules A and B call the two-year period
+    /// `two_year_transaction_period`; Schedule E calls it `cycle`.
+    fn cycle_param(self) -> &'static str {
+        match self {
+            ScheduleEndpoint::A | ScheduleEndpoint::B => "two_year_transaction_period",
+            ScheduleEndpoint::E => "cycle",
+        }
     }
 }
 
@@ -370,6 +629,8 @@ pub struct FilingsQuery {
     pub most_recent: Option<bool>,
     pub min_receipt_date: Option<NaiveDate>,
     pub max_receipt_date: Option<NaiveDate>,
+    /// Specific filings (`file_number=` repeated); empty for no filter.
+    pub file_numbers: Vec<u64>,
     pub sort: Option<String>,
     pub per_page: u32,
     pub page: u32,
@@ -386,6 +647,7 @@ impl Default for FilingsQuery {
             most_recent: None,
             min_receipt_date: None,
             max_receipt_date: None,
+            file_numbers: Vec::new(),
             sort: Some("-receipt_date".to_string()),
             per_page: 100,
             page: 1,
@@ -456,6 +718,21 @@ impl FilingsQuery {
         self
     }
 
+    /// `file_number=2011929`: one specific filing (added to any already
+    /// set).
+    #[must_use]
+    pub fn file_number(mut self, file_number: u64) -> Self {
+        self.file_numbers.push(file_number);
+        self
+    }
+
+    /// Several specific filings, as repeated `file_number=` parameters.
+    #[must_use]
+    pub fn file_numbers(mut self, file_numbers: impl IntoIterator<Item = u64>) -> Self {
+        self.file_numbers.extend(file_numbers);
+        self
+    }
+
     /// `sort=` field, `-` prefix for descending; `None` for the API's
     /// default order.
     #[must_use]
@@ -509,6 +786,9 @@ impl FilingsQuery {
             "max_receipt_date",
             self.max_receipt_date.map(|d| d.to_string()),
         );
+        for n in &self.file_numbers {
+            p.push(("file_number", n.to_string()));
+        }
         push_param(&mut p, "sort", self.sort.clone());
         p.push(("per_page", self.per_page.to_string()));
         p.push(("page", self.page.to_string()));
@@ -525,6 +805,9 @@ pub struct EfileQuery {
     pub committee_id: Option<String>,
     pub form_type: Option<String>,
     pub file_number: Option<u64>,
+    /// Further specific filings; sent with `file_number` as repeated
+    /// `file_number=` parameters.
+    pub file_numbers: Vec<u64>,
     pub min_receipt_date: Option<NaiveDate>,
     pub max_receipt_date: Option<NaiveDate>,
     pub sort: Option<String>,
@@ -538,6 +821,7 @@ impl Default for EfileQuery {
             committee_id: None,
             form_type: None,
             file_number: None,
+            file_numbers: Vec::new(),
             min_receipt_date: None,
             max_receipt_date: None,
             sort: Some("-receipt_date".to_string()),
@@ -572,6 +856,14 @@ impl EfileQuery {
     #[must_use]
     pub fn file_number(mut self, file_number: u64) -> Self {
         self.file_number = Some(file_number);
+        self
+    }
+
+    /// Several specific filings, as repeated `file_number=` parameters
+    /// (added to any already set).
+    #[must_use]
+    pub fn file_numbers(mut self, file_numbers: impl IntoIterator<Item = u64>) -> Self {
+        self.file_numbers.extend(file_numbers);
         self
     }
 
@@ -623,6 +915,9 @@ impl EfileQuery {
             "file_number",
             self.file_number.map(|n| n.to_string()),
         );
+        for n in &self.file_numbers {
+            p.push(("file_number", n.to_string()));
+        }
         push_param(
             &mut p,
             "min_receipt_date",
@@ -859,6 +1154,312 @@ impl EfileRecord {
             .clone()
             .or_else(|| self.filing_id().map(super::docquery_url))
     }
+}
+
+/// Parameters for `/operations-log/`. The endpoint has no `file_number`
+/// filter; a filing is found by its `beginning_image_number` (which
+/// `/filings/` and `/efile/filings/` both carry) or by committee and
+/// report year. Defaults: `per_page` 100, `page` 1, the API's own sort
+/// (`-report_year`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct OperationsLogQuery {
+    /// `candidate_committee_id=`: the filer.
+    pub committee_id: Option<String>,
+    pub form_type: Option<String>,
+    pub report_type: Option<String>,
+    pub report_year: Option<u16>,
+    /// `beginning_image_number=` repeated; empty for no filter.
+    pub beginning_image_numbers: Vec<String>,
+    pub min_receipt_date: Option<NaiveDate>,
+    pub max_receipt_date: Option<NaiveDate>,
+    pub sort: Option<String>,
+    pub per_page: u32,
+    pub page: u32,
+}
+
+impl Default for OperationsLogQuery {
+    fn default() -> Self {
+        OperationsLogQuery {
+            committee_id: None,
+            form_type: None,
+            report_type: None,
+            report_year: None,
+            beginning_image_numbers: Vec::new(),
+            min_receipt_date: None,
+            max_receipt_date: None,
+            sort: None,
+            per_page: 100,
+            page: 1,
+        }
+    }
+}
+
+impl OperationsLogQuery {
+    /// An unfiltered query with the defaults above.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `candidate_committee_id=C00554709`.
+    #[must_use]
+    pub fn committee_id(mut self, id: impl Into<String>) -> Self {
+        self.committee_id = Some(id.into());
+        self
+    }
+
+    /// `form_type=F3X`.
+    #[must_use]
+    pub fn form_type(mut self, form_type: impl Into<String>) -> Self {
+        self.form_type = Some(form_type.into());
+        self
+    }
+
+    /// `report_type=M9`.
+    #[must_use]
+    pub fn report_type(mut self, report_type: impl Into<String>) -> Self {
+        self.report_type = Some(report_type.into());
+        self
+    }
+
+    /// `report_year=2026` (the year of the coverage end date).
+    #[must_use]
+    pub fn report_year(mut self, year: u16) -> Self {
+        self.report_year = Some(year);
+        self
+    }
+
+    /// One or more `beginning_image_number=` values.
+    #[must_use]
+    pub fn beginning_image_numbers<I, S>(mut self, numbers: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.beginning_image_numbers
+            .extend(numbers.into_iter().map(Into::into));
+        self
+    }
+
+    /// `min_receipt_date=YYYY-MM-DD` (inclusive).
+    #[must_use]
+    pub fn min_receipt_date(mut self, date: NaiveDate) -> Self {
+        self.min_receipt_date = Some(date);
+        self
+    }
+
+    /// `max_receipt_date=YYYY-MM-DD` (inclusive).
+    #[must_use]
+    pub fn max_receipt_date(mut self, date: NaiveDate) -> Self {
+        self.max_receipt_date = Some(date);
+        self
+    }
+
+    /// `sort=` field; `None` for the API's default order.
+    #[must_use]
+    pub fn sort(mut self, sort: Option<impl Into<String>>) -> Self {
+        self.sort = sort.map(Into::into);
+        self
+    }
+
+    /// Results per page, 1..=100.
+    #[must_use]
+    pub fn per_page(mut self, per_page: u32) -> Self {
+        self.per_page = per_page;
+        self
+    }
+
+    /// 1-based page number.
+    #[must_use]
+    pub fn page(mut self, page: u32) -> Self {
+        self.page = page;
+        self
+    }
+
+    /// The query string (no leading `?`, no API key); see
+    /// [`FilingsQuery::query_string`].
+    pub fn query_string(&self) -> Result<String> {
+        check_per_page(self.per_page)?;
+        check_page(self.page)?;
+        let mut p = Vec::new();
+        push_param(&mut p, "candidate_committee_id", self.committee_id.clone());
+        push_param(&mut p, "form_type", self.form_type.clone());
+        push_param(&mut p, "report_type", self.report_type.clone());
+        push_param(
+            &mut p,
+            "report_year",
+            self.report_year.map(|y| y.to_string()),
+        );
+        for n in &self.beginning_image_numbers {
+            p.push(("beginning_image_number", n.clone()));
+        }
+        push_param(
+            &mut p,
+            "min_receipt_date",
+            self.min_receipt_date.map(|d| d.to_string()),
+        );
+        push_param(
+            &mut p,
+            "max_receipt_date",
+            self.max_receipt_date.map(|d| d.to_string()),
+        );
+        push_param(&mut p, "sort", self.sort.clone());
+        p.push(("per_page", self.per_page.to_string()));
+        p.push(("page", self.page.to_string()));
+        Ok(encode_params(&p))
+    }
+}
+
+/// A row of `/operations-log/`: the FEC's record of one report's passage
+/// through its processing pipeline. `summary_data_complete_date` is when
+/// the cover-page totals were loaded (pass 1; the report then appears in
+/// `/filings/` and `/reports/`); `transaction_data_complete_date` is when
+/// every itemized transaction was loaded (pass 2; the report's rows then
+/// appear in `/schedules/schedule_a/` and the rest). Either is `None`
+/// while that pass is pending.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
+#[serde(default)]
+#[non_exhaustive]
+pub struct OperationsLogRecord {
+    /// The FEC's internal report id, an integer of up to 19 digits.
+    pub sub_id: Option<i64>,
+    /// The filer (openFEC's name for the field).
+    pub candidate_committee_id: Option<String>,
+    pub form_type: Option<String>,
+    pub report_type: Option<String>,
+    pub report_year: Option<u16>,
+    pub amendment_indicator: Option<String>,
+    pub beginning_image_number: Option<String>,
+    pub ending_image_number: Option<String>,
+    #[serde(deserialize_with = "flexible::opt_datetime")]
+    pub receipt_date: Option<NaiveDateTime>,
+    #[serde(deserialize_with = "flexible::opt_date")]
+    pub coverage_start_date: Option<NaiveDate>,
+    #[serde(deserialize_with = "flexible::opt_date")]
+    pub coverage_end_date: Option<NaiveDate>,
+    /// 0 entered but not verified, 1 verified.
+    pub status_num: Option<i32>,
+    #[serde(deserialize_with = "flexible::opt_datetime")]
+    pub summary_data_complete_date: Option<NaiveDateTime>,
+    #[serde(deserialize_with = "flexible::opt_datetime")]
+    pub summary_data_verification_date: Option<NaiveDateTime>,
+    #[serde(deserialize_with = "flexible::opt_date")]
+    pub transaction_data_complete_date: Option<NaiveDate>,
+}
+
+/// How far the FEC has processed one e-filing, as
+/// [`OpenFec::processing_status`] assembles it from three endpoints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct ProcessingStatus {
+    pub filing_id: u64,
+    pub committee_id: Option<String>,
+    pub form_type: Option<String>,
+    pub report_type: Option<String>,
+    /// True if `/efile/filings/` knows the filing (minutes after receipt).
+    pub in_efile: bool,
+    /// True if `/filings/` knows the filing: its summary has been
+    /// processed.
+    pub in_filings: bool,
+    /// True if `/operations-log/` has a row for the filing.
+    pub in_operations_log: bool,
+    /// When the e-filing system received it (to the second from
+    /// `/efile/filings/`; midnight from `/filings/` if only that knew it).
+    pub received: Option<NaiveDateTime>,
+    pub fec_url: Option<String>,
+    pub sub_id: Option<String>,
+    /// The two-year period `/filings/` assigns (`None` until processed).
+    pub cycle: Option<u16>,
+    pub beginning_image_number: Option<String>,
+    pub ending_image_number: Option<String>,
+    /// Pass 1 done: cover-page totals loaded.
+    pub summary_data_complete: Option<NaiveDateTime>,
+    /// Pass 2 done: every itemized transaction loaded.
+    pub transaction_data_complete: Option<NaiveDate>,
+}
+
+impl ProcessingStatus {
+    fn unknown(filing_id: u64) -> Self {
+        ProcessingStatus {
+            filing_id,
+            committee_id: None,
+            form_type: None,
+            report_type: None,
+            in_efile: false,
+            in_filings: false,
+            in_operations_log: false,
+            received: None,
+            fec_url: None,
+            sub_id: None,
+            cycle: None,
+            beginning_image_number: None,
+            ending_image_number: None,
+            summary_data_complete: None,
+            transaction_data_complete: None,
+        }
+    }
+
+    /// Whole days from receipt to the summary load, or `None` while
+    /// pending or when the receipt date is unknown. Negative values are
+    /// clamped to zero (the log records dates, not times).
+    #[must_use]
+    pub fn summary_lag_days(&self) -> Option<i64> {
+        let received = self.received?.date();
+        let done = self.summary_data_complete?.date();
+        Some(done.signed_duration_since(received).num_days().max(0))
+    }
+
+    /// Whole days from receipt to the transaction load, or `None` while
+    /// pending or when the receipt date is unknown.
+    #[must_use]
+    pub fn transaction_lag_days(&self) -> Option<i64> {
+        let received = self.received?.date();
+        let done = self.transaction_data_complete?;
+        Some(done.signed_duration_since(received).num_days().max(0))
+    }
+
+    /// Whole days from receipt to `today` while the transaction load is
+    /// pending; `None` once it is complete or when the receipt date is
+    /// unknown.
+    #[must_use]
+    pub fn days_pending(&self, today: NaiveDate) -> Option<i64> {
+        if self.transaction_data_complete.is_some() {
+            return None;
+        }
+        let received = self.received?.date();
+        Some(today.signed_duration_since(received).num_days().max(0))
+    }
+
+    /// The furthest stage reached.
+    #[must_use]
+    pub fn stage(&self) -> ProcessingStage {
+        if self.transaction_data_complete.is_some() {
+            ProcessingStage::TransactionsLoaded
+        } else if self.summary_data_complete.is_some() || self.in_filings {
+            ProcessingStage::SummaryLoaded
+        } else if self.in_efile {
+            ProcessingStage::Received
+        } else {
+            ProcessingStage::Unknown
+        }
+    }
+}
+
+/// Where a filing is in the FEC's pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, strum::Display, Serialize)]
+#[strum(serialize_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ProcessingStage {
+    /// No endpoint knows the filing id.
+    Unknown,
+    /// The e-filing system has it; nothing is processed yet.
+    Received,
+    /// The cover-page totals are in `/filings/`; transactions are pending.
+    SummaryLoaded,
+    /// Every transaction is loaded.
+    TransactionsLoaded,
 }
 
 /// Auto-paginating iterator from [`OpenFec::filings_all`].

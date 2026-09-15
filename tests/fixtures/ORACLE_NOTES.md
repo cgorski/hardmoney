@@ -183,3 +183,53 @@ on 3.00 files), `illegal_character` 51 (the Puerto Rico filing),
 `embedded_double_quote` 6, `f99_illegal_character` 5,
 `unrecognized_form_type` 4, `pattern_mismatch` 4, `date_out_of_range` 3,
 `address_in_second_line` 3.
+
+# Column B chain notes
+
+`ReportChain` (2026-09-15) checks Column B schedule lines against the sum
+of each schedule over every report in the period, and cash on hand
+against the prior report's close. The semantics come from the FEC's form
+instructions ("add the Calendar Year-to-Date total from the previous
+report to the Total This Period"; election cycle-to-date on Forms 3 and
+3P) and from FECfile+'s `calculate_summary_column_b`, which sums
+transactions by the calendar year of their date, and
+`calculate_cash_on_hand_fields`, whose "previous report" is the one with
+the latest `coverage_through_date` before this one. Two real chains were
+run before the fixtures were chosen:
+
+**Republican Party of Minnesota - Federal (C00001313), twelve `most_recent`
+F3X reports, 2025-01-01 through 2026-07-31** (`hardmoney filings
+--committee C00001313 --form-type F3X --cycle 2026 --most-recent
+--reconcile-chain`). Cash on hand carries forward across all twelve,
+including 6(a) and January's 6(b) from the 2025 year-end close
+(97,188.87). Column B balances on every one of the 27 schedule lines for
+the 2025 M2-M4 reports and the 2026 M2-M5 reports. Three reports do not,
+and in each case the chain check agrees with the single-file Column A
+check on the report that introduced the difference:
+
+| Report | Column A | Column B (chain) | Reading |
+|---|---|---|---|
+| 1945938 (MY 2025, 2025-04-01..06-30) | 21(a)(i) reported 37,119.34 vs H4 `federal_share` 37,119.38; 21(a)(ii) 139,639.33 vs 139,639.29 | same two lines, ±0.04 over 4 reports | Four cents moved between the federal and nonfederal shares; 21(c) holds in both columns. A filer rounding artefact the FEC accepted. |
+| 1943038 (YE 2025) | balances | 21(a)(i)/(ii) ±0.04 over 5 reports | The mid-year's four cents carried into the year-end's Column B, as the instructions say it must. |
+| 1986128 (M6 2026, May; amended by 2011912, `tests/fixtures/rad/`) | 11(c) 2,045.00 vs `SA11C` 1,845.00 | 11(c) +200.00 over 5 reports; June (2000792) and July (2009229) +200.00 over 6 and 7 | The $200 committee contribution on the cover and not on Schedule A (documented above) is in Column B of every later 2026 report. The amendment filed 2026-09-14 (2011912) repeats it. |
+
+**C00010603, seven `most_recent` F3X monthlies for 2026 plus the 2025
+year-end** (about $10 million a month; 52 MB). Every Column B line
+balanced on all seven and cash on hand carried forward through all
+eight, including across the year boundary.
+
+Fixtures: `tests/fixtures/chain/` holds the Minnesota 2025 year-end and
+January through April 2026 (916 KB, sha256 in its README); the May
+amendment is `tests/fixtures/rad/F3XA_2011912.fec`.
+`tests/reconcile_fixtures.rs` pins the three-report balance, the
+year-boundary carry-forward, the $200 propagating into Column B on one
+line only, and the gap report when April is left out.
+
+Two boundaries of the method. A chain must hold every report of the
+period for the sums to mean anything; `ReportChain::gaps()` reports the
+uncovered days, and on a cycle-to-date form the start of the cycle (the
+day after the previous general election for the seat) is not known from
+the filings, so only gaps between the reports given are reported. And a
+committee that changes filing frequency mid-year (Minnesota went from
+monthly to semi-annual in April 2025 and back to monthly in 2026) still
+chains, because the check is on coverage periods, not report codes.

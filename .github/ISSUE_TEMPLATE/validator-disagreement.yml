@@ -1,0 +1,72 @@
+name: Validator disagreement
+description: hardmoney validate and the FEC's validator (WebCheck, FECfile, or the FEC's acceptance of a filing) disagree about a filing.
+title: "validate: <rule or FEC message> on <form type> (filing <id>)"
+labels: ["validator", "fec-disagreement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you. A disagreement between hardmoney and the FEC's own validator is a bug in one of them, and this report is how we find out which. A filing id (the number in the docquery URL, e.g. `2011831`) reproduces everything; if the filing is not public, attach the `.fec` file instead or describe how to build a minimal one.
+
+        Confirmed disagreements where hardmoney is wrong are fixed in a patch release (see "Support and security" in the README).
+  - type: input
+    id: filing
+    attributes:
+      label: Filing id or file
+      description: The FEC filing id, or "attached" if you attached a `.fec` file below (drag it into the "Additional context" box).
+      placeholder: "2011831"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: hardmoney version and how it was installed
+      description: "`hardmoney --version`, or `python -c 'import hardmoney; print(hardmoney.__version__)'`"
+      placeholder: "3.0.1 (pip install hardmoney)"
+    validations:
+      required: true
+  - type: textarea
+    id: hardmoney_output
+    attributes:
+      label: hardmoney validate --json output
+      description: "Paste the output of `hardmoney validate <file> --json` (or `filing.validate()` findings from Python). Trim to the relevant findings if the file is large, but keep the `line_no`, `field`, `rule`, and `message` keys."
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: webcheck_output
+    attributes:
+      label: hardmoney validate --oracle webcheck --json output (if run)
+      description: "If you ran `hardmoney validate <file> --oracle webcheck --json`, paste the `oracle` and `oracle_diff` keys (WebCheck's own report and the `matched` / `only_ours` / `only_theirs` lists). Leave blank if you did not; a FECfile or WebCheck screenshot, or the FEC's acceptance or rejection notice, is a fine substitute."
+      render: json
+  - type: textarea
+    id: expected
+    attributes:
+      label: What the FEC says (expected)
+      description: The message the FEC's validator gives, or the fact that the FEC accepted the filing with no such message.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What hardmoney says (actual)
+      description: The finding hardmoney reports (or fails to report), with the `rule` name.
+    validations:
+      required: true
+  - type: dropdown
+    id: direction
+    attributes:
+      label: Direction of the disagreement
+      options:
+        - hardmoney reports an error the FEC does not (false positive)
+        - hardmoney misses an error the FEC reports (false negative)
+        - same finding, different severity (error vs. warning)
+        - same finding, wrong line or field
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Spec version of the filing, the vendor that produced it, a link to the FEC message list entry, an attached `.fec` file, anything else.

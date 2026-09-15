@@ -2,15 +2,29 @@ name: Python
 
 # Builds and tests the `hardmoney` Python package (python/): a PyO3 +
 # maturin extension over the parser-only build of the parent crate.
-# Wheels are uploaded as workflow artifacts only; nothing is published
-# to PyPI from CI.
+#
+# On every push and pull request: lint, test on three operating systems,
+# build one abi3 wheel per platform and the sdist, upload them as workflow
+# artifacts.
+#
+# On a `v*` tag, additionally:
+#   * `attest` signs a build-provenance attestation for every wheel and the
+#     sdist (verify with `gh attestation verify <file> --repo cgorski/hardmoney`);
+#   * `publish` uploads to PyPI, but only when the repository variable
+#     PYPI_PUBLISH is `true` and the secret PYPI_API_TOKEN is set. Until the
+#     maintainer sets both, the job is skipped and nothing leaves GitHub.
+#     See book/src/security-and-provenance.md ("How releases are cut").
 
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -46,9 +60,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         # The oldest interpreter the abi3-py39 wheel supports and a current one.
         python: ["3.9", "3.13"]
+    defaults:
+      run:
+        shell: bash
+        working-directory: python
+    env:
+      # `python -m venv` puts the interpreter under bin/ on POSIX and
+      # Scripts/ on Windows.
+      VENV_BIN: ${{ matrix.os == 'windows-latest' && '.venv/Scripts' || '.venv/bin' }}
+      VIRTUAL_ENV: ${{ github.workspace }}/python/.venv
+      # The Windows console code page is not UTF-8; the tests run the
+      # example scripts as subprocesses and compare their stdout, some of
+      # which carries non-ASCII contributor names from real filings.
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -61,29 +88,34 @@ jobs:
       - name: Create venv and install build/test tools
         run: |
           python -m venv .venv
-          .venv/bin/python -m pip install --upgrade pip maturin pytest
-        working-directory: python
+          "$VENV_BIN/python" -m pip install --upgrade pip maturin pytest
       - name: Build and install the extension into the venv
-        run: .venv/bin/maturin develop --release
-        working-directory: python
-        env:
-          VIRTUAL_ENV: ${{ github.workspace }}/python/.venv
+        run: '"$VENV_BIN/maturin" develop --release'
       - name: pytest (real fixtures from tests/fixtures/)
-        run: .venv/bin/python -m pytest -q
-        working-directory: python
+        run: '"$VENV_BIN/python" -m pytest -q'
 
   wheels:
-    name: build wheel (${{ matrix.os }})
+    name: build wheel (${{ matrix.os }}, ${{ matrix.target }})
     needs: [lint, test]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        # One abi3 wheel per platform the PyPI page promises (Linux x86_64
+        # and aarch64, macOS Intel and Apple silicon) plus Windows x86_64.
+        # Every leg builds on native hardware so the smoke test below runs
+        # the wheel it just built.
         include:
           - os: ubuntu-latest
             target: x86_64
+          - os: ubuntu-24.04-arm
+            target: aarch64
           - os: macos-latest
             target: aarch64
+          - os: macos-15-intel
+            target: x86_64
+          - os: windows-latest
+            target: x86_64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -96,17 +128,23 @@ jobs:
           target: ${{ matrix.target }}
           # manylinux: the parent crate is a path dependency (`..`), which
           # the container sees because the whole checkout is mounted.
+          # Ignored on macOS and Windows, which build on the host.
           manylinux: auto
-          args: --release --out dist
+          # --locked: the wheel is built from python/Cargo.lock exactly, so
+          # the SBOM in the supply-chain workflow describes these bytes.
+          args: --release --locked --out dist
           sccache: "true"
       - name: Smoke-test the wheel
         shell: bash
+        env:
+          PYTHONUTF8: "1"
         run: |
           python -m venv smoke
-          smoke/bin/python -m pip install --upgrade pip pytest
-          smoke/bin/python -m pip install dist/*.whl
-          smoke/bin/python -c "import hardmoney; print(hardmoney.__version__, hardmoney.BUNDLED_SPEC_VERSION, len(hardmoney.tables()))"
-          smoke/bin/python -m pytest -q tests
+          if [ -x smoke/bin/python ]; then bin=smoke/bin; else bin=smoke/Scripts; fi
+          "$bin/python" -m pip install --upgrade pip pytest
+          "$bin/python" -m pip install dist/*.whl
+          "$bin/python" -c "import hardmoney; print(hardmoney.__version__, hardmoney.BUNDLED_SPEC_VERSION, len(hardmoney.tables()))"
+          "$bin/python" -m pytest -q tests
         working-directory: python
       - uses: actions/upload-artifact@v4
         with:
@@ -130,3 +168,82 @@ jobs:
           name: sdist
           path: python/dist/*.tar.gz
           if-no-files-found: error
+
+  # SLSA-style build provenance: a Sigstore-signed statement, stored by
+  # GitHub, that each file below was produced by this workflow at this
+  # commit. Anyone can check a downloaded wheel with
+  #   gh attestation verify hardmoney-*.whl --repo cgorski/hardmoney
+  attest:
+    name: build provenance attestations
+    needs: [wheels, sdist]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      attestations: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+      - run: ls -l dist
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/*
+
+  # Publishes to PyPI on a `v*` tag, gated twice:
+  #   * the repository variable PYPI_PUBLISH must be exactly `true`
+  #     (Settings > Secrets and variables > Actions > Variables), else the
+  #     job is skipped;
+  #   * the secret PYPI_API_TOKEN must hold a PyPI API token scoped to the
+  #     `hardmoney` project, else the first step fails with a clear message
+  #     before anything is uploaded.
+  # Wheels and the sdist are the exact files attested above.
+  publish:
+    name: publish to PyPI
+    needs: [attest]
+    if: startsWith(github.ref, 'refs/tags/v') && vars.PYPI_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - name: Check that PYPI_API_TOKEN is set
+        env:
+          TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::PYPI_PUBLISH is 'true' but the secret PYPI_API_TOKEN is empty; nothing was uploaded. Add the token (or set PYPI_PUBLISH to 'false')."
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+      - name: Check that the tag matches python/pyproject.toml
+        run: |
+          set -euo pipefail
+          declared="$(grep -m1 '^version = ' python/pyproject.toml | sed -E 's/version = "([^"]+)"/\1/')"
+          tag="${GITHUB_REF_NAME#v}"
+          echo "pyproject.toml: $declared  tag: $tag"
+          test "$declared" = "$tag"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+      - run: ls -l dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: dist
+          print-hash: true
+          # PEP 740 attestations need Trusted Publishing (OIDC), not a
+          # token. Switching to it is the documented next step; the GitHub
+          # build-provenance attestations above cover the same files.
+          attestations: false

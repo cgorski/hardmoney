@@ -47,9 +47,251 @@ fn ymd(y: i32, m: u32, d: u32) -> NaiveDate {
 mod openfec {
     use super::*;
     use hardmoney::fec::openfec::{
-        ApiKey, EfileQuery, EfileRecord, FilingRecord, FilingsQuery, OpenFec, Page,
+        ApiKey, EfileQuery, EfileRecord, FilingRecord, FilingsQuery, OpenFec, OperationsLogQuery,
+        OperationsLogRecord, Page, ProcessingStage, ProcessingStatus,
     };
     use rust_decimal_macros::dec;
+
+    /// A one-shot local HTTP server that answers each request from a
+    /// table of `(path prefix, JSON body)` pairs, 404 otherwise, for
+    /// `connections` connections. Returns the request lines it saw.
+    fn serve_fixtures(
+        routes: Vec<(&'static str, String)>,
+        connections: usize,
+    ) -> (std::net::SocketAddr, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for _ in 0..connections {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = vec![0u8; 16384];
+                let n = stream.read(&mut buf).unwrap();
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                let line = request.lines().next().unwrap_or("").to_string();
+                let path = line.split(' ').nth(1).unwrap_or("");
+                let (status, body) = match routes.iter().find(|(p, _)| path.starts_with(p)) {
+                    Some((_, body)) => ("200 OK", body.clone()),
+                    None => ("404 Not Found", "{\"message\":\"no route\"}".to_string()),
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+                seen.push(line);
+            }
+            seen
+        });
+        (addr, handle)
+    }
+
+    #[test]
+    fn decodes_the_operations_log() {
+        let page: Page<OperationsLogRecord> =
+            serde_json::from_str(&fixture("operations_log_c00140855_2026.json")).unwrap();
+        assert_eq!(page.pagination.count, 8);
+        assert_eq!(page.results.len(), 8);
+        // The September monthly, received 2026-09-14: summary loaded the
+        // same day, transactions still pending when captured.
+        let m9 = page
+            .results
+            .iter()
+            .find(|r| r.report_type.as_deref() == Some("M9"))
+            .unwrap();
+        assert_eq!(m9.sub_id, Some(4091420261598294066));
+        assert_eq!(m9.candidate_committee_id.as_deref(), Some("C00140855"));
+        assert_eq!(m9.form_type.as_deref(), Some("F3X"));
+        assert_eq!(m9.report_year, Some(2026));
+        assert_eq!(m9.amendment_indicator.as_deref(), Some("N"));
+        assert_eq!(
+            m9.beginning_image_number.as_deref(),
+            Some("202609149904202705")
+        );
+        assert_eq!(m9.receipt_date.unwrap().date(), ymd(2026, 9, 14));
+        assert_eq!(m9.coverage_start_date, Some(ymd(2026, 8, 1)));
+        assert_eq!(m9.coverage_end_date, Some(ymd(2026, 8, 31)));
+        assert_eq!(m9.status_num, Some(1));
+        assert_eq!(
+            m9.summary_data_complete_date.unwrap().date(),
+            ymd(2026, 9, 14)
+        );
+        assert_eq!(m9.transaction_data_complete_date, None);
+        // The August monthly took 14 days to the transaction load.
+        let m8 = page
+            .results
+            .iter()
+            .find(|r| r.report_type.as_deref() == Some("M8"))
+            .unwrap();
+        assert_eq!(m8.receipt_date.unwrap().date(), ymd(2026, 8, 17));
+        assert_eq!(m8.transaction_data_complete_date, Some(ymd(2026, 8, 31)));
+    }
+
+    #[test]
+    fn operations_log_and_batch_queries_encode_their_filters() {
+        let q = OperationsLogQuery::new()
+            .committee_id("C00140855")
+            .report_year(2026)
+            .form_type("F3X")
+            .beginning_image_numbers(["1", "2"])
+            .per_page(100);
+        assert_eq!(
+            q.query_string().unwrap(),
+            "candidate_committee_id=C00140855&form_type=F3X&report_year=2026\
+             &beginning_image_number=1&beginning_image_number=2&per_page=100&page=1"
+        );
+        assert!(
+            OperationsLogQuery::new()
+                .per_page(0)
+                .query_string()
+                .is_err()
+        );
+        assert_eq!(
+            FilingsQuery::new()
+                .file_numbers([3, 4])
+                .file_number(5)
+                .sort(None::<String>)
+                .query_string()
+                .unwrap(),
+            "file_number=3&file_number=4&file_number=5&per_page=100&page=1"
+        );
+        assert_eq!(
+            EfileQuery::new()
+                .file_number(1)
+                .file_numbers([2])
+                .sort(None::<String>)
+                .query_string()
+                .unwrap(),
+            "file_number=1&file_number=2&per_page=100&page=1"
+        );
+    }
+
+    /// `processing_status` joins the three endpoints on file number and
+    /// image number: served from the captured responses for FirstEnergy
+    /// PAC's August and September 2026 monthlies, plus an id nobody knows.
+    #[test]
+    fn processing_status_joins_efile_filings_and_the_operations_log() {
+        let (addr, handle) = serve_fixtures(
+            vec![
+                (
+                    "/v1/efile/filings/",
+                    fixture("efile_filings_by_file_number.json"),
+                ),
+                ("/v1/filings/", fixture("filings_by_file_number.json")),
+                (
+                    "/v1/operations-log/",
+                    fixture("operations_log_c00140855_2026.json"),
+                ),
+            ],
+            3,
+        );
+        let client =
+            OpenFec::new(ApiKey::new("K").unwrap()).with_base_url(format!("http://{addr}/v1/"));
+        let statuses = client
+            .processing_status(&[2011831, 2006786, 999_999_999])
+            .unwrap();
+        let seen = handle.join().unwrap();
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        assert!(seen[0].starts_with("GET /v1/efile/filings/?api_key=K&file_number=2011831&file_number=2006786&file_number=999999999"), "{}", seen[0]);
+        assert!(
+            seen[1].starts_with("GET /v1/filings/?api_key=K&file_number=2011831"),
+            "{}",
+            seen[1]
+        );
+        assert!(
+            seen[2].contains("beginning_image_number=202609149904202705")
+                && seen[2].contains("beginning_image_number=202608179899532184"),
+            "{}",
+            seen[2]
+        );
+        assert_eq!(statuses.len(), 3);
+
+        let m9: &ProcessingStatus = &statuses[0];
+        assert_eq!(m9.filing_id, 2011831);
+        assert!(m9.in_efile && m9.in_filings && m9.in_operations_log);
+        assert_eq!(m9.committee_id.as_deref(), Some("C00140855"));
+        assert_eq!(m9.report_type.as_deref(), Some("M9"));
+        assert_eq!(m9.sub_id.as_deref(), Some("4091420261598294066"));
+        assert_eq!(m9.cycle, Some(2026));
+        // The efile timestamp wins over /filings/' midnight date.
+        assert_eq!(m9.received.unwrap().to_string(), "2026-09-14 15:50:19");
+        assert_eq!(
+            m9.fec_url.as_deref(),
+            Some("https://docquery.fec.gov/dcdev/posted/2011831.fec")
+        );
+        assert_eq!(m9.summary_lag_days(), Some(0));
+        assert_eq!(m9.transaction_lag_days(), None);
+        assert_eq!(m9.stage(), ProcessingStage::SummaryLoaded);
+        assert_eq!(m9.days_pending(ymd(2026, 9, 15)), Some(1));
+        assert_eq!(m9.days_pending(ymd(2026, 9, 14)), Some(0));
+
+        let m8 = &statuses[1];
+        assert_eq!(m8.filing_id, 2006786);
+        assert_eq!(m8.received.unwrap().to_string(), "2026-08-17 11:43:42");
+        assert_eq!(m8.summary_data_complete.unwrap().date(), ymd(2026, 8, 17));
+        assert_eq!(m8.transaction_data_complete, Some(ymd(2026, 8, 31)));
+        assert_eq!(m8.summary_lag_days(), Some(0));
+        assert_eq!(m8.transaction_lag_days(), Some(14));
+        assert_eq!(m8.stage(), ProcessingStage::TransactionsLoaded);
+        assert_eq!(m8.days_pending(ymd(2026, 9, 15)), None);
+        assert_eq!(
+            m8.ending_image_number.as_deref(),
+            Some("202608179899532234")
+        );
+
+        let unknown = &statuses[2];
+        assert_eq!(unknown.filing_id, 999_999_999);
+        assert!(!unknown.in_efile && !unknown.in_filings && !unknown.in_operations_log);
+        assert_eq!(unknown.stage(), ProcessingStage::Unknown);
+        assert_eq!(unknown.received, None);
+        assert_eq!(unknown.summary_lag_days(), None);
+        assert_eq!(unknown.days_pending(ymd(2026, 9, 15)), None);
+
+        // The status serialises for the API route and `lag --json`.
+        let v: serde_json::Value = serde_json::to_value(m8).unwrap();
+        assert_eq!(v["transaction_data_complete"], "2026-08-31");
+        assert_eq!(v["in_filings"], true);
+    }
+
+    /// `resolve_fec_url` takes the efile URL when there is one and only
+    /// then asks `/filings/`.
+    #[test]
+    fn resolve_fec_url_prefers_the_efile_record() {
+        let (addr, handle) = serve_fixtures(
+            vec![(
+                "/v1/efile/filings/",
+                fixture("efile_filings_by_file_number.json"),
+            )],
+            1,
+        );
+        let client =
+            OpenFec::new(ApiKey::new("K").unwrap()).with_base_url(format!("http://{addr}/v1/"));
+        let url = client.resolve_fec_url(2011831).unwrap();
+        handle.join().unwrap();
+        // The fixture holds two records; the first with a URL is taken.
+        assert!(
+            url.as_deref()
+                .is_some_and(|u| u.starts_with("https://docquery.fec.gov/dcdev/posted/")),
+            "{url:?}"
+        );
+
+        // Nothing in efile, nothing in filings: None, after two requests.
+        let empty = r#"{"results":[],"pagination":{"page":1,"pages":1,"count":0}}"#.to_string();
+        let (addr, handle) = serve_fixtures(
+            vec![
+                ("/v1/efile/filings/", empty.clone()),
+                ("/v1/filings/", empty),
+            ],
+            2,
+        );
+        let client =
+            OpenFec::new(ApiKey::new("K").unwrap()).with_base_url(format!("http://{addr}/v1/"));
+        assert_eq!(client.resolve_fec_url(7).unwrap(), None);
+        assert_eq!(handle.join().unwrap().len(), 2);
+    }
 
     #[test]
     fn decodes_an_amendment_chain_page() {
@@ -559,6 +801,51 @@ mod openfec {
         let mut expected: Vec<i64> = page.results.iter().filter_map(|r| r.file_number).collect();
         expected.sort_unstable();
         assert_eq!(ids, expected);
+    }
+
+    /// FirstEnergy PAC's August 2026 monthly (2006786) was fully processed
+    /// on 2026-08-31, 14 days after receipt; those dates do not change.
+    /// Also checks the live `fec_url` resolution and the docquery fallback
+    /// in `hardmoney::fec::resolve_fec_url`.
+    #[test]
+    #[ignore = "network: HARDMONEY_NETWORK_TESTS=1 plus an API key"]
+    fn network_processing_status_of_a_settled_filing() {
+        if !network_tests_enabled() {
+            return;
+        }
+        let api = OpenFec::from_env().expect("API key in FEC_API_KEY or ~/fec_api_key.txt");
+        let statuses = api.processing_status(&[2006786]).unwrap();
+        let s = &statuses[0];
+        assert!(s.in_efile && s.in_filings && s.in_operations_log, "{s:?}");
+        assert_eq!(s.committee_id.as_deref(), Some("C00140855"));
+        assert_eq!(s.received.unwrap().date(), ymd(2026, 8, 17));
+        assert_eq!(s.summary_lag_days(), Some(0));
+        assert_eq!(s.transaction_lag_days(), Some(14));
+        assert_eq!(s.stage(), ProcessingStage::TransactionsLoaded);
+
+        let url = api.resolve_fec_url(2006786).unwrap();
+        assert_eq!(
+            url.as_deref(),
+            Some("https://docquery.fec.gov/dcdev/posted/2006786.fec")
+        );
+        assert_eq!(
+            hardmoney::fec::resolve_fec_url(2006786).unwrap(),
+            "https://docquery.fec.gov/dcdev/posted/2006786.fec"
+        );
+        // An id no endpoint knows resolves to the template.
+        assert_eq!(
+            hardmoney::fec::resolve_fec_url(999_999_999).unwrap(),
+            hardmoney::fec::docquery_url(999_999_999)
+        );
+
+        // A committee's whole cycle in a handful of requests.
+        let all = api
+            .committee_processing_status("C00140855", 2026, Some("F3X"))
+            .unwrap();
+        assert!(all.len() >= 8, "{}", all.len());
+        assert!(all.iter().all(|s| s.in_filings));
+        let m8 = all.iter().find(|s| s.filing_id == 2006786).unwrap();
+        assert_eq!(m8.transaction_data_complete, Some(ymd(2026, 8, 31)));
     }
 }
 

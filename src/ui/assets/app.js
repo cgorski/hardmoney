@@ -23,26 +23,50 @@ function currentTheme() {
 function applyTheme(theme, persist) {
   document.documentElement.dataset.theme = theme;
   if (persist) localStorage.setItem(THEME_STORAGE, theme);
-  const btn = document.getElementById('theme-toggle');
-  const dark = theme === 'dark';
-  btn.textContent = dark ? 'Light theme' : 'Dark theme';
-  btn.setAttribute('aria-pressed', String(dark));
+  // A toggle button keeps one label ("Dark theme") and reports its state
+  // through aria-pressed; changing the label with the state would make
+  // "pressed" ambiguous to a screen reader.
+  document.getElementById('theme-toggle').setAttribute('aria-pressed', String(theme === 'dark'));
 }
 
 // ---------------------------------------------------------------------------
 // Toasts
 // ---------------------------------------------------------------------------
 
-/** Shows a message. kind: 'error' | 'ok' | 'info'. Errors stay until dismissed. */
+const TOAST_MS = 6000;
+
+/**
+ * Speaks `message` through the persistent live region for its urgency.
+ * The region is emptied first so an identical message is announced again.
+ */
+export function announce(message, assertive = false) {
+  const region = document.getElementById(assertive ? 'announce-alert' : 'announce-status');
+  region.textContent = '';
+  setTimeout(() => { region.textContent = message; }, 50);
+}
+
+/**
+ * Shows a message. kind: 'error' | 'ok' | 'info'. Errors stay until
+ * dismissed; others go after a few seconds, but not while hovered or
+ * focused, and the same text is announced through a live region.
+ */
 export function toast(message, kind = 'info') {
   const host = document.getElementById('toasts');
   const el = document.createElement('div');
   el.className = `toast toast-${kind}`;
-  el.setAttribute('role', kind === 'error' ? 'alert' : 'status');
-  el.innerHTML = `<div class="msg">${escapeHtml(message)}</div><button type="button" class="btn btn-small" aria-label="Dismiss">×</button>`;
+  el.innerHTML = `<div class="msg">${escapeHtml(message)}</div><button type="button" class="btn btn-small" aria-label="Dismiss notification"><span aria-hidden="true">×</span></button>`;
   el.querySelector('button').addEventListener('click', () => el.remove());
   host.appendChild(el);
-  if (kind !== 'error') setTimeout(() => el.remove(), 6000);
+  announce(message, kind === 'error');
+  if (kind !== 'error') {
+    let timer = setTimeout(() => el.remove(), TOAST_MS);
+    const hold = () => clearTimeout(timer);
+    const release = () => { clearTimeout(timer); timer = setTimeout(() => el.remove(), TOAST_MS); };
+    el.addEventListener('mouseenter', hold);
+    el.addEventListener('focusin', hold);
+    el.addEventListener('mouseleave', release);
+    el.addEventListener('focusout', release);
+  }
   while (host.children.length > 6) host.firstElementChild.remove();
 }
 
@@ -86,9 +110,21 @@ export function promptApiKey() {
 // ---------------------------------------------------------------------------
 
 const tip = () => document.getElementById('tooltip');
+let tooltipAnchor = null;
+let tooltipHideTimer = null;
 
+/**
+ * Shows the field-spec tooltip under `anchor` and links it with
+ * aria-describedby. WCAG 1.4.13: it stays while the pointer is over it
+ * (see the listeners in `boot`) and Escape hides it (the anchor's owner
+ * calls `hideTooltip` on Escape).
+ */
 export function showTooltip(html, anchor) {
+  clearTimeout(tooltipHideTimer);
   const t = tip();
+  if (tooltipAnchor && tooltipAnchor !== anchor) tooltipAnchor.removeAttribute('aria-describedby');
+  tooltipAnchor = anchor;
+  anchor.setAttribute('aria-describedby', t.id);
   t.innerHTML = html;
   t.hidden = false;
   const r = anchor.getBoundingClientRect();
@@ -104,7 +140,16 @@ export function showTooltip(html, anchor) {
 }
 
 export function hideTooltip() {
+  clearTimeout(tooltipHideTimer);
   tip().hidden = true;
+  if (tooltipAnchor) tooltipAnchor.removeAttribute('aria-describedby');
+  tooltipAnchor = null;
+}
+
+/** Hides the tooltip shortly, unless the pointer reaches it first. */
+export function hideTooltipSoon() {
+  clearTimeout(tooltipHideTimer);
+  tooltipHideTimer = setTimeout(hideTooltip, 150);
 }
 
 // ---------------------------------------------------------------------------
@@ -128,6 +173,25 @@ export function navigate(path, { replace = false } = {}) {
 }
 
 let current = null;
+let booted = false;
+
+const SITE = 'hardmoney';
+
+/** Sets the document title for the current view (WCAG 2.4.2). */
+export function setTitle(view) {
+  document.title = view ? `${view} · ${SITE}` : SITE;
+}
+
+/**
+ * Moves focus to the view's heading after a client-side navigation or a
+ * change of view, so keyboard and screen-reader users land on the new
+ * content instead of on the document body.
+ */
+export function focusHeading(root = document.getElementById('main')) {
+  const h = root.querySelector('h1') || root;
+  if (!h.hasAttribute('tabindex')) h.setAttribute('tabindex', '-1');
+  h.focus({ preventScroll: false });
+}
 
 function render() {
   const main = document.getElementById('main');
@@ -137,17 +201,21 @@ function render() {
     if (a.dataset.nav === section) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   }
+  const helpers = { toast, reportError, navigate, setTitle, focusHeading, showTooltip, hideTooltip, hideTooltipSoon };
   if (section === 'data') {
     current = 'data';
-    renderData(main, path.split('/').slice(1), { toast, reportError, navigate });
+    renderData(main, path.split('/').slice(1), helpers);
   } else {
     // The workbench keeps its document across renders so a back/forward
     // does not lose a loaded filing.
     if (current !== 'workbench') {
-      renderWorkbench(main, { toast, reportError, showTooltip, hideTooltip });
+      renderWorkbench(main, helpers);
     }
     current = 'workbench';
   }
+  // On the first paint the browser's own focus handling is right; after a
+  // navigation inside the app nothing else moves focus, so we do.
+  if (booted) focusHeading(main);
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +234,13 @@ function boot() {
   document.getElementById('api-key-button').addEventListener('click', () => {
     promptApiKey().then((saved) => { if (saved) toast('API key saved for this tab.', 'ok'); });
   });
+
+  // The tooltip must be hoverable (1.4.13): leaving the anchor only
+  // schedules the hide, and entering the tooltip cancels it.
+  const t = tip();
+  t.addEventListener('mouseenter', () => clearTimeout(tooltipHideTimer));
+  t.addEventListener('mouseleave', hideTooltip);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !t.hidden) hideTooltip(); });
   onUnauthorized(async () => {
     toast('The server requires an API key.', 'info');
     return promptApiKey();
@@ -187,6 +262,7 @@ function boot() {
   window.addEventListener('popstate', render);
   document.addEventListener('scroll', hideTooltip, true);
   render();
+  booted = true;
 }
 
 boot();

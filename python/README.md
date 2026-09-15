@@ -17,8 +17,8 @@ so the parser, writer, validator, and reconciler are the same code the
 pip install hardmoney
 ```
 
-Wheels are published for Linux (x86_64, aarch64) and macOS (x86_64 and
-Apple silicon) for CPython 3.9 and newer; one `abi3` wheel per platform
+Wheels are published for Linux (x86_64, aarch64), macOS (x86_64 and
+Apple silicon), and Windows (x86_64) for CPython 3.9 and newer; one `abi3` wheel per platform
 works on every Python version. The package has no Python dependencies.
 On other platforms `pip` builds the source distribution, which needs a
 Rust toolchain.

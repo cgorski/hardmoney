@@ -1,0 +1,64 @@
+name: Reconcile disagreement
+description: hardmoney reconcile flags a cover-page line you believe is right, or passes one you believe is wrong.
+title: "reconcile: <form> line <n> on filing <id>"
+labels: ["reconcile", "fec-disagreement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        `hardmoney reconcile` recomputes each cover-page line of a Form 3X, 3, or 3P from the schedules and the other cover lines. The formulas are the FEC's (`F3X_RULES`, `F3_RULES`, `F3P_RULES` in `src/parser/reconcile.rs`, checked against FECfile+'s summary calculator). A line the FEC accepted that hardmoney flags, or the reverse, means a formula, a threshold rule, or a memo-handling rule is wrong somewhere, and this report is how we find out where.
+  - type: input
+    id: filing
+    attributes:
+      label: Filing id or file
+      description: The FEC filing id, or "attached" if you attached a `.fec` file below.
+      placeholder: "2011912"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: hardmoney version and how it was installed
+      placeholder: "3.0.1 (cargo install hardmoney)"
+    validations:
+      required: true
+  - type: input
+    id: line
+    attributes:
+      label: Cover-page line and column
+      description: In the FEC's notation, with the column (A = this period, B = year or cycle to date).
+      placeholder: "F3X line 11(c), column A"
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: hardmoney reconcile --json output
+      description: "Paste the output of `hardmoney reconcile <file> --json --all` (or `filing.reconcile()` from Python). Trim to the disputed lines if the file is large, keeping the `line`, `rule`, `reported`, `expected`, `delta`, and `lines_summed` keys. Mention any `--tolerance`, `--column`, or `--lenient` you used."
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you believe the line should be, and why
+      description: The FEC instruction, the FECfile+ or FECFile result, the RAD letter, or the arithmetic you did by hand.
+    validations:
+      required: true
+  - type: dropdown
+    id: direction
+    attributes:
+      label: Direction of the disagreement
+      options:
+        - hardmoney flags a line the FEC (or FECfile+) accepts as balanced
+        - hardmoney passes a line that does not balance
+        - the expected value is computed from the wrong schedule lines or memo entries
+        - the >= floor / $200 itemization threshold is applied wrongly
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Spec version, vendor, whether the report is an amendment, whether Column B depends on prior reports, an attached `.fec` file.

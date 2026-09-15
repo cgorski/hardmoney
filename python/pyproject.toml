@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "hardmoney"
-version = "3.0.1"
+version = "3.1.0"
 description = "Read, validate, reconcile, edit, and write FEC electronic filings (.fec) with exact decimal money. Every spec version since 2001; typed; no dependencies."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -54,9 +54,15 @@ Cookbook = "https://cgorski.github.io/hardmoney/python-cookbook.html"
 Source = "https://github.com/cgorski/hardmoney"
 Issues = "https://github.com/cgorski/hardmoney/issues"
 Changelog = "https://github.com/cgorski/hardmoney/blob/main/CHANGELOG.md"
+Security = "https://github.com/cgorski/hardmoney/blob/main/SECURITY.md"
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
+
+# The pytest plugin (`hardmoney.pytest_plugin`) is discovered by pytest
+# through this entry point wherever the package is installed.
+[project.entry-points.pytest11]
+hardmoney = "hardmoney.pytest_plugin"
 
 [tool.maturin]
 # The Rust cdylib is `hardmoney/_hardmoney.abi3.so`; the pure-Python

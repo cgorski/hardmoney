@@ -169,16 +169,152 @@ $ hardmoney spec fields F3X --version 8.5 | grep -E "col_a_total_receipts |col_a
 Every periodic report has two columns: A, this reporting period, and
 B, the calendar year to date (Form 3X) or election cycle to date
 (Forms 3 and 3P). Column A is checked completely, schedule sums and
-formulas. Column B is checked by formula only: its sums span every
-prior report in the year or cycle, which one file cannot see, so its
-schedule-sum lines are inputs and only the arithmetic among them is
-verified (`11(d) = 11(a)(iii) + 11(b) + 11(c)` must hold in Column B
-too). `--column a` / `--column b` restrict the output; the 69 checks
-above are 49 in Column A and 20 in Column B.
+formulas. From one file, Column B is checked by formula only: its sums
+span every prior report in the year or cycle, which one file cannot
+see, so its schedule-sum lines are inputs and only the arithmetic among
+them is verified (`11(d) = 11(a)(iii) + 11(b) + 11(c)` must hold in
+Column B too). `--column a` / `--column b` restrict the output; the 69
+checks above are 49 in Column A and 20 in Column B. Given the prior
+reports, the schedule sums are checked as well; see
+[Column B and prior reports](#column-b-and-prior-reports).
 
 Lines a filing's spec version does not carry are omitted rather than
 reported as blank: a 2001 filing at spec 3.00 has no line 17(a)(i), so
 there is no check for it.
+
+## Column B and prior reports
+
+One file cannot check its own Column B schedule lines, but the
+committee's earlier reports can. The Form 3X instructions tell a filer
+how Column B is built: "add the Calendar Year-to-Date total from the
+previous report to the Total This Period from Column A for the current
+report. For the first report filed for a calendar year, the Calendar
+Year-to-Date figure is equal to the Total This Period figure." Form 3
+and Form 3P say the same with "election cycle-to-date" in place of the
+calendar year. So Column B on a schedule-backed line is the sum of that
+line's schedule over every report of the period, and hardmoney checks
+it that way when it has the reports:
+
+```text
+$ hardmoney reconcile tests/fixtures/chain/F3XA_2011898.fec \
+    --with-prior tests/fixtures/chain/F3XN_1948502.fec tests/fixtures/chain/F3XA_2011895.fec tests/fixtures/chain/F3XN_1943038.fec \
+    --all --column b | tail -4
+ok   col B line 30(a)(ii)  reported            0.00 expected               0 delta            0  = sum of H6.levin_share on H6 over 3 report(s), year to date
+ok   col B line 30(b)      reported            0.00 expected               0 delta            0  >= sum of SchB.expenditure_amount on SB30B over 3 report(s), year to date
+ok   col B line 6(a)       reported        97188.87 expected        97188.87 delta         0.00  = 8 of the prior report (2025-07-01..2025-12-31)
+F3X C00001313: 0 of 48 line(s) disagree (tolerance 0); chain of 4 report(s), 3 summed (year to date)
+```
+
+That is the Republican Party of Minnesota's March 2026 monthly behind
+its January and February reports and the 2025 year-end
+(`tests/fixtures/chain/`, with a README of provenance). `--with-prior`
+takes the earlier reports in any order and adds two kinds of check to
+the usual list:
+
+* **Column B schedule sums.** For every Column A line that is a schedule
+  sum, the current report's Column B value is compared with the sum of
+  that schedule over every report in the period, with the same
+  `Relation` (a floor stays a floor). The rule text says how many
+  reports were summed, and `LineCheck.reports_summed` carries the
+  number. The period is the calendar year for Form 3X and the election
+  cycle for Forms 3 and 3P (`PeriodBasis::YearToDate` /
+  `CycleToDate`). On a year-to-date form only prior reports whose
+  coverage ends in the year the current report begins in are summed,
+  which is the rule FECfile+'s `calculate_summary_column_b` applies
+  when it sums transactions by calendar year.
+* **Cash on hand carried forward.** The current report's cash on hand at
+  the beginning of the period (6(b) on Form 3X, 23 on Form 3, 6 on Form
+  3P) must equal the immediately prior report's cash on hand at close
+  (8, 27, 10). On Form 3X, 6(a), cash on hand on January 1, must equal
+  the close of the last report of the prior year when the chain has one;
+  otherwise it stays an input. Both are `=` checks, and both reproduce
+  FECfile+'s `calculate_cash_on_hand_fields`, whose "previous report" is
+  the one with the latest coverage end before this one.
+
+The chain is checked before anything is summed: every prior report must
+be on the same form, from the same filer, and cover a period that ends
+before the current one begins and overlaps no other. An original and
+its amendment overlap, so give only the most recent version of each
+report (`hardmoney filings --most-recent` returns exactly that set). A
+chain need not be complete, but Column B is only meaningful when it is;
+when days between January 1 (or, on a cycle form, the first report
+given) and the current report are covered by no report, the command
+says so on stderr and the sums are short by that period:
+
+```text
+$ hardmoney reconcile tests/fixtures/rad/F3XA_2011912.fec --with-prior tests/fixtures/chain/F3XN_1948502.fec tests/fixtures/chain/F3XA_2011895.fec tests/fixtures/chain/F3XA_2011898.fec
+warning: no report in the chain covers 2026-04-01..2026-04-30; Column B sums are short by that period's activity
+DIFF col A line 11(c)      reported         2045.00 expected         1845.00 delta       200.00  = sum of SchA.contribution_amount on SA11C
+...
+DIFF col A line 6(b)       reported       356282.76 expected       104824.86 delta    251457.90  = 8 of the prior report (2026-03-01..2026-03-31)
+```
+
+With April in the chain, that May report's Column B disagrees on one
+line only, 11(c), by the same $200 its Column A does. A Column A
+discrepancy in one report is a Column B discrepancy in every later
+report of the year, and the chain shows which report introduced it.
+
+`hardmoney filings --reconcile-chain` does this for a whole committee:
+it orders the reports openFEC returns by coverage period and checks each
+one against the reports before it, one line per report.
+
+```text
+$ hardmoney filings --committee C00001313 --form-type F3X --cycle 2026 --most-recent --reconcile-chain
+...
+file_number  report  coverage                column A          column B (chain)                      cash carried
+1879324      M2      2025-01-01..2025-01-31  balances (69)     balances (27), 1 report(s) summed     first report
+1882086      M3      2025-02-01..2025-02-28  balances (69)     balances (27), 2 report(s) summed     ok
+1897494      M4      2025-03-01..2025-03-31  balances (69)     balances (27), 3 report(s) summed     ok
+1945938      MY      2025-04-01..2025-06-30  2 of 69 disagree  2 of 27 disagree, 4 report(s) summed  ok
+1943038      YE      2025-07-01..2025-12-31  balances (69)     2 of 27 disagree, 5 report(s) summed  ok
+1948502      M2      2026-01-01..2026-01-31  balances (69)     balances (27), 1 report(s) summed     ok
+2011895      M3      2026-02-01..2026-02-28  balances (69)     balances (27), 2 report(s) summed     ok
+2011898      M4      2026-03-01..2026-03-31  balances (69)     balances (27), 3 report(s) summed     ok
+2011901      M5      2026-04-01..2026-04-30  balances (69)     balances (27), 4 report(s) summed     ok
+1986128      M6      2026-05-01..2026-05-31  1 of 69 disagree  1 of 27 disagree, 5 report(s) summed  ok
+2000792      M7      2026-06-01..2026-06-30  balances (69)     1 of 27 disagree, 6 report(s) summed  ok
+2009229      M8      2026-07-01..2026-07-31  balances (69)     1 of 27 disagree, 7 report(s) summed  ok
+```
+
+Two things carry through that table. The 2025 mid-year report's
+four-cent split between 21(a)(i) and 21(a)(ii) (the H4 federal and
+nonfederal shares, rounded in opposite directions; 21(c) still holds)
+is in the year-end's Column B. The May 2026 report's $200 on 11(c) is in
+June's and July's. Cash on hand carries forward across all twelve
+reports, including from the 2025 year-end into January's 6(b) and 6(a).
+A second chain, a national committee's seven 2026 monthlies
+(C00010603, about $10 million a month, 52 MB of filings), balanced on
+every Column B line and every carry-forward; the fixture set is the
+smaller one.
+
+From Rust the same thing is `ReportChain`:
+
+```rust
+use hardmoney::Filing;
+use hardmoney::parser::reconcile::{Column, PeriodBasis, ReportChain};
+
+let dir = "tests/fixtures/chain/";
+let jan = Filing::open(format!("{dir}F3XN_1948502.fec"))?;
+let feb = Filing::open(format!("{dir}F3XA_2011895.fec"))?;
+let mar = Filing::open(format!("{dir}F3XA_2011898.fec"))?;
+
+let chain = ReportChain::new(&mar, [&feb, &jan])?; // any order; checks form, filer, periods
+assert_eq!(chain.basis(), PeriodBasis::YearToDate);
+assert!(chain.gaps().is_empty());
+let r = chain.reconcile(); // column_b_checks() + carry_forward_checks()
+assert!(r.balances());
+let b = r.line(Column::B, "11(a)(i)").unwrap();
+println!("{}: {} lines over {} reports", b.line, b.lines_summed, b.reports_summed);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`ReportChain::new` returns a `ChainError` naming the offending report
+(`FormMismatch`, `FilerMismatch`, `NotBeforeCurrent`, `Overlap`,
+`PriorCoverageMissing`, ...). `period_reports()` is the list summed,
+`last_report_of_prior_year()` the report behind 6(a), and `gaps()` the
+uncovered days. The chain's `Reconciliation` holds only the chain
+checks; `Filing::reconcile` on the current report gives the rest, and
+the two never produce the same `(column, line)` twice.
 
 ## A filing that does not balance
 
@@ -225,6 +361,7 @@ $ hardmoney reconcile --json --lenient tmp/agent-misc/filings/2011912.fec
       "delta": "200.00",
       "relation": "equal",
       "lines_summed": 5,
+      "reports_summed": 1,
       "reported_unparseable": false
     }
   ]
@@ -233,7 +370,10 @@ error: 1 line(s) disagree
 ```
 
 With `--all`, `lines` holds every check. Amounts are strings, because
-they are `Decimal`s and JSON numbers are floats.
+they are `Decimal`s and JSON numbers are floats. With `--with-prior`
+the chain's checks join `lines` (their `reports_summed` is the number of
+reports summed) and a `chain` object gives `reports`, `reports_summed`,
+`basis`, and `gaps`.
 
 ## Tolerance
 
@@ -423,9 +563,11 @@ println!("8: {}", cash.rule);
 A `LineCheck` carries `line`, `field`, `column`, `rule` (the text shown
 above), `reported: Option<Decimal>` (`None` if the cover field is blank,
 counted as zero in `delta`), `expected`, `delta`, `relation`,
-`lines_summed` (how many body lines contributed to a schedule sum), and
-`reported_unparseable` (true if the cover field held something that is
-not an amount). `matches()` and `violation()` apply the relation.
+`lines_summed` (how many body lines contributed to a schedule sum),
+`reports_summed` (how many filings were read: 1 here, more for a
+`ReportChain` Column B sum), and `reported_unparseable` (true if the
+cover field held something that is not an amount). `matches()` and
+`violation()` apply the relation.
 `Reconciliation` has `mismatches()`, `mismatches_over(tolerance)`,
 `balances()`, `column(Column)`, and `line(Column, label)`; both types
 implement `Display` (the CLI's text output) and, with the `serde`

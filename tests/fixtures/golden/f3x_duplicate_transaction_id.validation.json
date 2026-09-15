@@ -1,0 +1,22 @@
+{
+  "file": "f3x_duplicate_transaction_id.fec",
+  "form_type": "F3XN",
+  "version": "8.5",
+  "line_count": 38,
+  "acceptable": false,
+  "errors": 1,
+  "warnings": 0,
+  "findings_by_rule": {
+    "duplicate_transaction_id": 1
+  },
+  "findings": [
+    {
+      "severity": "error",
+      "rule": "duplicate_transaction_id",
+      "line_no": 4,
+      "form_type": "SA11B",
+      "field": "transaction_id",
+      "message": "Tran ID SA11AI.1 is NOT UNIQUE - This one is same as other(s) (first used on line 3)"
+    }
+  ]
+}

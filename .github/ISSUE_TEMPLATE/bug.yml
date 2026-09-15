@@ -1,0 +1,70 @@
+name: Bug report
+description: A crash, a wrong result, or a parse failure that is not a validator or reconcile disagreement.
+title: "<component>: <one-line summary>"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a disagreement with the FEC's validator use the "Validator disagreement" template; for a cover-page total use "Reconcile disagreement". Anything else (a panic, a parse error on a real filing, a wrong field value, a broken export, an ETL or API problem) goes here.
+
+        A panic anywhere in the library on any input is a bug by definition (CONTRIBUTING.md rule 1); please report it even if the input was garbage.
+
+        Security problems: do not open an issue. Follow SECURITY.md.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - parser (Filing::parse, parse_file, streaming)
+        - writer (to_fec, round-trip)
+        - export (CSV, JSON Lines, Parquet, SQLite)
+        - Python package
+        - CLI
+        - bulk ETL / Postgres / dumps
+        - REST API / web UI
+        - discovery (openFEC, e-file feed)
+        - spec data / build.rs
+        - documentation
+        - other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: hardmoney version and how it was installed
+      placeholder: "3.0.1 (pip install hardmoney / cargo install hardmoney / git main at <sha>)"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system, and Python or Rust version
+      placeholder: "Windows 11, Python 3.12 / Ubuntu 24.04, rustc 1.94"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The command or code, and the filing id (or attached `.fec` file, or a minimal one you built) it runs on. Postgres version too, for ETL or API problems.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual
+      description: The full output, including any panic message and backtrace (`RUST_BACKTRACE=1`) or Python traceback.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context

@@ -1,0 +1,105 @@
+# cargo-deny configuration (https://embarkstudios.github.io/cargo-deny/).
+#
+# Run locally with `cargo deny check` (main crate) and
+# `cargo deny --manifest-path python/Cargo.toml --config deny.toml check`
+# (the Python extension crate, which has its own Cargo.lock). CI runs both
+# in .github/workflows/supply-chain.yml on every push, pull request, and
+# weekly, so a new advisory against a pinned dependency shows up as a red
+# build within a week of publication rather than at the next release.
+
+[graph]
+# Check the dependency set of every feature, including the optional
+# Postgres, Axum, and Parquet stacks the parser-only build leaves out.
+all-features = true
+
+[output]
+feature-depth = 1
+
+# ---------------------------------------------------------------------------
+# Advisories: the RustSec database. Every advisory (vulnerability, unsound,
+# unmaintained, notice) is an error unless listed in `ignore` with a reason.
+# Yanked crates are errors too.
+# ---------------------------------------------------------------------------
+[advisories]
+version = 2
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+ignore = [
+  # { id = "RUSTSEC-0000-0000", reason = "..." },
+]
+
+# ---------------------------------------------------------------------------
+# Licenses: permissive only. hardmoney itself is Apache-2.0 OR BSD-3-Clause
+# and its FEC inputs are public domain; nothing in the tree may impose
+# copyleft or attribution terms beyond those below.
+# ---------------------------------------------------------------------------
+[licenses]
+version = 2
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+]
+# How sure cargo-deny must be that a LICENSE file matches an SPDX text
+# before accepting it, for the few crates that declare no `license` field.
+confidence-threshold = 0.8
+
+# Crate-scoped exceptions. Each names the one crate that needs it so a new
+# dependency under the same license is still flagged for review.
+
+# `tiny-keccak` (a SHA-3 implementation reached through `const-random` ->
+# `ahash`, itself a transitive dependency of `arrow`/`parquet` and `sqlx`)
+# is dedicated to the public domain under CC0-1.0. CC0 is a public-domain
+# dedication with a permissive fallback licence; it imposes no obligations.
+[[licenses.exceptions]]
+name = "tiny-keccak"
+allow = ["CC0-1.0"]
+
+# `webpki-roots` (Mozilla's CA certificate bundle, used by rustls for TLS
+# to fec.gov) is data, not code, and carries the Community Data License
+# Agreement - Permissive 2.0, which permits use and redistribution with no
+# obligation on the software that embeds it.
+[[licenses.exceptions]]
+name = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
+
+# `target-lexicon` is a build-time dependency of `pyo3-build-config` in the
+# Python extension crate (python/Cargo.toml) only; nothing from it is in
+# the wheel. The LLVM exception to Apache-2.0 waives the section-4
+# notice requirement for compiled output and adds no obligation.
+[[licenses.exceptions]]
+name = "target-lexicon"
+allow = ["Apache-2.0 WITH LLVM-exception"]
+
+# ---------------------------------------------------------------------------
+# Bans. Duplicate versions of one crate are common in a tree this size
+# (arrow, sqlx, axum, and clap pull different `windows-sys`, `hashbrown`,
+# `syn`, ... generations); they are a build-size and audit-surface cost,
+# not a correctness bug, so warn rather than fail.
+# ---------------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+# Crates that must never appear. `openssl`/`native-tls`: TLS is rustls
+# everywhere (sqlx `tls-rustls`, ureq's default), so a build never links
+# the system OpenSSL.
+deny = [
+  { crate = "openssl", reason = "TLS is rustls-only; no system OpenSSL dependency" },
+  { crate = "openssl-sys", reason = "TLS is rustls-only; no system OpenSSL dependency" },
+  { crate = "native-tls", reason = "TLS is rustls-only; no system OpenSSL dependency" },
+]
+
+# ---------------------------------------------------------------------------
+# Sources: crates.io only. No git dependencies, no alternative registries.
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

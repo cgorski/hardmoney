@@ -1,0 +1,11 @@
+{
+  "file": "f24.fec",
+  "form_type": "F24N",
+  "version": "8.5",
+  "line_count": 2,
+  "acceptable": true,
+  "errors": 0,
+  "warnings": 0,
+  "findings_by_rule": {},
+  "findings": []
+}

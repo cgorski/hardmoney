@@ -1,5 +1,5 @@
 # Detects drift between hardmoney's bundled FEC field specification and the
-# FEC's own sources.
+# FEC's own sources, and publishes what it found.
 #
 # `data/fec-spec/spec-8.5.json` is distilled from two public-domain FEC
 # artifacts: the Electronic Filing Specification workbook (vendored) and the
@@ -10,20 +10,37 @@
 # as a stale validator. (The FEC's own spreadsheet-vs-schema checker is
 # abandoned: fecfile-validate#302.)
 #
-# On failure: run the command below locally, review the diff, commit the
-# regenerated JSON.
+# Whether or not it drifted, the run uploads one artifact (`spec-drift-<date>`)
+# with:
+#   drift.md                    the Markdown drift report (what changed, per
+#                               table and field) from distill_fec_spec.py
+#   spec-8.5.regenerated.json   the freshly distilled spec
+#   fec-spec-8.5.schema.json    the JSON Schema bundle hardmoney ships
+#                               (`hardmoney spec export --format json-schema`)
+#   fec-spec.csv                every table, version bucket, and field as
+#                               one flat CSV (`spec export --format csv`)
+# and writes the report to the run's step summary. These are the files a
+# maintainer attaches to fecfile-validate#302.
+#
+# On failure: run distill_fec_spec.py locally with --schemas pointing at a
+# fecfile-validate checkout, review drift.md, commit the regenerated JSON.
 
 name: FEC spec drift
 
 on:
   schedule:
-    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+    - cron: "17 6 * * 1"  # Mondays 06:17 UTC
   workflow_dispatch:
   pull_request:
     paths:
       - "data/fec-spec/**"
       - "scripts/distill_fec_spec.py"
+      - "src/parser/jsonschema.rs"
+      - "src/cli/spec.rs"
       - ".github/workflows/spec-drift.yml"
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   drift:
@@ -40,20 +57,80 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install --quiet openpyxl
+
       - name: Re-distil the spec against upstream schemas
         run: |
           python scripts/distill_fec_spec.py \
             --schemas upstream/fecfile-validate/schema \
-            --out /tmp/spec-regenerated.json
+            --out "$RUNNER_TEMP/spec-8.5.regenerated.json" \
+            --diff-report "$RUNNER_TEMP/drift.md"
+
       - name: Compare with the checked-in spec
+        id: compare
         run: |
-          if ! diff -u data/fec-spec/spec-8.5.json /tmp/spec-regenerated.json > /tmp/spec.diff; then
-            echo "::error::data/fec-spec/spec-8.5.json is out of date with fecgov/fecfile-validate develop"
-            head -200 /tmp/spec.diff
-            exit 1
+          if diff -u data/fec-spec/spec-8.5.json "$RUNNER_TEMP/spec-8.5.regenerated.json" > "$RUNNER_TEMP/spec.diff"; then
+            echo "drifted=false" >> "$GITHUB_OUTPUT"
+            echo "spec is current"
+          else
+            echo "drifted=true" >> "$GITHUB_OUTPUT"
+            echo "::error::data/fec-spec/spec-8.5.json is out of date with fecgov/fecfile-validate develop (see drift.md in the artifact)"
+            head -200 "$RUNNER_TEMP/spec.diff"
           fi
-          echo "spec is current"
-      - name: Upstream schema inventory (informational)
+
+      # The JSON Schema bundle and the CSV are rendered from the spec the
+      # binary was built with (the checked-in one), so they are what
+      # hardmoney ships today; drift.md says how that differs from upstream.
+      # `spec export` lives in the `hardmoney` binary, which needs the `cli`
+      # feature (a default), so this is a full build.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the hardmoney binary
+        run: cargo build --locked --bin hardmoney
+      - name: Export the JSON Schema bundle and the CSV inventory
         run: |
-          echo "fecfile-validate schemas: $(ls upstream/fecfile-validate/schema/*.json | wc -l)"
-          git -C upstream/fecfile-validate log -1 --format='%h %ad %s' --date=short
+          ./target/debug/hardmoney spec export --format json-schema > "$RUNNER_TEMP/fec-spec-8.5.schema.json"
+          ./target/debug/hardmoney spec export --format csv > "$RUNNER_TEMP/fec-spec.csv"
+          python - "$RUNNER_TEMP/fec-spec-8.5.schema.json" "$RUNNER_TEMP/fec-spec.csv" <<'EOF'
+          import csv, json, sys
+          bundle = json.load(open(sys.argv[1]))
+          props = sum(len(s["properties"]) for s in bundle["$defs"].values())
+          rows = sum(1 for _ in csv.DictReader(open(sys.argv[2])))
+          print(f"json-schema: {len(bundle['$defs'])} tables, {props} fields at {bundle['x-hardmoney']['spec_version']}")
+          print(f"csv: {rows} rows")
+          EOF
+
+      - name: Name the artifact by date
+        id: name
+        run: echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spec-drift-${{ steps.name.outputs.date }}
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/drift.md
+            ${{ runner.temp }}/spec-8.5.regenerated.json
+            ${{ runner.temp }}/spec.diff
+            ${{ runner.temp }}/fec-spec-8.5.schema.json
+            ${{ runner.temp }}/fec-spec.csv
+
+      - name: Step summary
+        env:
+          DRIFTED: ${{ steps.compare.outputs.drifted }}
+          ARTIFACT: spec-drift-${{ steps.name.outputs.date }}
+        run: |
+          if [ "$DRIFTED" = "true" ]; then status=DRIFTED; else status=current; fi
+          {
+            echo "## FEC spec drift: $status"
+            echo
+            echo "- upstream: fecgov/fecfile-validate develop @ $(git -C upstream/fecfile-validate log -1 --format='%h %ad' --date=short)"
+            echo "- upstream schemas: $(find upstream/fecfile-validate/schema -maxdepth 1 -name '*.json' | wc -l | tr -d ' ')"
+            echo "- artifact: \`$ARTIFACT\` (drift.md, spec-8.5.regenerated.json, spec.diff, fec-spec-8.5.schema.json, fec-spec.csv)"
+            echo
+            cat "$RUNNER_TEMP/drift.md"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail on drift
+        if: steps.compare.outputs.drifted == 'true'
+        run: |
+          echo "data/fec-spec/spec-8.5.json differs from the FEC's current sources; see the step summary and the artifact"
+          exit 1

@@ -11,6 +11,7 @@
 - [Getting started with Python](./python.md)
 - [Python cookbook](./python-cookbook.md)
 - [Python API reference](./python-api.md)
+- [Using hardmoney from FECfile+ and other Python projects](./python-fecfile-plus.md)
 - [For FEC staff](./for-fec-staff.md)
 
 # Tutorials
@@ -32,6 +33,7 @@
 - [Tables and typed views](./typed-views.md)
 - [The schema: versions, layouts, and compile-time-checked fields](./library-schema.md)
 - [Field names](./field-names.md)
+- [The spec as data](./spec-as-data.md)
 - [Writing `.fec` files](./writing-fec.md)
 - [Exporting a filing](./exporting.md)
 - [Reconciling a filing](./reconciling.md)
@@ -52,8 +54,10 @@
 - [The REST API](./rest-api.md)
   - [Hardening the API](./api-hardening.md)
   - [The browser UI](./web-ui.md)
+  - [Accessibility of the browser UI](./accessibility.md)
 
 # Reference
 
 - [CLI reference](./cli-reference.md)
+- [Security, provenance, and deployment notes](./security-and-provenance.md)
 - [Troubleshooting & FAQ](./troubleshooting.md)

@@ -3,11 +3,21 @@
 // without freezing the page. Rows are the document's own objects: an edit
 // writes through `onEdit`, which updates `row.fields` and the table then
 // re-reads it.
+//
+// Keyboard: the table is one tab stop (a roving tabindex, WAI-ARIA grid
+// pattern). Arrow keys move between cells and column headers, Home/End go
+// to the first/last column, PageUp/PageDown move a screen of rows,
+// Ctrl+Home/Ctrl+End go to the first/last row. Enter or F2 edits a cell,
+// Enter commits, Escape cancels. Enter or Space on a header sorts by it.
+// Because rows outside the window do not exist in the DOM, the cell that
+// carries tabindex="0" is the active cell when it is rendered, otherwise
+// the nearest rendered cell in the same column.
 
 import { escapeHtml, formatMoney, compareDecimals, isAmountSpec, isNumericSpec, labelize, formatCount } from './format.js';
 
 const ROW_H = 30;
 const OVERSCAN = 8;
+const HEADER_ROW = -1;
 
 export class RecordsTable {
   /**
@@ -19,6 +29,7 @@ export class RecordsTable {
    * @param {(lineNo) => boolean} opts.lineHasError
    * @param {(html, anchor) => void} opts.showTooltip
    * @param {() => void} opts.hideTooltip
+   * @param {() => void} opts.hideTooltipSoon  delayed hide, cancelled if the pointer reaches the tooltip
    */
   constructor(container, opts) {
     this.container = container;
@@ -31,6 +42,8 @@ export class RecordsTable {
     this.filter = '';
     this.highlighted = null;
     this.editing = null;
+    this.pendingRefresh = false;
+    this.active = { row: HEADER_ROW, col: 0 }; // roving tabindex position
     this.build();
   }
 
@@ -40,26 +53,28 @@ export class RecordsTable {
         <div class="rt-toolbar">
           <label class="field">
             <span class="muted">Filter</span>
-            <input type="search" class="rt-filter" placeholder="Text in any shown column" aria-label="Filter rows">
+            <input type="search" class="rt-filter" placeholder="Text in any shown column" autocomplete="off">
           </label>
           <details class="rt-cols">
             <summary>Columns</summary>
             <div class="rt-columns"></div>
           </details>
-          <span class="rt-status" aria-live="polite"></span>
+          <span class="rt-status" role="status" aria-live="polite"></span>
         </div>
         <div class="rt-scroll" tabindex="-1">
-          <table role="grid">
-            <thead><tr></tr></thead>
+          <table role="grid" aria-label="Records" aria-rowcount="1">
+            <thead><tr aria-rowindex="1"></tr></thead>
             <tbody></tbody>
           </table>
         </div>
       </div>`;
     this.el = {
       filter: this.container.querySelector('.rt-filter'),
+      details: this.container.querySelector('.rt-cols'),
       cols: this.container.querySelector('.rt-columns'),
       status: this.container.querySelector('.rt-status'),
       scroll: this.container.querySelector('.rt-scroll'),
+      table: this.container.querySelector('table'),
       thead: this.container.querySelector('thead tr'),
       tbody: this.container.querySelector('tbody'),
     };
@@ -68,29 +83,48 @@ export class RecordsTable {
       clearTimeout(t);
       t = setTimeout(() => { this.filter = this.el.filter.value.trim().toLowerCase(); this.applyView(); }, 150);
     });
+    // The column chooser is a popover: Escape closes it and returns focus,
+    // and it closes when focus leaves it.
+    this.el.details.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && this.el.details.open) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        this.el.details.open = false;
+        this.el.details.querySelector('summary').focus();
+      }
+    });
+    this.el.details.addEventListener('focusout', (ev) => {
+      if (this.el.details.open && !this.el.details.contains(ev.relatedTarget)) this.el.details.open = false;
+    });
     this.el.scroll.addEventListener('scroll', () => this.renderWindow());
+    this.el.scroll.addEventListener('keydown', (ev) => this.onGridKey(ev));
     this.el.tbody.addEventListener('click', (ev) => {
-      const td = ev.target.closest('td.editable');
+      const td = ev.target.closest('td.cell');
       if (td && !this.editing) this.beginEdit(td);
     });
-    this.el.tbody.addEventListener('keydown', (ev) => this.onGridKey(ev));
+    this.el.tbody.addEventListener('focusin', (ev) => {
+      const td = ev.target.closest('td.cell');
+      if (td) this.setActive(this.indexOf(td), this.colOf(td));
+    });
     this.el.thead.addEventListener('click', (ev) => {
       const th = ev.target.closest('th[data-field]');
       if (th) this.toggleSort(th.dataset.field);
     });
-    this.el.thead.addEventListener('keydown', (ev) => {
-      const th = ev.target.closest('th[data-field]');
-      if (th && (ev.key === 'Enter' || ev.key === ' ')) { ev.preventDefault(); this.toggleSort(th.dataset.field); }
-    });
     for (const type of ['mouseover', 'focusin']) {
       this.el.thead.addEventListener(type, (ev) => {
         const th = ev.target.closest('th[data-field]');
-        if (th) this.showSpec(th);
+        if (!th) return;
+        if (type === 'focusin') this.setActive(HEADER_ROW, this.colOf(th));
+        this.showSpec(th);
       });
     }
-    for (const type of ['mouseleave', 'focusout']) {
-      this.el.thead.addEventListener(type, () => this.opts.hideTooltip());
-    }
+    this.el.thead.addEventListener('mouseleave', () => this.opts.hideTooltipSoon());
+    this.el.thead.addEventListener('focusout', () => this.opts.hideTooltip());
+  }
+
+  /** Names the grid for assistive technology (the table tab it shows). */
+  setLabel(text) {
+    this.el.table.setAttribute('aria-label', text);
   }
 
   /** Replaces the rows shown. `fields` is the layout's field list (in order). */
@@ -99,6 +133,7 @@ export class RecordsTable {
     this.fields = fields;
     this.sort = null;
     this.highlighted = null;
+    this.active = { row: HEADER_ROW, col: 0 };
     // Default to the columns that carry a value somewhere, so a 45-column
     // schedule opens on the ones that matter; the chooser adds the rest.
     const used = new Set(['form_type']);
@@ -114,7 +149,7 @@ export class RecordsTable {
 
   renderColumnChooser() {
     const c = this.el.cols;
-    c.innerHTML = `<div class="rt-columns-actions">
+    c.innerHTML = `<div class="rt-columns-actions" role="group" aria-label="Show columns">
         <button type="button" class="btn btn-small" data-all>All</button>
         <button type="button" class="btn btn-small" data-none>None</button>
         <button type="button" class="btn btn-small" data-used>Non-blank</button>
@@ -153,14 +188,18 @@ export class RecordsTable {
   }
 
   renderHeader() {
+    const shown = this.shownFields();
+    this.active.col = Math.min(this.active.col, Math.max(0, shown.length - 1));
     const cells = ['<th class="col-line" scope="col">Line</th>'];
-    for (const f of this.shownFields()) {
+    shown.forEach((f, i) => {
       const sorted = this.sort?.field === f;
       const aria = sorted ? (this.sort.dir > 0 ? 'ascending' : 'descending') : 'none';
-      const arrow = sorted ? (this.sort.dir > 0 ? '▲' : '▼') : '';
-      cells.push(`<th scope="col" data-field="${escapeHtml(f)}" tabindex="0" aria-sort="${aria}" title="${escapeHtml(f)}">${escapeHtml(f)}<span class="sort" aria-hidden="true">${arrow}</span></th>`);
-    }
+      const arrow = sorted ? (this.sort.dir > 0 ? '\u25b2' : '\u25bc') : '';
+      const stop = this.active.row === HEADER_ROW && this.active.col === i ? 0 : -1;
+      cells.push(`<th scope="col" data-field="${escapeHtml(f)}" tabindex="${stop}" aria-sort="${aria}">${escapeHtml(f)}<span class="sort" aria-hidden="true">${arrow}</span></th>`);
+    });
     this.el.thead.innerHTML = cells.join('');
+    this.ensureTabStop();
   }
 
   toggleSort(field) {
@@ -169,12 +208,15 @@ export class RecordsTable {
     } else {
       this.sort = { field, dir: 1 };
     }
+    const hadFocus = this.el.thead.contains(document.activeElement);
     this.renderHeader();
-    this.applyView();
+    if (hadFocus) this.el.thead.querySelector(`th[data-field="${CSS.escape(field)}"]`)?.focus();
+    const dir = this.sort ? (this.sort.dir > 0 ? 'ascending' : 'descending') : 'file order';
+    this.applyView(`Sorted by ${field}, ${dir}. `);
   }
 
   /** Recomputes the filtered + sorted view and redraws. */
-  applyView() {
+  applyView(prefix = '') {
     const shown = this.shownFields();
     let view = this.rows;
     if (this.filter) {
@@ -203,15 +245,23 @@ export class RecordsTable {
       });
     }
     this.view = view;
-    this.el.status.textContent = this.filter
+    if (this.active.row >= view.length) this.active.row = Math.max(HEADER_ROW, view.length - 1);
+    this.el.table.setAttribute('aria-rowcount', String(view.length + 1));
+    this.el.status.textContent = prefix + (this.filter
       ? `${formatCount(view.length)} of ${formatCount(this.rows.length)} rows match`
-      : `${formatCount(this.rows.length)} rows`;
+      : `${formatCount(this.rows.length)} rows`);
     this.el.scroll.scrollTop = 0;
     this.renderWindow(true);
   }
 
   /** Draws the rows in the scroll window. */
   renderWindow(force = false) {
+    // Never pull the DOM out from under an open editor: a scroll or an
+    // app-requested refresh waits and is replayed when the edit finishes.
+    if (this.editing) {
+      this.pendingRefresh = true;
+      return;
+    }
     const total = this.view.length;
     const scrollTop = this.el.scroll.scrollTop;
     const height = this.el.scroll.clientHeight || 400;
@@ -219,8 +269,8 @@ export class RecordsTable {
     const end = Math.min(total, Math.ceil((scrollTop + height) / ROW_H) + OVERSCAN);
     if (!force && this.window && this.window.start === start && this.window.end === end) return;
     this.window = { start, end };
-    if (this.editing) this.cancelEdit();
 
+    const hadFocus = this.el.tbody.contains(document.activeElement);
     const shown = this.shownFields();
     const tbody = this.el.tbody;
     tbody.innerHTML = '';
@@ -232,11 +282,21 @@ export class RecordsTable {
       td.textContent = this.rows.length ? 'No rows match the filter.' : 'No rows.';
       tr.appendChild(td);
       tbody.appendChild(tr);
+      this.ensureTabStop();
+      if (hadFocus) this.el.thead.querySelector('[tabindex="0"]')?.focus({ preventScroll: true });
       return;
     }
     tbody.appendChild(this.spacer(start * ROW_H, shown.length + 1));
     for (let i = start; i < end; i++) tbody.appendChild(this.renderRow(this.view[i], i, shown));
     tbody.appendChild(this.spacer((total - end) * ROW_H, shown.length + 1));
+    this.ensureTabStop();
+    if (hadFocus) {
+      // The focused cell was just re-created; put focus back on it, or on
+      // the scroll region if it scrolled out of the window.
+      const cell = this.cellAt(this.active.row, this.active.col);
+      if (cell) cell.focus({ preventScroll: true });
+      else this.el.scroll.focus({ preventScroll: true });
+    }
   }
 
   spacer(height, span) {
@@ -254,35 +314,96 @@ export class RecordsTable {
     const tr = document.createElement('tr');
     tr.dataset.index = String(index);
     tr.dataset.line = String(row.line_no);
+    tr.setAttribute('aria-rowindex', String(index + 2));
     if (this.highlighted === row.line_no) tr.classList.add('highlight');
-    if (this.opts.lineHasError(row.line_no)) tr.classList.add('has-error');
-    const line = document.createElement('td');
+    const hasError = this.opts.lineHasError(row.line_no);
+    if (hasError) tr.classList.add('has-error');
+    const line = document.createElement('th');
+    line.scope = 'row';
     line.className = 'col-line';
-    line.textContent = row.line_no;
+    if (hasError) {
+      // Bold red alone would be colour-only (WCAG 1.4.1): add a mark and text.
+      const mark = document.createElement('span');
+      mark.className = 'err-mark';
+      mark.setAttribute('aria-hidden', 'true');
+      mark.textContent = '!';
+      line.append(mark, String(row.line_no), hiddenText(' has validation error'));
+    } else {
+      line.textContent = row.line_no;
+    }
     tr.appendChild(line);
-    for (const f of shown) {
+    shown.forEach((f, i) => {
       const td = document.createElement('td');
       td.dataset.field = f;
-      td.tabIndex = 0;
-      td.className = 'editable';
+      td.tabIndex = index === this.active.row && i === this.active.col ? 0 : -1;
+      td.className = 'cell';
       this.paintCell(td, row, f);
       tr.appendChild(td);
-    }
+    });
     return tr;
   }
 
   paintCell(td, row, field) {
     const v = row.fields[field] ?? '';
     const spec = this.opts.getSpec(field)?.spec;
+    const edited = this.opts.isEdited(row, field);
     td.classList.toggle('amount', isAmountSpec(spec));
-    td.classList.toggle('edited', this.opts.isEdited(row, field));
+    td.classList.toggle('edited', edited);
     td.textContent = isAmountSpec(spec) && v !== '' ? formatMoney(v) : v;
+    if (edited) td.appendChild(hiddenText(' (edited)'));
     td.title = v.length > 24 ? v : '';
   }
 
+  // ---- Roving tabindex -----------------------------------------------------
+
+  indexOf(td) {
+    return Number(td.closest('tr')?.dataset.index);
+  }
+
+  colOf(cell) {
+    const tr = cell.closest('tr');
+    return Array.from(tr.querySelectorAll(cell.tagName === 'TH' ? 'th[data-field]' : 'td.cell')).indexOf(cell);
+  }
+
+  cellAt(row, col) {
+    if (row === HEADER_ROW) return this.el.thead.querySelectorAll('th[data-field]')[col] || null;
+    const tr = this.el.tbody.querySelector(`tr[data-index="${row}"]`);
+    return tr?.querySelectorAll('td.cell')[col] || null;
+  }
+
+  /** Makes (row, col) the one tab stop, adjusting rendered cells in place. */
+  setActive(row, col) {
+    if (Number.isNaN(row) || col < 0) return;
+    this.active = { row, col };
+    for (const el of this.el.table.querySelectorAll('[tabindex="0"]')) el.tabIndex = -1;
+    const cell = this.cellAt(row, col);
+    if (cell) cell.tabIndex = 0;
+    else this.ensureTabStop();
+  }
+
+  /**
+   * Guarantees the grid has exactly one tab stop even when the active row
+   * is not rendered: the nearest rendered row's cell in the active column,
+   * or the header.
+   */
+  ensureTabStop() {
+    if (this.el.table.querySelector('[tabindex="0"]')) return;
+    const rows = this.el.tbody.querySelectorAll('tr[data-index]');
+    let entry = null;
+    if (rows.length) {
+      const first = Number(rows[0].dataset.index);
+      const last = Number(rows[rows.length - 1].dataset.index);
+      const tr = this.active.row < first ? rows[0] : this.active.row > last ? rows[rows.length - 1] : rows[0];
+      entry = tr.querySelectorAll('td.cell')[Math.min(this.active.col, tr.querySelectorAll('td.cell').length - 1)];
+    }
+    if (!entry) entry = this.el.thead.querySelectorAll('th[data-field]')[Math.min(this.active.col, this.shownFields().length - 1)];
+    if (entry) entry.tabIndex = 0;
+  }
+
+  // ---- Editing -------------------------------------------------------------
+
   rowFor(td) {
-    const tr = td.closest('tr');
-    return this.view[Number(tr?.dataset.index)];
+    return this.view[this.indexOf(td)];
   }
 
   beginEdit(td) {
@@ -293,6 +414,7 @@ export class RecordsTable {
     const input = document.createElement('input');
     input.type = 'text';
     input.value = before;
+    input.autocomplete = 'off';
     input.setAttribute('aria-label', `${field} on line ${row.line_no}`);
     td.textContent = '';
     td.appendChild(input);
@@ -308,7 +430,11 @@ export class RecordsTable {
       if (!td.isConnected) return;
       if (commit && after !== before) this.opts.onEdit(row, field, before, after);
       this.paintCell(td, row, field);
-      td.focus();
+      td.focus({ preventScroll: true });
+      if (this.pendingRefresh) {
+        this.pendingRefresh = false;
+        this.renderWindow(true);
+      }
     };
     input.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter') { ev.preventDefault(); finish(true); }
@@ -325,41 +451,82 @@ export class RecordsTable {
     if (e && e.td.isConnected) this.paintCell(e.td, e.row, e.field);
   }
 
+  // ---- Keyboard ------------------------------------------------------------
+
   onGridKey(ev) {
     if (this.editing) return;
-    const td = ev.target.closest('td.editable');
-    if (!td) return;
+    const th = ev.target.closest('th[data-field]');
+    const td = ev.target.closest('td.cell');
+    const shown = this.shownFields();
+    if (!shown.length) return;
+    const lastRow = this.view.length - 1;
+    const pageRows = Math.max(1, Math.floor((this.el.scroll.clientHeight || 400) / ROW_H) - 1);
+
+    if (th) {
+      const col = this.colOf(th);
+      if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); this.toggleSort(th.dataset.field); return; }
+      if (ev.key === 'Escape') { this.opts.hideTooltip(); return; }
+      let target = null;
+      if (ev.key === 'ArrowRight') target = [HEADER_ROW, col + 1];
+      else if (ev.key === 'ArrowLeft') target = [HEADER_ROW, col - 1];
+      else if (ev.key === 'Home') target = [HEADER_ROW, 0];
+      else if (ev.key === 'End') target = [HEADER_ROW, shown.length - 1];
+      else if (ev.key === 'ArrowDown' || ev.key === 'PageDown') target = [0, col];
+      if (!target) return;
+      ev.preventDefault();
+      this.focusCell(target[0], target[1]);
+      return;
+    }
+
+    if (!td) {
+      // Focus is on the scroll region itself (the active row scrolled out
+      // of the DOM); any arrow key re-enters the grid.
+      if (ev.key.startsWith('Arrow') || ev.key === 'Home' || ev.key === 'End') {
+        ev.preventDefault();
+        const entry = this.el.table.querySelector('[tabindex="0"]');
+        entry?.focus({ preventScroll: true });
+      }
+      return;
+    }
+
     if (ev.key === 'Enter' || ev.key === 'F2') {
       ev.preventDefault();
       this.beginEdit(td);
       return;
     }
-    const moves = { ArrowLeft: [0, -1], ArrowRight: [0, 1], ArrowUp: [-1, 0], ArrowDown: [1, 0] };
-    const m = moves[ev.key];
-    if (!m) return;
-    ev.preventDefault();
-    const tr = td.closest('tr');
-    const cells = Array.from(tr.querySelectorAll('td.editable'));
-    const col = cells.indexOf(td);
-    if (m[1] !== 0) {
-      const next = cells[col + m[1]];
-      if (next) next.focus();
-      return;
+    const index = this.indexOf(td);
+    const col = this.colOf(td);
+    let target = null;
+    switch (ev.key) {
+      case 'ArrowLeft': target = [index, col - 1]; break;
+      case 'ArrowRight': target = [index, col + 1]; break;
+      case 'ArrowUp': target = [index === 0 ? HEADER_ROW : index - 1, col]; break;
+      case 'ArrowDown': target = [index + 1, col]; break;
+      case 'Home': target = ev.ctrlKey ? [0, 0] : [index, 0]; break;
+      case 'End': target = ev.ctrlKey ? [lastRow, shown.length - 1] : [index, shown.length - 1]; break;
+      case 'PageUp': target = [Math.max(0, index - pageRows), col]; break;
+      case 'PageDown': target = [Math.min(lastRow, index + pageRows), col]; break;
+      default: return;
     }
-    const index = Number(tr.dataset.index) + m[0];
-    if (index < 0 || index >= this.view.length) return;
-    this.focusCell(index, col);
+    ev.preventDefault();
+    this.focusCell(target[0], target[1]);
   }
 
-  focusCell(index, col) {
-    const top = index * ROW_H;
-    const s = this.el.scroll;
-    if (top < s.scrollTop) s.scrollTop = top;
-    else if (top + ROW_H > s.scrollTop + s.clientHeight) s.scrollTop = top + ROW_H - s.clientHeight;
-    this.renderWindow();
-    const tr = this.el.tbody.querySelector(`tr[data-index="${index}"]`);
-    const cell = tr?.querySelectorAll('td.editable')[col];
-    if (cell) cell.focus();
+  /** Moves the roving focus to (row, col), scrolling the row into the window first. */
+  focusCell(row, col) {
+    const shown = this.shownFields();
+    if (col < 0 || col >= shown.length) return;
+    if (row !== HEADER_ROW && (row < 0 || row >= this.view.length)) return;
+    if (row !== HEADER_ROW) {
+      const top = row * ROW_H;
+      const s = this.el.scroll;
+      // Keep the row clear of the sticky header.
+      if (top < s.scrollTop + ROW_H) s.scrollTop = Math.max(0, top - ROW_H);
+      else if (top + ROW_H > s.scrollTop + s.clientHeight) s.scrollTop = top + ROW_H - s.clientHeight;
+      this.renderWindow();
+    }
+    this.setActive(row, col);
+    this.cellAt(row, col)?.focus({ preventScroll: true });
   }
 
   /** Scrolls to and highlights a line; clears the filter if it hides the line. */
@@ -376,8 +543,7 @@ export class RecordsTable {
     const s = this.el.scroll;
     s.scrollTop = Math.max(0, index * ROW_H - s.clientHeight / 2);
     this.renderWindow(true);
-    const tr = this.el.tbody.querySelector(`tr[data-index="${index}"]`);
-    tr?.querySelector('td.editable')?.focus({ preventScroll: true });
+    this.focusCell(index, 0);
     return true;
   }
 
@@ -406,4 +572,11 @@ export class RecordsTable {
     }
     this.opts.showTooltip(html, th);
   }
+}
+
+function hiddenText(text) {
+  const span = document.createElement('span');
+  span.className = 'visually-hidden';
+  span.textContent = text;
+  return span;
 }

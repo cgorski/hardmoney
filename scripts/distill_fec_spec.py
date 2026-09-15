@@ -24,8 +24,14 @@ hardmoney's validator and spec exporter use are kept, so a diff between two
 spec versions is readable.
 
 Usage:
-    scripts/distill_fec_spec.py [--schemas PATH] [--out PATH]
+    scripts/distill_fec_spec.py [--schemas PATH] [--out PATH] [--diff-report PATH]
 Requires `openpyxl` (`python3 -m venv .venv && .venv/bin/pip install openpyxl`).
+
+`--diff-report PATH` writes a Markdown summary of how the freshly distilled
+spec differs from the checked-in `data/fec-spec/spec-8.5.json` (tables and
+fields added or removed, and per-field attribute changes such as rule text,
+type, length, required level, code lists, patterns). The weekly drift job
+uploads it as an artifact; it is the report fecfile-validate#302 asks for.
 """
 from __future__ import annotations
 
@@ -211,12 +217,154 @@ def merge_schemas(tables: dict[str, list[dict]], schema_dir: pathlib.Path) -> in
     return enriched
 
 
+# Per-field attributes the diff report compares, in the order it lists them.
+FIELD_ATTRS = (
+    "description",
+    "kind",
+    "max_len",
+    "required",
+    "sample",
+    "value_reference",
+    "rule",
+    "forms",
+    "allowed_values",
+    "pattern",
+)
+
+
+def _md_cell(value) -> str:
+    """One attribute value as a Markdown table cell: JSON for lists and
+    dicts, blank for None, whitespace collapsed, pipes escaped."""
+    if value is None:
+        return ""
+    if isinstance(value, (list, dict)):
+        value = json.dumps(value, ensure_ascii=False)
+    text = " ".join(str(value).split())
+    return "`" + text.replace("|", "\\|").replace("`", "'") + "`" if text else ""
+
+
+def diff_specs(old: dict, new: dict) -> dict:
+    """Compares two distilled spec documents. Fields are keyed by (table,
+    column). Returns {"tables_added", "tables_removed", "fields_added",
+    "fields_removed", "fields_changed"}; the last maps table -> list of
+    (column, description, [(attr, old, new), ...])."""
+    old_tables = old.get("tables", {})
+    new_tables = new.get("tables", {})
+    result = {
+        "tables_added": sorted(set(new_tables) - set(old_tables)),
+        "tables_removed": sorted(set(old_tables) - set(new_tables)),
+        "fields_added": {},
+        "fields_removed": {},
+        "fields_changed": {},
+    }
+    for table in sorted(set(old_tables) & set(new_tables)):
+        old_by_col = {r["column"]: r for r in old_tables[table]}
+        new_by_col = {r["column"]: r for r in new_tables[table]}
+        added = [new_by_col[c] for c in sorted(set(new_by_col) - set(old_by_col))]
+        removed = [old_by_col[c] for c in sorted(set(old_by_col) - set(new_by_col))]
+        if added:
+            result["fields_added"][table] = added
+        if removed:
+            result["fields_removed"][table] = removed
+        changed = []
+        for col in sorted(set(old_by_col) & set(new_by_col)):
+            o, n = old_by_col[col], new_by_col[col]
+            attrs = [(a, o.get(a), n.get(a)) for a in FIELD_ATTRS if o.get(a) != n.get(a)]
+            if attrs:
+                changed.append((col, n.get("description") or o.get("description") or "", attrs))
+        if changed:
+            result["fields_changed"][table] = changed
+    return result
+
+
+def diff_is_empty(d: dict) -> bool:
+    return not (
+        d["tables_added"] or d["tables_removed"] or d["fields_added"] or d["fields_removed"] or d["fields_changed"]
+    )
+
+
+def render_diff_report(old: dict, new: dict, baseline_path: pathlib.Path, d: dict) -> str:
+    """The Markdown drift report. Always starts with a one-line `Summary:`
+    that CI can lift into a step summary."""
+    n_fields_added = sum(len(v) for v in d["fields_added"].values())
+    n_fields_removed = sum(len(v) for v in d["fields_removed"].values())
+    n_fields_changed = sum(len(v) for v in d["fields_changed"].values())
+    n_old = sum(len(v) for v in old.get("tables", {}).values())
+    n_new = sum(len(v) for v in new.get("tables", {}).values())
+    lines = [
+        "# FEC spec drift report",
+        "",
+        f"Baseline: `{baseline_path.name}` (spec {old.get('spec_version')}, "
+        f"{len(old.get('tables', {}))} tables, {n_old} fields, "
+        f"schemas merged: {old.get('schemas_merged')}).",
+        f"Regenerated: spec {new.get('spec_version')} from `{new.get('source_xlsx')}`, "
+        f"{len(new.get('tables', {}))} tables, {n_new} fields, "
+        f"schemas merged: {new.get('schemas_merged')}.",
+        "",
+        f"Summary: {len(d['tables_added'])} tables added, {len(d['tables_removed'])} removed; "
+        f"{n_fields_added} fields added, {n_fields_removed} removed, {n_fields_changed} changed.",
+        "",
+    ]
+    if diff_is_empty(d):
+        lines.append("No differences: the checked-in spec matches the FEC's current sources.")
+        lines.append("")
+        return "\n".join(lines)
+
+    if d["tables_added"] or d["tables_removed"]:
+        lines.append("## Tables")
+        lines.append("")
+        for t in d["tables_added"]:
+            lines.append(f"- added: `{t}` ({len(new['tables'][t])} fields)")
+        for t in d["tables_removed"]:
+            lines.append(f"- removed: `{t}` ({len(old['tables'][t])} fields)")
+        lines.append("")
+
+    tables = sorted(set(d["fields_added"]) | set(d["fields_removed"]) | set(d["fields_changed"]))
+    for table in tables:
+        lines.append(f"## {table}")
+        lines.append("")
+        for row in d["fields_added"].get(table, []):
+            lines.append(
+                f"- added column {row['column']}: {row['description']} "
+                f"({row['kind']}-{row['max_len']}, required {row['required'].get('level')})"
+            )
+        for row in d["fields_removed"].get(table, []):
+            lines.append(f"- removed column {row['column']}: {row['description']}")
+        if d["fields_added"].get(table) or d["fields_removed"].get(table):
+            lines.append("")
+        changed = d["fields_changed"].get(table, [])
+        if changed:
+            lines.append("| Column | Field | Attribute | Checked in | Regenerated |")
+            lines.append("|---|---|---|---|---|")
+            for col, desc, attrs in changed:
+                for attr, o, n in attrs:
+                    lines.append(f"| {col} | {desc} | {attr} | {_md_cell(o)} | {_md_cell(n)} |")
+            lines.append("")
+    return "\n".join(lines)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--xlsx", type=pathlib.Path, default=DEFAULT_XLSX)
     ap.add_argument("--schemas", type=pathlib.Path, default=None, help="fecfile-validate/schema directory")
     ap.add_argument("--out", type=pathlib.Path, default=DEFAULT_OUT)
+    ap.add_argument(
+        "--diff-report",
+        type=pathlib.Path,
+        default=None,
+        help=f"write a Markdown summary of how the result differs from the checked-in {DEFAULT_OUT.name}",
+    )
     args = ap.parse_args()
+
+    # Read the baseline before anything is written, in case --out is the
+    # checked-in path itself.
+    baseline = None
+    if args.diff_report is not None:
+        if DEFAULT_OUT.exists():
+            baseline = json.loads(DEFAULT_OUT.read_text())
+        else:
+            print(f"warning: no baseline at {DEFAULT_OUT}; the diff report will show everything as added", file=sys.stderr)
+            baseline = {"tables": {}}
 
     wb = openpyxl.load_workbook(args.xlsx, read_only=True, data_only=True)
     version = None
@@ -263,6 +411,13 @@ def main() -> int:
     args.out.write_text(json.dumps(doc, indent=1, ensure_ascii=False) + "\n")
     n_fields = sum(len(v) for v in tables.values())
     print(f"wrote {args.out} ({len(tables)} tables, {n_fields} fields, {enriched} enriched from schemas)")
+
+    if args.diff_report is not None:
+        d = diff_specs(baseline, doc)
+        report = render_diff_report(baseline, doc, DEFAULT_OUT, d)
+        args.diff_report.write_text(report)
+        summary = next((l for l in report.splitlines() if l.startswith("Summary:")), "")
+        print(f"wrote {args.diff_report}: {summary}")
     return 0
 
 

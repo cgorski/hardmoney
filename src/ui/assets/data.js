@@ -2,6 +2,7 @@
 // and transactions, independent expenditures, and the /schema dashboard.
 
 import { api } from './api.js';
+import { wireTablist } from './tabs.js';
 import { escapeHtml, formatMoney, formatDate, formatCount, sumDecimals, labelize } from './format.js';
 
 const LIMITS = [25, 50, 100, 500];
@@ -18,6 +19,8 @@ export function renderData(main, parts, helpers) {
   else if (kind === 'schema') renderSchema(main);
   else renderSearch(main);
 }
+
+const back = () => '<p><a href="/ui/data"><span aria-hidden="true">← </span>Data browser</a></p>';
 
 // ---------------------------------------------------------------------------
 // Shared pieces
@@ -38,9 +41,14 @@ function entityError(card, e, what) {
   ui.reportError(e);
 }
 
-function table(columns, rows, { empty = 'No rows.' } = {}) {
+/**
+ * A plain table in a scroll region. The region is focusable so a keyboard
+ * user can scroll it even when no row holds a link, and named so a screen
+ * reader can tell the regions apart.
+ */
+function table(columns, rows, { empty = 'No rows.', label = 'Results' } = {}) {
   if (!rows.length) return `<p class="muted">${escapeHtml(empty)}</p>`;
-  return `<div class="table-scroll"><table class="plain">
+  return `<div class="table-scroll" tabindex="0" role="region" aria-label="${escapeHtml(label)}"><table class="plain">
     <thead><tr>${columns.map((c) => `<th scope="col" class="${c.amount ? 'amount' : ''}">${escapeHtml(c.label)}</th>`).join('')}</tr></thead>
     <tbody>${rows.map((r) => `<tr>${columns.map((c) => `<td class="${c.amount ? 'amount' : ''} ${c.mono ? 'mono' : ''}">${c.render ? c.render(r) : escapeHtml(r[c.key] ?? '')}</td>`).join('')}</tr>`).join('')}</tbody>
   </table></div>`;
@@ -54,11 +62,11 @@ const link = (href, text) => `<a href="${escapeHtml(href)}">${escapeHtml(text)}<
  * A paginated, filterable list backed by one API route. `fields` are the
  * filter inputs; `columns` the table columns. Renders into `host`.
  */
-function pagedList(host, { path, fixed = {}, fields = [], columns, title, empty, onRows }) {
+function pagedList(host, { path, fixed = {}, fields = [], columns, title, label = title || 'Results', empty, onRows }) {
   const state = { limit: 50, offset: 0, filters: {}, rows: [] };
   host.innerHTML = `
     ${title ? `<h3>${escapeHtml(title)}</h3>` : ''}
-    <form class="field-row pl-filters">
+    <form class="field-row pl-filters" aria-label="${escapeHtml(label)} filters">
       ${fields.map((f) => `<label class="field"><span class="muted">${escapeHtml(f.label)}</span><input type="${f.type || 'text'}" name="${escapeHtml(f.name)}" placeholder="${escapeHtml(f.placeholder || '')}" ${f.pattern ? `pattern="${f.pattern}"` : ''}></label>`).join('')}
       <label class="field"><span class="muted">Rows per page</span><select name="limit">${LIMITS.map((l) => `<option value="${l}" ${l === state.limit ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       <button type="submit" class="btn btn-primary">Search</button>
@@ -66,7 +74,7 @@ function pagedList(host, { path, fixed = {}, fields = [], columns, title, empty,
     <div class="pager">
       <button type="button" class="btn btn-small" data-prev disabled>Previous</button>
       <button type="button" class="btn btn-small" data-next disabled>Next</button>
-      <span class="status" aria-live="polite"></span>
+      <span class="status" role="status" aria-live="polite"></span>
     </div>
     <div class="pl-rows"></div>`;
   const form = host.querySelector('.pl-filters');
@@ -81,7 +89,7 @@ function pagedList(host, { path, fixed = {}, fields = [], columns, title, empty,
     try {
       const rows = await api.get(path, { ...fixed, ...state.filters, limit: state.limit, offset: state.offset });
       state.rows = rows;
-      rowsEl.innerHTML = table(columns, rows, { empty });
+      rowsEl.innerHTML = table(columns, rows, { empty, label });
       const from = rows.length ? state.offset + 1 : 0;
       status.textContent = rows.length ? `Rows ${formatCount(from)}–${formatCount(state.offset + rows.length)}${rows.length === state.limit ? ' (more may follow)' : ''}` : 'No rows';
       prev.disabled = state.offset === 0;
@@ -120,6 +128,7 @@ const CYCLE_FIELD = { name: 'cycle', label: 'Cycle', placeholder: '2026', type: 
 // ---------------------------------------------------------------------------
 
 function renderSearch(main) {
+  ui.setTitle('Data browser');
   main.innerHTML = `
     <h1>Data browser</h1>
     <p class="muted">Reads the tables this server's namespace holds. Amounts are shown exactly as the database stores them. See <a href="/ui/data/schema">what is loaded</a>.</p>
@@ -145,6 +154,7 @@ function renderSearch(main) {
       { label: 'Principal committee', mono: true, render: (r) => (r.cand_pcc ? link(`/ui/data/committees/${encodeURIComponent(r.cand_pcc)}`, r.cand_pcc) : '') },
     ],
     empty: 'No candidates match. Is the candidates bulk file loaded for this cycle?',
+    label: 'Candidates',
   });
   pagedList(main.querySelector('#cmte-list'), {
     path: '/committees',
@@ -163,6 +173,7 @@ function renderSearch(main) {
       { label: 'Location', render: (r) => escapeHtml([r.cmte_city, r.cmte_st].filter(Boolean).join(', ')) },
     ],
     empty: 'No committees match. Is the committees bulk file loaded for this cycle?',
+    label: 'Committees',
   });
 }
 
@@ -174,7 +185,7 @@ function entityCard(rows, fields) {
   const latest = rows[0];
   const cycles = rows.map((r) => r.cycle).join(', ');
   return `<dl class="kv">
-    ${fields.map(([k, label]) => `<dt>${escapeHtml(label || labelize(k))}</dt><dd>${latest[k] === null || latest[k] === undefined || latest[k] === '' ? '<span class="muted">—</span>' : escapeHtml(String(latest[k]))}</dd>`).join('')}
+    ${fields.map(([k, label]) => `<dt>${escapeHtml(label || labelize(k))}</dt><dd>${latest[k] === null || latest[k] === undefined || latest[k] === '' ? '<span class="muted">blank</span>' : escapeHtml(String(latest[k]))}</dd>`).join('')}
     <dt>Cycles on file</dt><dd>${escapeHtml(cycles)}</dd>
   </dl>`;
 }
@@ -205,7 +216,8 @@ const IE_COLUMNS = [
 ];
 
 async function renderCandidate(main, id) {
-  main.innerHTML = `<p><a href="/ui/data">← Data browser</a></p><h1>Candidate <span class="mono">${escapeHtml(id)}</span></h1><div id="cand-card" class="card" aria-busy="true">Loading…</div>
+  ui.setTitle(`Candidate ${id}`);
+  main.innerHTML = `${back()}<h1>Candidate <span class="mono">${escapeHtml(id)}</span></h1><div id="cand-card" class="card" aria-busy="true">Loading…</div>
     <section class="card" aria-labelledby="ie-title"><h2 id="ie-title">Independent expenditures</h2><div id="ie-totals"></div><div id="ie-list"></div></section>`;
   const card = main.querySelector('#cand-card');
   try {
@@ -228,18 +240,20 @@ async function renderCandidate(main, id) {
     fields: [{ name: 'support_oppose_code', label: 'Support (S) or oppose (O)', placeholder: 'S or O', upper: true }],
     columns: IE_COLUMNS,
     empty: 'No independent expenditures for this candidate in the FEC\'s Schedule E dump.',
+    label: 'Independent expenditures',
     onRows: (rows) => { totals.innerHTML = rows.length ? ieTotals(rows) : ''; },
   });
 }
 
 async function renderCommittee(main, id) {
-  main.innerHTML = `<p><a href="/ui/data">← Data browser</a></p><h1>Committee <span class="mono">${escapeHtml(id)}</span></h1><div id="cmte-card" class="card" aria-busy="true">Loading…</div>
+  ui.setTitle(`Committee ${id}`);
+  main.innerHTML = `${back()}<h1>Committee <span class="mono">${escapeHtml(id)}</span></h1><div id="cmte-card" class="card" aria-busy="true">Loading…</div>
     <section class="card" aria-label="Committee data">
-      <div class="tabs" role="tablist" id="cmte-tabs">
-        <button role="tab" data-tab="filings" aria-selected="true">Filings</button>
-        <button role="tab" data-tab="contributions" aria-selected="false">Contributions (Schedule A)</button>
-        <button role="tab" data-tab="disbursements" aria-selected="false">Disbursements (Schedule B)</button>
-        <button role="tab" data-tab="ie" aria-selected="false">Independent expenditures</button>
+      <div class="tabs" role="tablist" id="cmte-tabs" aria-label="Committee data">
+        <button type="button" role="tab" data-tab="filings">Filings</button>
+        <button type="button" role="tab" data-tab="contributions">Contributions (Schedule A)</button>
+        <button type="button" role="tab" data-tab="disbursements">Disbursements (Schedule B)</button>
+        <button type="button" role="tab" data-tab="ie">Independent expenditures</button>
       </div>
       <div id="cmte-panel"></div>
     </section>`;
@@ -258,7 +272,6 @@ async function renderCommittee(main, id) {
   }
   const panel = main.querySelector('#cmte-panel');
   const show = (tab) => {
-    for (const b of main.querySelectorAll('#cmte-tabs [role="tab"]')) b.setAttribute('aria-selected', String(b.dataset.tab === tab));
     panel.innerHTML = '';
     if (tab === 'filings') {
       pagedList(panel, {
@@ -269,7 +282,7 @@ async function renderCommittee(main, id) {
           { name: 'most_recent', label: 'Most recent only (true/false)', placeholder: 'true' },
         ],
         columns: [
-          { label: 'Filing', mono: true, render: (r) => `<a href="${escapeHtml(r.fec_url)}" target="_blank" rel="noopener">${escapeHtml(String(r.filing_id))}</a>` },
+          { label: 'Filing', mono: true, render: (r) => `<a href="${escapeHtml(r.fec_url)}" target="_blank" rel="noopener">${escapeHtml(String(r.filing_id))}<span class="visually-hidden"> (opens on fec.gov in a new tab)</span></a>` },
           { label: 'Form', key: 'form_type', mono: true },
           { label: 'Report', key: 'report_type' },
           { label: 'Coverage', render: (r) => escapeHtml([r.coverage_start_date, r.coverage_end_date].filter(Boolean).join(' – ')) },
@@ -279,6 +292,7 @@ async function renderCommittee(main, id) {
           { label: 'Ingested', render: date('ingested_at') },
         ],
         empty: 'No ingested filings for this committee. `hardmoney bulk-load-filing` adds them.',
+        label: 'Filings',
       });
     } else if (tab === 'contributions') {
       pagedList(panel, {
@@ -301,6 +315,7 @@ async function renderCommittee(main, id) {
           { label: 'Amount', amount: true, render: money('transaction_amt') },
         ],
         empty: 'No Schedule A rows. Load the individual-contributions bulk file (`indiv`) for the cycle.',
+        label: 'Contributions',
       });
     } else if (tab === 'disbursements') {
       pagedList(panel, {
@@ -321,6 +336,7 @@ async function renderCommittee(main, id) {
           { label: 'Amount', amount: true, render: money('transaction_amt') },
         ],
         empty: 'No disbursement rows. Load the operating-expenditures bulk file (`oppexp`) for the cycle.',
+        label: 'Disbursements',
       });
     } else {
       const totals = document.createElement('div');
@@ -332,15 +348,12 @@ async function renderCommittee(main, id) {
         fields: [{ name: 'support_oppose_code', label: 'Support (S) or oppose (O)', upper: true }],
         columns: IE_COLUMNS,
         empty: 'No independent expenditures by this committee in the FEC\'s Schedule E dump.',
+        label: 'Independent expenditures',
         onRows: (rows) => { totals.innerHTML = rows.length ? ieTotals(rows) : ''; },
       });
     }
   };
-  main.querySelector('#cmte-tabs').addEventListener('click', (e) => {
-    const b = e.target.closest('[role="tab"]');
-    if (b) show(b.dataset.tab);
-  });
-  show('filings');
+  wireTablist(main.querySelector('#cmte-tabs'), { panel, onSelect: show }).select('filings');
 }
 
 // ---------------------------------------------------------------------------
@@ -348,7 +361,8 @@ async function renderCommittee(main, id) {
 // ---------------------------------------------------------------------------
 
 async function renderSchema(main) {
-  main.innerHTML = `<p><a href="/ui/data">← Data browser</a></p><h1>What is loaded</h1><div id="schema" class="card" aria-busy="true">Loading…</div>`;
+  ui.setTitle('What is loaded');
+  main.innerHTML = `${back()}<h1>What is loaded</h1><div id="schema" class="card" aria-busy="true">Loading…</div>`;
   const host = main.querySelector('#schema');
   try {
     const s = await api.get('/schema');
@@ -372,7 +386,7 @@ async function renderSchema(main) {
         { label: 'Dates nulled', render: (r) => escapeHtml(formatCount(r.dates_nulled)) },
         { label: 'Source last modified', render: (r) => escapeHtml(r.source_last_modified ? String(r.source_last_modified).slice(0, 10) : '') },
         { label: 'By version', key: 'hardmoney_version', mono: true },
-      ], s.loads, { empty: 'No bulk loads recorded in this namespace yet.' })}`;
+      ], s.loads, { empty: 'No bulk loads recorded in this namespace yet.', label: 'Latest load per source and cycle' })}`;
   } catch (e) {
     host.innerHTML = errorBanner(e);
     ui.reportError(e);

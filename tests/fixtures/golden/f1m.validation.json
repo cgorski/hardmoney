@@ -1,0 +1,11 @@
+{
+  "file": "f1m.fec",
+  "form_type": "F1MN",
+  "version": "8.5",
+  "line_count": 0,
+  "acceptable": true,
+  "errors": 0,
+  "warnings": 0,
+  "findings_by_rule": {},
+  "findings": []
+}

@@ -119,9 +119,18 @@ when the tab closes. The **API key** button in the top bar changes it.
 
 The UI follows the system light/dark preference and has a toggle in the
 top bar, remembered in `localStorage`. Colours meet WCAG AA contrast in
-both themes. The records table is a keyboard grid: Tab into it, arrow
-keys move between cells, Enter edits, Escape cancels. Headers, tabs, and
-findings are reachable by keyboard, and status changes are announced.
+both themes. The records table is a keyboard grid with one tab stop:
+arrow keys move between cells and column headers, Home/End and
+PageUp/PageDown jump, Enter edits, Escape cancels, Enter on a header
+sorts. Tabs, findings, and dialogs are reachable by keyboard, and status
+changes are announced.
+
+The UI was reviewed against WCAG 2.1 Level AA (the standard Section 508
+incorporates) on 2026-09-15 with axe-core, computed contrast ratios for
+both themes, and a scripted keyboard-only walkthrough. The method, the
+conformance table, the defects fixed, and the known limitations (no
+screen-reader or Firefox/Safari testing yet) are in
+[Accessibility of the browser UI](./accessibility.md).
 
 ## The tools API
 

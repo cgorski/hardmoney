@@ -703,3 +703,273 @@ async fn full_router_mounts_ui_and_tools_only_when_enabled() {
     let (status, _, _) = get(&on, "/tools/spec/SchA?api_key=k").await;
     assert_eq!(status, StatusCode::OK);
 }
+
+// ---------------------------------------------------------------------------
+// Accessibility invariants of the shell and the assets (WCAG 2.1 AA)
+// ---------------------------------------------------------------------------
+//
+// String-level checks that hold the line on what the Section 508 review in
+// `book/src/accessibility.md` verified with axe-core and a keyboard
+// walkthrough. They run without a browser, so they cannot prove
+// conformance; they catch the regressions that are cheap to catch.
+
+async fn shell_html() -> String {
+    let (status, _, body) = get(&app(), "/ui/").await;
+    assert_eq!(status, StatusCode::OK);
+    String::from_utf8(body).unwrap()
+}
+
+fn asset_text(path: &str) -> String {
+    String::from_utf8(hardmoney::ui::asset_bytes(path).unwrap().into_owned()).unwrap()
+}
+
+fn js_assets() -> Vec<(String, String)> {
+    hardmoney::ui::asset_paths()
+        .filter(|p| p.ends_with(".js"))
+        .map(|p| (p.to_string(), asset_text(&p)))
+        .collect()
+}
+
+/// 3.1.1 language, 2.4.1 bypass blocks, 2.4.2 title, 1.3.1 landmarks.
+#[tokio::test]
+async fn shell_has_lang_title_skip_link_and_one_main() {
+    let html = shell_html().await;
+    let re = |p: &str| regex::Regex::new(p).unwrap();
+    assert!(
+        re(r#"<html[^>]*\slang="[a-z]{2}"#).is_match(&html),
+        "missing <html lang>"
+    );
+    assert!(
+        re(r"<title>[^<]+</title>").is_match(&html),
+        "missing non-empty <title>"
+    );
+    assert!(
+        re(r##"<a[^>]*class="skip-link"[^>]*href="#main""##).is_match(&html),
+        "missing skip link to #main"
+    );
+    assert_eq!(
+        re(r"<main[\s>]").find_iter(&html).count(),
+        1,
+        "exactly one <main>"
+    );
+    assert!(
+        re(r#"<main[^>]*\sid="main"[^>]*\stabindex="-1""#).is_match(&html),
+        "<main id=main> must be focusable (tabindex=-1) as the skip-link target"
+    );
+    assert!(
+        re(r#"<nav[^>]*\saria-label="#).is_match(&html),
+        "<nav> needs a name"
+    );
+    assert!(html.contains("<header"), "missing <header> landmark");
+    // Live regions exist before any message is written into them (4.1.3).
+    assert!(re(r#"<[^>]*\brole="status"[^>]*aria-live="polite""#).is_match(&html));
+    assert!(re(r#"<[^>]*\brole="alert""#).is_match(&html));
+    // The dialog is modal, named, and described (4.1.2).
+    assert!(
+        re(r#"<dialog[^>]*aria-labelledby="api-key-title"[^>]*aria-modal="true""#).is_match(&html)
+            || re(r#"<dialog[^>]*aria-modal="true"[^>]*aria-labelledby="api-key-title""#)
+                .is_match(&html),
+        "dialog must have aria-labelledby and aria-modal"
+    );
+}
+
+/// 2.4.3 focus order: no positive tabindex anywhere (shell or templates).
+#[tokio::test]
+async fn no_positive_tabindex_in_shell_or_scripts() {
+    let positive_attr = regex::Regex::new(r#"(?i)tabindex\s*=\s*["']?\s*[1-9]"#).unwrap();
+    let positive_prop = regex::Regex::new(r"\.tabIndex\s*=\s*[1-9]").unwrap();
+    let html = shell_html().await;
+    assert!(
+        !positive_attr.is_match(&html),
+        "positive tabindex in index.html"
+    );
+    for (path, js) in js_assets() {
+        assert!(
+            !positive_attr.is_match(&js),
+            "positive tabindex attribute in {path}"
+        );
+        assert!(
+            !positive_prop.is_match(&js),
+            "positive tabIndex assignment in {path}"
+        );
+    }
+}
+
+/// 1.1.1 text alternatives: every image or inline SVG the UI could emit is
+/// either named or hidden from assistive technology.
+#[tokio::test]
+async fn images_and_svgs_are_named_or_hidden() {
+    let tag = regex::Regex::new(r"(?is)<(img|svg)\b[^>]*>").unwrap();
+    let named = regex::Regex::new(
+        r#"(?i)\b(alt|aria-label|aria-labelledby)\s*=|aria-hidden="true"|role="presentation""#,
+    )
+    .unwrap();
+    let mut sources = vec![("index.html".to_string(), shell_html().await)];
+    sources.extend(js_assets());
+    for (path, text) in sources {
+        for m in tag.find_iter(&text) {
+            assert!(
+                named.is_match(m.as_str()),
+                "{path}: {} has no accessible name and is not aria-hidden",
+                m.as_str()
+            );
+        }
+    }
+}
+
+/// 1.3.1 / 4.1.2: every form control in the shell has a label. Inputs need
+/// a `<label for>` or an aria name; buttons need text or an aria-label.
+#[tokio::test]
+async fn shell_controls_are_labelled() {
+    let html = shell_html().await;
+    let input = regex::Regex::new(r"(?is)<(input|select)\b[^>]*>").unwrap();
+    let id = regex::Regex::new(r#"\bid="([^"]+)""#).unwrap();
+    let aria = regex::Regex::new(r#"\baria-label(ledby)?="[^"]+""#).unwrap();
+    let mut controls = 0;
+    for m in input.find_iter(&html) {
+        controls += 1;
+        let tag = m.as_str();
+        let labelled = aria.is_match(tag)
+            || id
+                .captures(tag)
+                .is_some_and(|c| html.contains(&format!("<label for=\"{}\"", &c[1])));
+        assert!(labelled, "unlabelled control in index.html: {tag}");
+    }
+    let button = regex::Regex::new(r"(?is)<button\b([^>]*)>(.*?)</button>").unwrap();
+    let strip = regex::Regex::new(r"<[^>]+>").unwrap();
+    for c in button.captures_iter(&html) {
+        controls += 1;
+        let text = strip.replace_all(&c[2], "").trim().to_string();
+        assert!(
+            !text.is_empty() || aria.is_match(&c[1]),
+            "button without a name in index.html: {}",
+            &c[0]
+        );
+    }
+    assert!(
+        controls >= 5,
+        "expected the shell's controls to be checked, saw {controls}"
+    );
+
+    // The scripts' own templates: every `<input` they emit is wrapped in a
+    // `<label>`, carries an aria-label, or has an id that a `<label for>`
+    // in the same file refers to. Inputs built with createElement (kvInput,
+    // beginEdit, the column chooser) set their names in code and are
+    // covered by the axe scan, not by this check.
+    let emitted = regex::Regex::new(r#"<input\b[^>]*>"#).unwrap();
+    for (path, js) in js_assets() {
+        for m in emitted.find_iter(&js) {
+            let tag = m.as_str();
+            let before = &js[m.start().saturating_sub(160)..m.start()];
+            let wrapped = before
+                .rfind("<label")
+                .is_some_and(|i| !before[i..].contains("</label>"));
+            let ok = wrapped
+                || aria.is_match(tag)
+                || id
+                    .captures(tag)
+                    .is_some_and(|c| js.contains(&format!("for=\"{}\"", &c[1])));
+            assert!(ok, "{path} emits an input without a label: {tag}");
+        }
+    }
+}
+
+/// 2.4.7 focus visible: the stylesheet never removes the focus outline
+/// without providing a :focus-visible replacement, and defines one.
+#[tokio::test]
+async fn css_keeps_a_visible_focus_indicator() {
+    let css = asset_text("app.css");
+    let removed = regex::Regex::new(r"outline\s*:\s*(none|0)\b").unwrap();
+    let replacement =
+        regex::Regex::new(r"(?s):focus-visible\s*\{[^}]*outline\s*:\s*\d+px\s+solid").unwrap();
+    assert!(
+        replacement.is_match(&css),
+        "app.css must style :focus-visible with a solid outline"
+    );
+    // Allowed only inside a rule that is itself a :focus-visible
+    // replacement; the UI currently has none, so any hit is a regression.
+    if let Some(m) = removed.find(&css) {
+        panic!(
+            "app.css removes the focus outline (`{}`) without a replacement",
+            m.as_str()
+        );
+    }
+    // 1.4.11: control boundaries use the high-contrast token, not the
+    // decorative one (the ratios are computed in tmp/agent-508/contrast.py).
+    assert!(
+        css.contains("--control-border:"),
+        "missing --control-border token"
+    );
+    let btn = regex::Regex::new(r"(?s)\.btn\s*\{[^}]*border:\s*1px solid var\(--control-border\)")
+        .unwrap();
+    assert!(btn.is_match(&css), ".btn must use --control-border");
+    // 1.4.1: state marks that do not rely on colour alone.
+    assert!(
+        css.contains(".visually-hidden"),
+        "missing .visually-hidden utility"
+    );
+    assert!(
+        css.contains("@media (forced-colors: active)"),
+        "missing forced-colors fallback"
+    );
+}
+
+/// 4.1.2 name/role/value for the custom widgets, 1.4.1 non-colour cues,
+/// 2.4.2 per-view titles: the scripts contain the wiring the audit verified.
+#[tokio::test]
+async fn scripts_carry_the_widget_semantics_the_audit_verified() {
+    let rt = asset_text("records-table.js");
+    assert!(rt.contains("role=\"grid\""), "records table is a grid");
+    assert!(
+        rt.contains("aria-rowcount") && rt.contains("aria-rowindex"),
+        "virtualised grid reports row counts"
+    );
+    assert!(
+        rt.contains("aria-sort"),
+        "sortable headers expose aria-sort"
+    );
+    assert!(
+        rt.contains("has validation error"),
+        "error rows carry text, not only colour"
+    );
+    assert!(
+        rt.contains("(edited)"),
+        "edited cells carry text, not only colour"
+    );
+    let tabs = asset_text("tabs.js");
+    assert!(
+        tabs.contains("role=\"tabpanel\"") || tabs.contains("'tabpanel'"),
+        "tab panels are marked"
+    );
+    assert!(
+        tabs.contains("aria-controls") && tabs.contains("aria-selected"),
+        "tabs wire aria-controls and aria-selected"
+    );
+    let app = asset_text("app.js");
+    assert!(
+        app.contains("document.title ="),
+        "the title changes per view"
+    );
+    assert!(
+        app.contains("aria-describedby"),
+        "the tooltip is linked to its anchor"
+    );
+    assert!(
+        app.contains("aria-pressed"),
+        "the theme toggle exposes its state"
+    );
+    let wb = asset_text("workbench.js");
+    assert!(
+        wb.contains("aria-invalid"),
+        "form errors mark the field invalid"
+    );
+    assert!(
+        wb.contains("class=\"visually-hidden\"") || wb.contains("novalidate"),
+        "custom validation replaces the native bubble"
+    );
+    for (path, js) in js_assets() {
+        // The file input must be focusable: hiding it with display:none
+        // took the only mouse-free way to choose a file away from keyboards.
+        assert!(!js.contains("type=\"file\" id=\"file-input\" accept=\".fec,text/plain,application/octet-stream\" class=\"hidden\""), "{path}: file input hidden with display:none");
+    }
+}

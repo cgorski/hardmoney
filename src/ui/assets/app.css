@@ -1,6 +1,10 @@
 /* hardmoney UI. Hand-written; no framework.
-   Colours are chosen for WCAG AA contrast (>= 4.5:1 for text) in both
-   themes. Money, IDs, and raw .fec text use the monospace stack. */
+   Colours are chosen for WCAG 2.1 AA contrast in both themes: >= 4.5:1
+   for text (1.4.3) and >= 3:1 for control boundaries and the focus ring
+   (1.4.11). `--border` is for decorative rules (cards, table lines);
+   anything a user must identify as a control uses `--control-border`.
+   tmp/agent-508/contrast.py recomputes every pair from this file.
+   Money, IDs, and raw .fec text use the monospace stack. */
 
 :root {
   --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -10,6 +14,7 @@
   --surface: #f5f6f8;
   --surface-2: #e9ecf0;
   --border: #c9ced6;
+  --control-border: #6e7783;
   --text: #1a1d21;
   --muted: #565d66;
   --accent: #1f4e79;
@@ -33,6 +38,7 @@
   --surface: #1e2329;
   --surface-2: #272d35;
   --border: #3a424c;
+  --control-border: #7d8793;
   --text: #e6e8eb;
   --muted: #a6adb6;
   --accent: #7cb4e8;
@@ -57,6 +63,7 @@
     --surface: #1e2329;
     --surface-2: #272d35;
     --border: #3a424c;
+    --control-border: #7d8793;
     --text: #e6e8eb;
     --muted: #a6adb6;
     --accent: #7cb4e8;
@@ -114,6 +121,20 @@ p { margin: 0.4rem 0; }
 .nowrap { white-space: nowrap; }
 .hidden { display: none !important; }
 
+/* Present to assistive technology and to keyboard focus, but not drawn. */
+.visually-hidden {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 .skip-link {
   position: absolute;
   left: -9999px;
@@ -164,7 +185,7 @@ main {
 .btn {
   font: inherit;
   padding: 0.4rem 0.8rem;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 6px;
   background: var(--surface);
   color: var(--text);
@@ -179,6 +200,12 @@ main {
 }
 .btn-primary:hover { filter: brightness(1.1); background: var(--accent); }
 .btn-quiet { background: transparent; }
+/* A toggle button (aria-pressed) shows its state, not a changing label. */
+.btn[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent);
+}
 .btn-small { padding: 0.2rem 0.5rem; font-size: 0.9em; }
 .btn-link {
   background: none;
@@ -190,16 +217,19 @@ main {
   font: inherit;
 }
 
-input[type="text"], input[type="search"], input[type="password"], input[type="number"], select, textarea {
+input[type="text"], input[type="search"], input[type="password"], input[type="number"], input[type="date"], select, textarea {
   font: inherit;
   padding: 0.35rem 0.5rem;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 6px;
   background: var(--bg);
   color: var(--text);
 }
-input:invalid { border-color: var(--error); }
+input[aria-invalid="true"] { border-color: var(--error); border-width: 2px; }
 label { font-weight: 600; }
+/* The real file input is visually hidden but focusable; its label is the
+   visible button and shows the focus ring when the input has focus. */
+.file-pick input:focus-visible + .btn { outline: 3px solid var(--focus); outline-offset: 2px; }
 .field { display: flex; flex-direction: column; gap: 0.2rem; }
 .field-row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: flex-end; }
 
@@ -222,26 +252,28 @@ label { font-weight: 600; }
 .card-header .spacer { flex: 1; }
 .grid-2 {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr));
   gap: 1rem;
 }
 .stack > * + * { margin-top: 1rem; }
 
 .kv {
   display: grid;
-  grid-template-columns: minmax(180px, max-content) 1fr;
+  grid-template-columns: minmax(min(180px, 40%), max-content) minmax(0, 1fr);
   gap: 0.25rem 1rem;
   margin: 0;
 }
-.kv dt { color: var(--muted); }
-.kv dd { margin: 0; overflow-wrap: anywhere; }
+/* Field names are long and have no break points, so let them wrap anywhere
+   (WCAG 1.4.10 reflow at 320 px). */
+.kv dt { color: var(--muted); overflow-wrap: anywhere; min-width: 0; }
+.kv dd { margin: 0; overflow-wrap: anywhere; min-width: 0; }
 .kv input {
   width: 100%;
   font-family: var(--font-mono);
   font-size: 0.93em;
   padding: 0.15rem 0.4rem;
 }
-.kv input.edited { background: var(--edited-bg); }
+.kv input.edited { background: var(--edited-bg); border-left: 4px solid var(--accent); }
 
 .badge {
   display: inline-block;
@@ -292,6 +324,7 @@ label { font-weight: 600; }
   font-weight: 600;
   position: relative;
   top: 1px;
+  box-shadow: inset 0 3px 0 var(--accent);
 }
 .tabs .count { color: var(--muted); margin-left: 0.3rem; font-weight: normal; }
 
@@ -306,6 +339,7 @@ label { font-weight: 600; }
 .dropzone.active { border-color: var(--accent); background: var(--edited-bg); }
 .dropzone p { margin: 0.3rem 0; }
 .dropzone .or { color: var(--muted); }
+.file-pick { position: relative; }
 .fetch-row { display: flex; gap: 0.5rem; justify-content: center; align-items: center; flex-wrap: wrap; margin-top: 0.75rem; }
 
 /* Plain tables */
@@ -326,13 +360,16 @@ table.plain tr.mismatch td { color: var(--error); }
 table.plain tbody tr:hover { background: var(--row-hover); }
 table.plain tr.mismatch:hover { background: var(--error-bg); filter: brightness(0.97); }
 .table-scroll { overflow: auto; max-height: 60vh; border: 1px solid var(--border); border-radius: 6px; }
+.table-scroll:focus-visible { outline-offset: -3px; }
 
 /* Records table (virtualised) */
 .rt { display: flex; flex-direction: column; gap: 0.5rem; }
 .rt-toolbar { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
-.rt-toolbar input[type="search"] { min-width: 16rem; }
+.rt-toolbar input[type="search"] { width: 16rem; max-width: 100%; }
 .rt-toolbar details { position: relative; }
-.rt-toolbar summary { cursor: pointer; padding: 0.35rem 0.6rem; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); list-style: none; }
+.rt-toolbar summary { cursor: pointer; padding: 0.35rem 0.6rem; border: 1px solid var(--control-border); border-radius: 6px; background: var(--surface); list-style: none; }
+.rt-toolbar summary::-webkit-details-marker { display: none; }
+.rt-toolbar summary::after { content: " \25be"; color: var(--muted); }
 .rt-toolbar details[open] summary { background: var(--surface-2); }
 .rt-columns {
   position: absolute;
@@ -343,11 +380,11 @@ table.plain tr.mismatch:hover { background: var(--error-bg); filter: brightness(
   max-height: 20rem;
   overflow: auto;
   background: var(--bg);
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 6px;
   padding: 0.5rem 0.75rem;
   box-shadow: var(--shadow);
-  min-width: 18rem;
+  min-width: min(18rem, calc(100vw - 2rem));
 }
 .rt-columns label { display: block; font-weight: normal; white-space: nowrap; }
 .rt-columns .rt-columns-actions { display: flex; gap: 0.5rem; margin-bottom: 0.4rem; }
@@ -378,9 +415,8 @@ table.plain tr.mismatch:hover { background: var(--error-bg); filter: brightness(
   width: 180px;
   max-width: 180px;
 }
-.rt th.col-line, .rt td.col-line { width: 72px; max-width: 72px; color: var(--muted); }
-.rt th.col-type, .rt td.col-type { width: 90px; max-width: 90px; }
-.rt th {
+.rt th.col-line { width: 72px; max-width: 72px; color: var(--muted); }
+.rt thead th {
   position: sticky;
   top: 0;
   z-index: 5;
@@ -389,16 +425,21 @@ table.plain tr.mismatch:hover { background: var(--error-bg); filter: brightness(
   cursor: pointer;
   user-select: none;
 }
-.rt th .sort { color: var(--muted); margin-left: 0.25rem; }
-.rt th:focus-visible { outline-offset: -3px; }
+.rt thead th .sort { color: var(--muted); margin-left: 0.25rem; }
+.rt thead th:focus-visible, .rt td:focus-visible { outline-offset: -3px; }
+/* Row headers hold the line number; they are not sortable. */
+.rt tbody th.col-line { font-weight: normal; font-family: var(--font-mono); font-size: 0.9em; }
 .rt td { font-family: var(--font-mono); font-size: 0.9em; }
 .rt td.amount { text-align: right; }
-.rt td.editable { cursor: text; }
-.rt td.edited { background: var(--edited-bg); }
-.rt tr.highlight td { background: var(--highlight-bg); }
-.rt tr.has-error td.col-line { color: var(--error); font-weight: 700; }
-.rt tbody tr:hover td { background: var(--row-hover); }
-.rt tr.highlight:hover td { background: var(--highlight-bg); }
+.rt td.cell { cursor: text; }
+/* Edited cells and error lines carry a mark as well as a colour (1.4.1);
+   a screen reader gets the same information from visually-hidden text. */
+.rt td.edited { background: var(--edited-bg); box-shadow: inset 4px 0 0 var(--accent); }
+.rt tr.highlight td, .rt tr.highlight th { background: var(--highlight-bg); }
+.rt tr.has-error th.col-line { color: var(--error); font-weight: 700; }
+.rt .err-mark { margin-right: 0.15rem; }
+.rt tbody tr:hover td, .rt tbody tr:hover th { background: var(--row-hover); }
+.rt tr.highlight:hover td, .rt tr.highlight:hover th { background: var(--highlight-bg); }
 .rt td input {
   width: 100%;
   height: 26px;
@@ -436,11 +477,11 @@ table.plain tr.mismatch:hover { background: var(--error-bg); filter: brightness(
   flex-direction: column;
   gap: 0.5rem;
   z-index: 50;
-  max-width: 28rem;
+  max-width: min(28rem, calc(100vw - 2rem));
 }
 .toast {
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-left-width: 5px;
   border-radius: 6px;
   padding: 0.6rem 0.8rem;
@@ -457,12 +498,12 @@ table.plain tr.mismatch:hover { background: var(--error-bg); filter: brightness(
 
 /* Dialog */
 dialog {
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 10px;
   background: var(--bg);
   color: var(--text);
   padding: 1.2rem 1.4rem;
-  max-width: 28rem;
+  max-width: min(28rem, calc(100vw - 2rem));
   box-shadow: var(--shadow);
 }
 dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
@@ -474,10 +515,10 @@ dialog input { width: 100%; margin-top: 0.25rem; }
 .tooltip {
   position: fixed;
   z-index: 60;
-  max-width: 26rem;
+  max-width: min(26rem, calc(100vw - 1rem));
   background: var(--bg);
   color: var(--text);
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 6px;
   padding: 0.5rem 0.7rem;
   box-shadow: var(--shadow);
@@ -494,7 +535,7 @@ dialog input { width: 100%; margin-top: 0.25rem; }
 .tooltip dd { margin: 0; }
 
 /* Data browser */
-.search-forms { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 1rem; }
+.search-forms { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); gap: 1rem; }
 .pager { display: flex; gap: 0.5rem; align-items: center; margin: 0.5rem 0; flex-wrap: wrap; }
 .pager .status { color: var(--muted); }
 .totals { display: flex; gap: 1.5rem; flex-wrap: wrap; margin: 0.5rem 0; }
@@ -514,11 +555,20 @@ dialog input { width: 100%; margin-top: 0.25rem; }
 @media (max-width: 720px) {
   .topbar { flex-wrap: wrap; }
   .topbar-actions { margin-left: 0; }
-  .kv { grid-template-columns: 1fr; }
-  .findings li { grid-template-columns: 1fr; }
+  .kv { grid-template-columns: minmax(0, 1fr); }
+  .findings li { grid-template-columns: minmax(0, 1fr); }
+  .summary-strip .item { flex-wrap: wrap; }
 }
 
 @media (prefers-reduced-motion: no-preference) {
   .toast { animation: toast-in 150ms ease-out; }
   @keyframes toast-in { from { transform: translateY(6px); opacity: 0; } to { transform: none; opacity: 1; } }
+}
+
+/* Windows High Contrast and similar: box-shadows are dropped, so state
+   marks fall back to borders in system colours. */
+@media (forced-colors: active) {
+  .rt td.edited, .kv input.edited { border-left: 4px solid Highlight; }
+  .tabs [role="tab"][aria-selected="true"] { border-top: 3px solid Highlight; }
+  .btn[aria-pressed="true"] { border: 3px solid Highlight; }
 }

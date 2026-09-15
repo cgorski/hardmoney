@@ -8,16 +8,18 @@
 //! field lives and what rule governs it, export the whole thing as JSON, or
 //! diff two spec versions -- without reading Rust.
 //!
-//! Column numbering: `fields` and `diff` are human-facing and count columns
-//! from 1, the way the FEC's workbook does. `export` is the raw data model
-//! and counts from 0, matching [`FieldDef::column`] and [`FieldSpec::column`]
+//! Column numbering: `fields`, `diff`, `export --format json-schema`, and
+//! `export --format csv` are human-facing and count columns from 1, the way
+//! the FEC's workbook does. `export --format json` is the raw data model and
+//! counts from 0, matching [`FieldDef::column`] and [`FieldSpec::column`]
 //! (the document says so in its `column_base` key).
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use hardmoney::parser::form::table_for_form_type;
+use hardmoney::parser::jsonschema;
 use hardmoney::parser::{
     BUNDLED_SPEC_VERSION, FieldDef, FieldKind, FieldSpec, Layout, Requirement, SpecVersion, Table,
 };
@@ -35,7 +37,8 @@ pub enum SpecCommand {
     Tables(TablesArgs),
     /// The fields of one table at one spec version, in column order.
     Fields(FieldsArgs),
-    /// The complete machine-readable specification, as JSON.
+    /// The complete machine-readable specification: JSON, JSON Schema, or
+    /// CSV.
     Export(ExportArgs),
     /// Fields added, removed, and moved between two spec versions.
     Diff(DiffArgs),
@@ -71,10 +74,42 @@ pub struct FieldsArgs {
 
 #[derive(Args, Debug)]
 pub struct ExportArgs {
-    /// Accepted for consistency with the other subcommands; export is
-    /// always JSON.
+    /// Output format. `json`: the raw data model (every table, every
+    /// version-bucketed layout, every FEC spec row; 0-based columns).
+    /// `json-schema`: one JSON Schema (draft 2020-12) per table describing
+    /// a record as an object keyed by canonical field name, as a `$defs`
+    /// bundle or, with --table, a standalone document. `csv`: one row per
+    /// table, version bucket, and field, with the FEC's spec columns, for
+    /// spreadsheet users. Columns are 1-based in json-schema and csv.
+    #[arg(long, value_enum, default_value_t = ExportFormat::Json)]
+    pub format: ExportFormat,
+
+    /// Only this table (e.g. SchA, F3X, TEXT; case-insensitive).
+    #[arg(long, value_parser = parse_table)]
+    pub table: Option<Table>,
+
+    /// For json-schema: the spec version the record is at, e.g. 8.5, 7.0
+    /// [default: the bundled spec version]; columns come from that
+    /// version's layout, field rules from the bundled workbook. For json
+    /// and csv: only layouts that cover this version [default: all].
     #[arg(long)]
+    pub version: Option<SpecVersion>,
+
+    /// Accepted for consistency with the other subcommands; the same as
+    /// `--format json`.
+    #[arg(long, conflicts_with = "format")]
     pub json: bool,
+}
+
+/// What `spec export` writes.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportFormat {
+    /// The raw data model, 0-based columns.
+    Json,
+    /// JSON Schema draft 2020-12, one schema per table.
+    JsonSchema,
+    /// One flat row per table, version bucket, and field.
+    Csv,
 }
 
 #[derive(Args, Debug)]
@@ -193,18 +228,28 @@ fn version_list(versions: impl IntoIterator<Item = SpecVersion>) -> String {
 /// The layout of `table` at `version`, or an error naming the versions it
 /// does have.
 fn layout_or_error(table: Table, version: SpecVersion) -> Result<&'static Layout, SpecError> {
-    table.layout(version).ok_or_else(|| {
-        let available: BTreeSet<SpecVersion> = table
-            .layouts()
-            .iter()
-            .flat_map(|l| l.versions.iter().copied())
-            .collect();
-        SpecError::NoLayout {
-            table,
-            version,
-            available: version_list(available),
-        }
-    })
+    table
+        .layout(version)
+        .ok_or_else(|| no_layout(table, version))
+}
+
+/// The error for `table` having no layout at `version`, naming the
+/// versions it does have.
+fn no_layout(table: Table, version: SpecVersion) -> SpecError {
+    SpecError::NoLayout {
+        table,
+        version,
+        available: version_list(table_versions(table)),
+    }
+}
+
+/// Every spec version `table` has a layout for.
+fn table_versions(table: Table) -> BTreeSet<SpecVersion> {
+    table
+        .layouts()
+        .iter()
+        .flat_map(|l| l.versions.iter().copied())
+        .collect()
 }
 
 /// Fails unless some table has a layout at `version`, so a diff against a
@@ -461,12 +506,21 @@ struct SpecExport {
     tables: Vec<TableExport>,
 }
 
-fn export_table(table: Table) -> TableExport {
+/// The layouts of `table` in bundled order (newest bucket first); only
+/// those covering `version` when one is given.
+fn selected_layouts(table: Table, version: Option<SpecVersion>) -> Vec<&'static Layout> {
+    table
+        .layouts()
+        .iter()
+        .filter(|l| version.is_none_or(|v| l.supports(v)))
+        .collect()
+}
+
+fn export_table(table: Table, version: Option<SpecVersion>) -> TableExport {
     TableExport {
         table: table.as_str(),
-        layouts: table
-            .layouts()
-            .iter()
+        layouts: selected_layouts(table, version)
+            .into_iter()
             .map(|l| LayoutExport {
                 versions: l.versions,
                 width: l.width,
@@ -484,14 +538,197 @@ fn export_table(table: Table) -> TableExport {
     }
 }
 
-fn export(_args: ExportArgs) -> super::CliResult {
-    let doc = SpecExport {
-        bundled_spec_version: BUNDLED_SPEC_VERSION,
-        column_base: 0,
-        tables: Table::ALL.iter().map(|&t| export_table(t)).collect(),
-    };
-    println!("{}", serde_json::to_string_pretty(&doc)?);
+/// The tables an export covers: the one asked for, or every table; with a
+/// version, only tables that have a layout at it. Asking for one table at
+/// a version it has no layout for is an error naming the versions it has.
+fn selected_tables(
+    table: Option<Table>,
+    version: Option<SpecVersion>,
+) -> Result<Vec<Table>, SpecError> {
+    match (table, version) {
+        (Some(t), Some(v)) => {
+            layout_or_error(t, v)?;
+            Ok(vec![t])
+        }
+        (Some(t), None) => Ok(vec![t]),
+        (None, Some(v)) => {
+            known_version_or_error(v)?;
+            Ok(Table::ALL
+                .iter()
+                .copied()
+                .filter(|t| t.supports_version(v))
+                .collect())
+        }
+        (None, None) => Ok(Table::ALL.to_vec()),
+    }
+}
+
+fn export(args: ExportArgs) -> super::CliResult {
+    match args.format {
+        ExportFormat::Json => {
+            let tables = selected_tables(args.table, args.version)?;
+            let doc = SpecExport {
+                bundled_spec_version: BUNDLED_SPEC_VERSION,
+                column_base: 0,
+                tables: tables
+                    .into_iter()
+                    .map(|t| export_table(t, args.version))
+                    .collect(),
+            };
+            println!("{}", serde_json::to_string_pretty(&doc)?);
+        }
+        ExportFormat::JsonSchema => {
+            let version = match args.version {
+                Some(v) => known_version_or_error(v)?,
+                None => bundled_version()?,
+            };
+            let doc = match args.table {
+                Some(t) => {
+                    jsonschema::table_schema(t, version).ok_or_else(|| no_layout(t, version))?
+                }
+                None => jsonschema::bundle(version),
+            };
+            println!("{}", serde_json::to_string_pretty(&doc)?);
+        }
+        ExportFormat::Csv => {
+            let tables = selected_tables(args.table, args.version)?;
+            let mut w = csv::Writer::from_writer(std::io::stdout().lock());
+            for row in csv_rows(&tables, args.version) {
+                w.serialize(row)?;
+            }
+            w.flush()?;
+        }
+    }
     Ok(())
+}
+
+/// One field of one table in one version bucket, with its FEC spec row
+/// joined by canonical name: the FEC's spreadsheet given back as a
+/// spreadsheet, complete across versions. Multi-valued cells are
+/// `|`-separated, the workbook's own convention (`F3|F3X`).
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct CsvRow {
+    pub table: &'static str,
+    /// Every version this bucket covers, oldest first, space-separated.
+    pub versions: String,
+    pub first_version: SpecVersion,
+    pub last_version: SpecVersion,
+    /// Cells a record of this bucket has.
+    pub width: u16,
+    /// 1-based column in the delimited record.
+    pub column: u32,
+    pub field: &'static str,
+    /// The spec version the remaining columns describe (the bundled one),
+    /// or blank when the current workbook has no row for this field.
+    pub rules_version: &'static str,
+    pub description: String,
+    /// The FEC type code, e.g. `A/N-200`.
+    pub r#type: String,
+    pub kind: String,
+    pub max_len: Option<u16>,
+    pub required_level: &'static str,
+    pub required_condition: String,
+    pub sample: String,
+    pub value_reference: String,
+    pub rule: String,
+    pub forms: String,
+    pub allowed_values: String,
+    pub pattern: String,
+}
+
+/// The CSV rows for `tables`, in table order, newest bucket first, then by
+/// column. Pure.
+#[must_use]
+pub fn csv_rows(tables: &[Table], version: Option<SpecVersion>) -> Vec<CsvRow> {
+    let mut rows = Vec::new();
+    for &table in tables {
+        for layout in selected_layouts(table, version) {
+            let mut versions: Vec<SpecVersion> = layout.versions.to_vec();
+            versions.sort();
+            let (Some(&first), Some(&last)) = (versions.first(), versions.last()) else {
+                continue;
+            };
+            let joined = version_list(versions.iter().copied()).replace(", ", " ");
+            let mut defs: Vec<&FieldDef> = layout.fields.iter().collect();
+            defs.sort_by_key(|d| d.column);
+            for def in defs {
+                rows.push(csv_row(
+                    table,
+                    layout,
+                    &joined,
+                    first,
+                    last,
+                    def,
+                    table.spec(def.name),
+                ));
+            }
+        }
+    }
+    rows
+}
+
+fn csv_row(
+    table: Table,
+    layout: &Layout,
+    versions: &str,
+    first: SpecVersion,
+    last: SpecVersion,
+    def: &FieldDef,
+    spec: Option<&'static FieldSpec>,
+) -> CsvRow {
+    let (level, condition) = match spec.map(|s| s.required) {
+        Some(Requirement::Error) => ("error", ""),
+        Some(Requirement::Warning) => ("warning", ""),
+        Some(Requirement::Conditional(c)) => ("conditional", c),
+        Some(Requirement::None) => ("none", ""),
+        Some(_) => ("?", ""),
+        None => ("", ""),
+    };
+    CsvRow {
+        table: table.as_str(),
+        versions: versions.to_string(),
+        first_version: first,
+        last_version: last,
+        width: layout.width,
+        column: display_column(def.column),
+        field: def.name,
+        rules_version: if spec.is_some() {
+            BUNDLED_SPEC_VERSION
+        } else {
+            ""
+        },
+        description: spec.map(|s| s.description.to_string()).unwrap_or_default(),
+        r#type: spec.and_then(type_code).unwrap_or_default(),
+        kind: spec.map(|s| s.kind.to_string()).unwrap_or_default(),
+        max_len: spec.and_then(|s| s.max_len),
+        required_level: level,
+        required_condition: one_line(condition),
+        sample: spec.and_then(|s| s.sample).unwrap_or_default().to_string(),
+        value_reference: spec
+            .and_then(|s| s.value_reference)
+            .map(one_line)
+            .unwrap_or_default(),
+        rule: spec.and_then(|s| s.rule).map(one_line).unwrap_or_default(),
+        forms: spec.map(|s| s.forms.join("|")).unwrap_or_default(),
+        allowed_values: spec.map(|s| s.allowed_values.join("|")).unwrap_or_default(),
+        pattern: spec.and_then(|s| s.pattern).unwrap_or_default().to_string(),
+    }
+}
+
+/// The workbook's type code from kind and length (`A/N-200`, `AMT-12`,
+/// `NUM-8`); `None` for a row whose type did not parse.
+fn type_code(spec: &FieldSpec) -> Option<String> {
+    let prefix = match spec.kind {
+        FieldKind::Alpha => "A",
+        FieldKind::AlphaNumeric => "A/N",
+        FieldKind::Numeric => "NUM",
+        FieldKind::Amount => "AMT",
+        _ => return None,
+    };
+    Some(match spec.max_len {
+        Some(n) => format!("{prefix}-{n}"),
+        None => prefix.to_string(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1152,7 +1389,7 @@ mod tests {
         let doc = SpecExport {
             bundled_spec_version: BUNDLED_SPEC_VERSION,
             column_base: 0,
-            tables: Table::ALL.iter().map(|&t| export_table(t)).collect(),
+            tables: Table::ALL.iter().map(|&t| export_table(t, None)).collect(),
         };
         let json = serde_json::to_value(&doc).unwrap();
         assert_eq!(json["column_base"], 0);
@@ -1172,6 +1409,121 @@ mod tests {
         assert_eq!(layouts[0]["fields"][0]["column"], 0);
         assert_eq!(sch_a["specs"][0]["column"], 0);
         assert_eq!(sch_a["specs"][0]["kind"], "alpha_numeric");
+    }
+
+    #[test]
+    fn export_selection_by_table_and_version() {
+        assert_eq!(selected_tables(None, None).unwrap(), Table::ALL.to_vec());
+        assert_eq!(
+            selected_tables(Some(Table::SchA), None).unwrap(),
+            vec![Table::SchA]
+        );
+        let at_85 = selected_tables(None, Some(V85)).unwrap();
+        assert!(at_85.contains(&Table::SchA));
+        assert!(!at_85.contains(&Table::SchI));
+        assert!(matches!(
+            selected_tables(Some(Table::SchI), Some(V85)),
+            Err(SpecError::NoLayout { .. })
+        ));
+        assert!(matches!(
+            selected_tables(None, Some(SpecVersion::electronic(9, 9))),
+            Err(SpecError::UnknownVersion { .. })
+        ));
+
+        // A version restricts the layouts to the one bucket covering it.
+        let one = export_table(Table::SchA, Some(V70));
+        assert_eq!(one.layouts.len(), 1);
+        assert!(one.layouts[0].versions.contains(&V70));
+        let all = export_table(Table::SchA, None);
+        assert_eq!(all.layouts.len(), Table::SchA.layouts().len());
+        // Bundled order: the current version's bucket first.
+        assert!(all.layouts[0].versions.contains(&V85));
+    }
+
+    #[test]
+    fn csv_rows_cover_every_field_of_every_bucket_with_spec_joined() {
+        let rows = csv_rows(Table::ALL, None);
+        let expected: usize = Table::ALL
+            .iter()
+            .flat_map(|t| t.layouts())
+            .map(|l| l.fields.len())
+            .sum();
+        assert_eq!(rows.len(), expected);
+
+        let sch_a: Vec<&CsvRow> = rows.iter().filter(|r| r.table == "SchA").collect();
+        let amount = sch_a
+            .iter()
+            .find(|r| r.field == "contribution_amount" && r.versions.contains("8.5"))
+            .unwrap();
+        assert_eq!(amount.column, 21);
+        assert_eq!(amount.r#type, "AMT-12");
+        assert_eq!(amount.kind, "amount");
+        assert_eq!(amount.max_len, Some(12));
+        assert_eq!(amount.required_level, "warning");
+        assert_eq!(amount.rules_version, "8.5");
+        let filer_id = sch_a
+            .iter()
+            .find(|r| r.field == "filer_committee_id_number" && r.versions.contains("8.5"))
+            .unwrap();
+        assert_eq!(filer_id.required_level, "error");
+        assert_eq!(filer_id.r#type, "A/N-9");
+        assert_eq!(amount.forms, "F3|F3X|F3P|F3L");
+        assert_eq!(amount.last_version, V85);
+        assert!(amount.first_version <= V85);
+
+        // Rule text is one line; multi-line workbook cells are collapsed.
+        let form_type = sch_a
+            .iter()
+            .find(|r| r.field == "form_type" && r.versions.contains("8.5"))
+            .unwrap();
+        assert_eq!(form_type.rule, "Appendix C. SA3L must be used with the F3L");
+        assert!(!form_type.rule.contains('\n'));
+
+        // A field the current workbook dropped has columns but no rules.
+        let purpose = sch_a
+            .iter()
+            .find(|r| r.field == "contribution_purpose_code" && r.versions.contains("7.0"))
+            .unwrap();
+        assert_eq!(purpose.column, 23);
+        assert_eq!(purpose.rules_version, "");
+        assert_eq!(purpose.r#type, "");
+        assert_eq!(purpose.required_level, "");
+
+        // Enumerations and patterns are carried verbatim, `|`-joined.
+        let f3x_form_type = rows
+            .iter()
+            .find(|r| r.table == "F3X" && r.field == "form_type" && r.versions.contains("8.5"))
+            .unwrap();
+        assert_eq!(f3x_form_type.allowed_values, "F3XA|F3XN|F3XT");
+        let filer = rows
+            .iter()
+            .find(|r| {
+                r.table == "F3X"
+                    && r.field == "filer_committee_id_number"
+                    && r.versions.contains("8.5")
+            })
+            .unwrap();
+        assert!(
+            filer.pattern.starts_with("^[C|P][0-9]{8}$"),
+            "{}",
+            filer.pattern
+        );
+
+        // Filtering by version keeps only the buckets covering it.
+        let at_70 = csv_rows(&[Table::SchA], Some(V70));
+        assert_eq!(at_70.len(), Table::SchA.layout(V70).unwrap().fields.len());
+        assert!(at_70.iter().all(|r| r.versions.contains("7.0")));
+
+        // Rows serialise with a stable header.
+        let mut w = csv::Writer::from_writer(Vec::new());
+        w.serialize(&rows[0]).unwrap();
+        let text = String::from_utf8(w.into_inner().unwrap()).unwrap();
+        assert!(
+            text.starts_with(
+                "table,versions,first_version,last_version,width,column,field,rules_version,description,type,kind,max_len,required_level,required_condition,sample,value_reference,rule,forms,allowed_values,pattern\n"
+            ),
+            "{text}"
+        );
     }
 
     #[test]

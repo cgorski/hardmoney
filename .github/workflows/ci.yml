@@ -56,13 +56,21 @@ jobs:
       - run: cargo build --all-features
 
   test:
-    name: cargo test --all-features (Postgres 18)
+    name: cargo test --all-features (Postgres ${{ matrix.postgres }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 18: Aurora PostgreSQL's newest major, the deployment target; this
+        #     leg runs the whole suite.
+        # 15: what the FEC runs (FECfile+ and the weekly pg_dump archives are
+        #     produced on PG15). Only tests/postgres_integration.rs touches
+        #     the database, so this leg runs that binary alone to keep the
+        #     matrix cheap.
+        postgres: [15, 18]
     services:
       postgres:
-        # Aurora PostgreSQL's newest major (18.x) is the deployment target;
-        # test against the same major only.
-        image: postgres:18
+        image: postgres:${{ matrix.postgres }}
         env:
           POSTGRES_USER: hardmoney
           POSTGRES_PASSWORD: hardmoney
@@ -79,11 +87,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: pg${{ matrix.postgres }}
       - name: Build (all features)
         run: cargo build --all-features --verbose
       - name: Test (all features, parser + Postgres integration)
+        if: matrix.postgres == 18
         run: cargo test --all-features --verbose
+      - name: Test (Postgres integration only)
+        if: matrix.postgres != 18
+        run: cargo test --all-features --test postgres_integration --verbose
       - name: Test (parser only, no default features)
+        if: matrix.postgres == 18
         run: cargo test --no-default-features --features fetch
 
   package:

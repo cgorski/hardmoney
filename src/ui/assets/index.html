@@ -25,11 +25,17 @@
 <main id="main" tabindex="-1">
   <noscript><p class="banner banner-error">This page needs JavaScript.</p></noscript>
 </main>
-<div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
-<dialog id="api-key-dialog" aria-labelledby="api-key-title">
+<!-- Two persistent live regions receive the text of every toast: screen
+     readers announce a live region reliably only when it exists before its
+     content changes. The visible toasts below carry no live semantics so a
+     message is announced once. -->
+<div id="announce-status" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
+<div id="announce-alert" class="visually-hidden" role="alert" aria-atomic="true"></div>
+<section id="toasts" class="toasts" aria-label="Notifications"></section>
+<dialog id="api-key-dialog" aria-labelledby="api-key-title" aria-describedby="api-key-desc" aria-modal="true">
   <form method="dialog" id="api-key-form">
     <h2 id="api-key-title">API key</h2>
-    <p>This server requires a key. It is kept in this tab's session storage and sent as <code>X-Api-Key</code> on every request.</p>
+    <p id="api-key-desc">This server requires a key. It is kept in this tab's session storage and sent as <code>X-Api-Key</code> on every request.</p>
     <label for="api-key-input">Key</label>
     <input id="api-key-input" name="key" type="password" autocomplete="off" spellcheck="false">
     <div class="dialog-actions">

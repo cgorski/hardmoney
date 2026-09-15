@@ -78,8 +78,9 @@ pub use cache::{Cache, CacheInfo};
 pub use efile::{DailyZipFilings, EfileFeed, FeedItem, daily_zip_filings};
 #[cfg(feature = "serde")]
 pub use openfec::{
-    ApiKey, EfileQuery, EfileRecord, FilingRecord, FilingsIter, FilingsQuery, OpenFec, Page,
-    Pagination,
+    ApiKey, EfileQuery, EfileRecord, FilingRecord, FilingsIter, FilingsQuery, OpenFec,
+    OperationsLogQuery, OperationsLogRecord, Page, Pagination, ProcessingStage, ProcessingStatus,
+    ScheduleEndpoint,
 };
 
 /// Errors from the openFEC API, the e-file feed, and raw-filing downloads.
@@ -171,11 +172,38 @@ pub const USER_AGENT: &str = concat!("hardmoney/", env!("CARGO_PKG_VERSION"));
 
 /// The raw-filing URL on the FEC's document store for a filing id.
 ///
-/// openFEC's `fec_url` is this same URL; [`fetch_filing_bytes`] uses it
-/// when no other URL is known.
+/// openFEC's `fec_url` is this same URL today, but the FEC is
+/// inventorying `docquery.fec.gov` for retirement (`openFEC#6717`), so
+/// prefer [`resolve_fec_url`], which asks openFEC and only falls back to
+/// this template. [`fetch_filing_bytes`] does that when no URL is given.
 #[must_use]
 pub fn docquery_url(filing_id: u64) -> String {
     format!("https://docquery.fec.gov/dcdev/posted/{filing_id}.fec")
+}
+
+/// The URL to download `filing_id`'s raw `.fec` from.
+///
+/// With an openFEC key available ([`openfec::ApiKey::from_env`]) and the
+/// `serde` feature, asks `/efile/filings/` and then `/filings/` for the
+/// filing's `fec_url` ([`openfec::OpenFec::resolve_fec_url`]); that is one
+/// or two API requests. Returns [`docquery_url`] when there is no key,
+/// when neither endpoint knows the filing, or in a build without `serde`.
+/// Fails only when an API request fails ([`FecApiError::Http`],
+/// [`FecApiError::RateLimited`], [`FecApiError::Transport`], ...).
+pub fn resolve_fec_url(filing_id: u64) -> Result<String> {
+    #[cfg(feature = "serde")]
+    {
+        match openfec::OpenFec::from_env() {
+            Ok(api) => {
+                if let Some(url) = api.resolve_fec_url(filing_id)? {
+                    return Ok(url);
+                }
+            }
+            Err(FecApiError::MissingApiKey { .. }) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(docquery_url(filing_id))
 }
 
 /// Parses an HTTP `Retry-After` header value: either a non-negative
@@ -304,9 +332,11 @@ pub(crate) fn collapse_whitespace(s: &str) -> String {
 /// 1. If `cache` already holds `<id>.fec`, return it without touching the
 ///    network.
 /// 2. Otherwise GET `url_hint` (openFEC's `fec_url`, or the RSS `<link>`)
-///    if one is given; if that is a different URL from the document
-///    store's and it fails with an HTTP error, fall back to
-///    [`docquery_url`].
+///    if one is given. Without a hint, ask openFEC for the filing's
+///    `fec_url` ([`resolve_fec_url`]; one or two requests, skipped when
+///    there is no API key) and GET that. If the URL is not the document
+///    store's and fails with an HTTP error, or the resolution itself
+///    fails, fall back to [`docquery_url`].
 /// 3. Store the bytes in the cache (atomically) and return them.
 ///
 /// Fails with [`FecApiError::Http`] if the filing does not exist (the
@@ -318,13 +348,19 @@ pub fn fetch_filing_bytes(id: u64, cache: &Cache, url_hint: Option<&str>) -> Res
         return Ok(bytes);
     }
     let fallback = docquery_url(id);
-    let bytes = match url_hint.filter(|u| !u.trim().is_empty()) {
-        Some(hint) if hint != fallback => match download_filing(hint) {
+    let url = match url_hint.map(str::trim).filter(|u| !u.is_empty()) {
+        Some(hint) => hint.to_string(),
+        // Best effort: a failed lookup is not a failed download.
+        None => resolve_fec_url(id).unwrap_or_else(|_| fallback.clone()),
+    };
+    let bytes = if url == fallback {
+        download_filing(&fallback)?
+    } else {
+        match download_filing(&url) {
             Ok(bytes) => bytes,
             Err(FecApiError::Http { .. }) => download_filing(&fallback)?,
             Err(e) => return Err(e),
-        },
-        _ => download_filing(&fallback)?,
+        }
     };
     cache.write_filing(id, &bytes)?;
     Ok(bytes)

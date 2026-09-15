@@ -3,6 +3,7 @@
 
 import { api, tableSpec } from './api.js';
 import { RecordsTable } from './records-table.js';
+import { wireTablist } from './tabs.js';
 import { escapeHtml, formatMoney, formatCount, formatBytes, isAmountSpec } from './format.js';
 
 const RECHECK_DELAY_MS = 600;
@@ -23,14 +24,22 @@ const state = {
   onlyMismatches: true,
 };
 
-let ui = null; // { toast, reportError, showTooltip, hideTooltip }
+let ui = null; // { toast, reportError, setTitle, focusHeading, showTooltip, hideTooltip, hideTooltipSoon }
 let root = null;
+let mainTabs = null; // { select } from wireTablist
 
 export function renderWorkbench(main, helpers) {
   ui = helpers;
   root = main;
   if (state.doc) renderLoaded();
   else renderEmpty();
+}
+
+function title() {
+  const d = state.doc;
+  if (!d) return 'Filing workbench';
+  const committee = d.summary.fields.filer_committee_id_number || d.summary.fields.candidate_id_number || '';
+  return `${d.form_type}${committee ? ' ' + committee : ''} · Filing workbench`;
 }
 
 // ---------------------------------------------------------------------------
@@ -44,16 +53,17 @@ function renderEmpty() {
     <div class="dropzone" id="dropzone">
       <p><strong>Drop a .fec file here</strong></p>
       <p class="or">or</p>
-      <p><label class="btn" for="file-input">Choose a file</label>
-      <input type="file" id="file-input" accept=".fec,text/plain,application/octet-stream" class="hidden"></p>
-      <form class="fetch-row" id="fetch-form">
+      <p class="file-pick"><input type="file" id="file-input" accept=".fec,text/plain,application/octet-stream" class="visually-hidden">
+      <label class="btn" for="file-input">Choose a file</label></p>
+      <form class="fetch-row" id="fetch-form" novalidate>
         <label for="filing-id">Filing id</label>
-        <input type="text" id="filing-id" inputmode="numeric" pattern="[0-9]+" placeholder="2011827" required aria-describedby="fetch-help">
+        <input type="text" id="filing-id" inputmode="numeric" pattern="[0-9]+" placeholder="2011827" required autocomplete="off" aria-describedby="fetch-help">
         <button type="submit" class="btn btn-primary">Fetch from the FEC</button>
       </form>
       <p id="fetch-help" class="muted">The id is the number in an FEC.gov filing URL. The server downloads the file from docquery.fec.gov.</p>
     </div>
-    <p id="load-status" class="muted" aria-live="polite"></p>`;
+    <p id="load-status" class="muted" role="status" aria-live="polite"></p>`;
+  ui.setTitle(title());
 
   const zone = root.querySelector('#dropzone');
   const input = root.querySelector('#file-input');
@@ -68,16 +78,43 @@ function renderEmpty() {
     const f = e.dataTransfer?.files?.[0];
     if (f) loadFile(f);
   });
+  const idInput = root.querySelector('#filing-id');
   root.querySelector('#fetch-form').addEventListener('submit', (e) => {
     e.preventDefault();
-    const id = root.querySelector('#filing-id').value.trim();
-    if (id) loadId(id);
+    const id = idInput.value.trim();
+    if (!/^[0-9]+$/.test(id)) {
+      fieldError(idInput, id ? `"${id}" is not a filing id. Enter digits only, like 2011827.` : 'Enter a filing id, like 2011827.');
+      return;
+    }
+    fieldError(idInput, null);
+    loadId(id);
   });
+  idInput.addEventListener('input', () => fieldError(idInput, null));
+}
+
+/**
+ * Marks a field invalid (or valid again when `message` is null) and puts
+ * the message in the live status line, which the field also references
+ * through aria-describedby (WCAG 3.3.1, 3.3.3).
+ */
+function fieldError(input, message) {
+  const el = root.querySelector('#load-status');
+  const ids = (input.getAttribute('aria-describedby') || '').split(/\s+/).filter((s) => s && s !== 'load-status');
+  if (message) {
+    input.setAttribute('aria-invalid', 'true');
+    input.setAttribute('aria-describedby', [...ids, 'load-status'].join(' '));
+    if (el) { el.textContent = message; el.classList.add('error-text'); }
+    input.focus();
+  } else {
+    input.removeAttribute('aria-invalid');
+    input.setAttribute('aria-describedby', ids.join(' '));
+    if (el && el.classList.contains('error-text')) { el.textContent = ''; el.classList.remove('error-text'); }
+  }
 }
 
 function setLoadStatus(text) {
   const el = root.querySelector('#load-status');
-  if (el) el.textContent = text;
+  if (el) { el.textContent = text; el.classList.remove('error-text'); }
 }
 
 async function loadFile(file) {
@@ -98,7 +135,10 @@ async function loadId(id) {
     const doc = await api.get(`/tools/fetch/${encodeURIComponent(id)}`);
     accept(doc, `filing ${id}`);
   } catch (e) {
-    setLoadStatus('');
+    // Tie the failure to the field that caused it as well as toasting it.
+    const input = root.querySelector('#filing-id');
+    if (input) fieldError(input, e.message || String(e));
+    else setLoadStatus('');
     ui.reportError(e);
   }
 }
@@ -113,6 +153,7 @@ function accept(doc, source) {
   state.records = null;
   recomputeErrorLines();
   renderLoaded();
+  ui.focusHeading(root);
   ui.toast(`Parsed ${source}: ${formatCount(doc.line_count)} lines, ${doc.validation.findings.filter((f) => f.severity === 'error').length} validation errors.`, 'ok');
 }
 
@@ -121,6 +162,7 @@ function reset() {
   state.edits.clear();
   state.records = null;
   renderEmpty();
+  ui.focusHeading(root);
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +199,7 @@ function renderLoaded() {
   const d = state.doc;
   const committee = d.summary.fields.filer_committee_id_number || d.summary.fields.candidate_id_number || '';
   const name = d.summary.fields.committee_name || d.summary.fields.candidate_name || '';
+  ui.setTitle(title());
   root.innerHTML = `
     <div class="card-header">
       <h1>Filing workbench</h1>
@@ -192,11 +235,11 @@ function renderLoaded() {
       </section>
     </div>
     <section class="card" aria-label="Details">
-      <div class="tabs" role="tablist" id="main-tabs">
-        <button role="tab" data-tab="records">Records <span class="count">${formatCount(d.line_count)}</span></button>
-        <button role="tab" data-tab="validation">Validation <span class="count" id="tab-validation-count"></span></button>
-        <button role="tab" data-tab="reconcile">Reconcile <span class="count" id="tab-reconcile-count"></span></button>
-        <button role="tab" data-tab="edits">Edits <span class="count" id="tab-edits-count">${state.edits.size}</span></button>
+      <div class="tabs" role="tablist" id="main-tabs" aria-label="Details">
+        <button type="button" role="tab" data-tab="records">Records <span class="count">${formatCount(d.line_count)}</span></button>
+        <button type="button" role="tab" data-tab="validation">Validation <span class="count" id="tab-validation-count"></span></button>
+        <button type="button" role="tab" data-tab="reconcile">Reconcile <span class="count" id="tab-reconcile-count"></span></button>
+        <button type="button" role="tab" data-tab="edits">Edits <span class="count" id="tab-edits-count">${state.edits.size}</span></button>
       </div>
       <div id="panel"></div>
     </section>`;
@@ -208,16 +251,17 @@ function renderLoaded() {
     state.showBlankCover = e.target.checked;
     renderCover();
   });
-  root.querySelector('#main-tabs').addEventListener('click', (e) => {
-    const b = e.target.closest('[role="tab"]');
-    if (b) selectTab(b.dataset.tab);
-  });
-  root.querySelector('#main-tabs').addEventListener('keydown', (e) => {
-    const tabs = Array.from(root.querySelectorAll('#main-tabs [role="tab"]'));
-    const i = tabs.indexOf(document.activeElement);
-    if (i < 0) return;
-    if (e.key === 'ArrowRight') { e.preventDefault(); tabs[(i + 1) % tabs.length].focus(); }
-    if (e.key === 'ArrowLeft') { e.preventDefault(); tabs[(i - 1 + tabs.length) % tabs.length].focus(); }
+  mainTabs = wireTablist(root.querySelector('#main-tabs'), {
+    panel: root.querySelector('#panel'),
+    onSelect: (tab) => {
+      state.tab = tab;
+      const panel = root.querySelector('#panel');
+      panel.innerHTML = '';
+      if (tab === 'records') renderRecords();
+      else if (tab === 'validation') renderValidation();
+      else if (tab === 'reconcile') renderReconcile();
+      else renderEdits();
+    },
   });
 
   renderHeader();
@@ -304,8 +348,14 @@ function kvInput(field, value, lineNo, table, commit) {
   const input = document.createElement('input');
   input.type = 'text';
   input.value = value;
-  input.setAttribute('aria-label', `${field}, line ${lineNo}`);
-  if (state.edits.has(`${lineNo}:${field}`)) input.classList.add('edited');
+  input.autocomplete = 'off';
+  // The edited state is in the name as well as the colour (WCAG 1.4.1).
+  const mark = () => {
+    const edited = state.edits.has(`${lineNo}:${field}`);
+    input.classList.toggle('edited', edited);
+    input.setAttribute('aria-label', `${field}, line ${lineNo}${edited ? ', edited' : ''}`);
+  };
+  mark();
   input.addEventListener('change', () => {
     const after = input.value.trim();
     const before = value;
@@ -313,7 +363,7 @@ function kvInput(field, value, lineNo, table, commit) {
     if (after === before) return;
     commit(before, after);
     value = after;
-    input.classList.toggle('edited', state.edits.has(`${lineNo}:${field}`));
+    mark();
   });
   return input;
 }
@@ -437,18 +487,7 @@ async function download() {
 // ---------------------------------------------------------------------------
 
 function selectTab(tab) {
-  state.tab = tab;
-  for (const b of root.querySelectorAll('#main-tabs [role="tab"]')) {
-    const on = b.dataset.tab === tab;
-    b.setAttribute('aria-selected', String(on));
-    b.tabIndex = on ? 0 : -1;
-  }
-  const panel = root.querySelector('#panel');
-  panel.innerHTML = '';
-  if (tab === 'records') renderRecords();
-  else if (tab === 'validation') renderValidation();
-  else if (tab === 'reconcile') renderReconcile();
-  else renderEdits();
+  mainTabs?.select(tab);
 }
 
 // ---------------------------------------------------------------------------
@@ -465,14 +504,21 @@ function renderRecords() {
   if (!state.table || !tables.some(([t]) => t === state.table)) state.table = tables[0][0];
   panel.innerHTML = `
     <div class="tabs" role="tablist" id="table-tabs" aria-label="Tables">
-      ${tables.map(([t, n]) => `<button role="tab" data-table="${escapeHtml(t)}" aria-selected="${t === state.table}">${escapeHtml(t)} <span class="count">${formatCount(n)}</span></button>`).join('')}
+      ${tables.map(([t, n]) => `<button type="button" role="tab" data-table="${escapeHtml(t)}">${escapeHtml(t)} <span class="count">${formatCount(n)}</span></button>`).join('')}
     </div>
     <div id="records-host"></div>`;
-  panel.querySelector('#table-tabs').addEventListener('click', (e) => {
-    const b = e.target.closest('[role="tab"]');
-    if (b) { state.table = b.dataset.table; renderRecords(); }
-  });
   const host = panel.querySelector('#records-host');
+  let shown = null;
+  const tablist = wireTablist(panel.querySelector('#table-tabs'), {
+    key: 'table',
+    panel: host,
+    onSelect: (t) => {
+      if (t === shown) return;
+      shown = t;
+      state.table = t;
+      showTable(t);
+    },
+  });
   state.records = new RecordsTable(host, {
     onEdit: (row, field, before, after) => {
       row.fields[field] = after;
@@ -483,14 +529,16 @@ function renderRecords() {
     lineHasError: (lineNo) => state.errorLines.has(lineNo),
     showTooltip: ui.showTooltip,
     hideTooltip: ui.hideTooltip,
+    hideTooltipSoon: ui.hideTooltipSoon,
   });
-  showTable(state.table);
+  tablist.select(state.table);
 }
 
 async function showTable(table) {
   const rows = state.doc.lines.filter((l) => l.table === table);
   let fields = rows.length ? Object.keys(rows[0].fields) : [];
   state.records.setRows(rows, fields);
+  state.records.setLabel(`${table} records`);
   try {
     if (!state.specs.has(table)) state.specs.set(table, await tableSpec(table, state.doc.version));
     if (state.table === table && state.records) {
@@ -553,7 +601,7 @@ function renderValidation() {
       </ul>`;
   };
   panel.innerHTML = findings.length
-    ? `<p class="muted">Findings from the FEC's acceptance rules. Errors would make the FEC reject the filing; warnings are reported but accepted. Click a line number to go to the record.</p>
+    ? `<p class="muted">Findings from the FEC's acceptance rules. Errors would make the FEC reject the filing; warnings are reported but accepted. Activate a line number to go to the record.</p>
        ${group('Errors', errors, 'badge-error')}${group('Warnings', warnings, 'badge-warn')}`
     : '<p class="banner banner-ok">No findings. The filing passes every rule this validator implements.</p>';
   panel.addEventListener('click', (e) => {
@@ -582,17 +630,18 @@ function renderReconcile() {
       <span class="spacer"></span>
       <label class="muted"><input type="checkbox" id="only-mismatches" ${state.onlyMismatches ? 'checked' : ''}> only mismatches</label>
     </div>
-    ${shown.length ? `<div class="table-scroll"><table class="plain">
-      <thead><tr><th scope="col">Col</th><th scope="col">Line</th><th scope="col">Field</th><th scope="col" class="amount">Reported</th><th scope="col" class="amount">Expected</th><th scope="col" class="amount">Delta</th><th scope="col">Relation</th><th scope="col">Rule</th><th scope="col" class="right">Summed</th></tr></thead>
+    ${shown.length ? `<div class="table-scroll" tabindex="0" role="region" aria-label="Reconciliation checks"><table class="plain">
+      <thead><tr><th scope="col">Result</th><th scope="col">Col</th><th scope="col">Line</th><th scope="col">Field</th><th scope="col" class="amount">Reported</th><th scope="col" class="amount">Expected</th><th scope="col" class="amount">Delta</th><th scope="col">Relation</th><th scope="col">Rule</th><th scope="col" class="right">Summed</th></tr></thead>
       <tbody>
         ${shown.map((c) => `<tr class="${checkMatches(c) ? '' : 'mismatch'}">
+          <td>${checkMatches(c) ? '<span class="badge badge-ok">agrees</span>' : '<span class="badge badge-error">off</span>'}</td>
           <td>${escapeHtml(c.column)}</td>
           <td class="mono">${escapeHtml(c.line)}</td>
           <td><button type="button" class="btn-link mono" data-field="${escapeHtml(c.field)}">${escapeHtml(c.field)}</button></td>
           <td class="amount">${c.reported === null ? '<span class="muted">blank</span>' : formatMoney(c.reported)}${c.reported_unparseable ? ' <span class="badge badge-warn">unparseable</span>' : ''}</td>
           <td class="amount">${formatMoney(c.expected)}</td>
           <td class="amount">${formatMoney(c.delta)}</td>
-          <td>${c.relation === 'at_least' ? '≥' : '='}</td>
+          <td>${c.relation === 'at_least' ? 'at least' : 'equals'}</td>
           <td>${escapeHtml(c.rule)}</td>
           <td class="right">${c.lines_summed || ''}</td>
         </tr>`).join('')}
@@ -615,20 +664,20 @@ function renderEdits() {
   const panel = root.querySelector('#panel');
   const edits = Array.from(state.edits.entries()).sort((a, b) => a[1].line_no - b[1].line_no || a[1].field.localeCompare(b[1].field));
   if (!edits.length) {
-    panel.innerHTML = '<p class="muted">No edits. Click a cell in the records table, or a value on the header or cover card, to change it. Edits stay in this page until you download.</p>';
+    panel.innerHTML = '<p class="muted">No edits. Activate a cell in the records table (click it, or press Enter on it), or change a value on the header or cover card. Edits stay in this page until you download.</p>';
     return;
   }
   panel.innerHTML = `
     <p class="muted">${edits.length} field${edits.length === 1 ? '' : 's'} changed from the parsed filing. Download writes them into the <code>.fec</code>.</p>
-    <div class="table-scroll"><table class="plain edits">
-      <thead><tr><th scope="col">Line</th><th scope="col">Table</th><th scope="col">Field</th><th scope="col">Before</th><th scope="col">After</th><th scope="col"></th></tr></thead>
+    <div class="table-scroll" tabindex="0" role="region" aria-label="Edits"><table class="plain edits">
+      <thead><tr><th scope="col">Line</th><th scope="col">Table</th><th scope="col">Field</th><th scope="col">Before</th><th scope="col">After</th><th scope="col">Action</th></tr></thead>
       <tbody>${edits.map(([key, e]) => `<tr>
         <td><button type="button" class="btn-link" data-line="${e.line_no}" data-field="${escapeHtml(e.field)}">${e.line_no}</button></td>
         <td class="mono">${escapeHtml(e.table)}</td>
         <td class="mono">${escapeHtml(e.field)}</td>
         <td class="before mono">${e.before === '' ? '<span class="muted">blank</span>' : escapeHtml(e.before)}</td>
         <td class="after mono">${e.after === '' ? '<span class="muted">blank</span>' : escapeHtml(e.after)}</td>
-        <td><button type="button" class="btn btn-small" data-revert="${escapeHtml(key)}">Revert</button></td>
+        <td><button type="button" class="btn btn-small" data-revert="${escapeHtml(key)}" aria-label="Revert ${escapeHtml(e.field)} on line ${e.line_no}">Revert</button></td>
       </tr>`).join('')}</tbody>
     </table></div>`;
   panel.addEventListener('click', (e) => {

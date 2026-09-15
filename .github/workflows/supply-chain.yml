@@ -1,0 +1,151 @@
+name: Supply chain
+
+# Dependency hygiene for both Cargo lockfiles (the crate and the Python
+# extension in python/), plus a CycloneDX software bill of materials.
+#
+#   audit   cargo audit against the RustSec advisory database.
+#   deny    cargo deny check: advisories, licence allow-list, bans, sources
+#           (policy in deny.toml).
+#   sbom    CycloneDX 1.5 JSON for the crate (all features, all targets),
+#           for the Python extension crate, and for the built wheel's Python
+#           environment, plus the wheel's METADATA. Uploaded as the `sbom`
+#           artifact on every run; on a `v*` tag the artifact is the
+#           release's SBOM (attach it to the GitHub release by hand).
+#
+# Runs on push, pull request, weekly (so a new advisory against an
+# unchanged lockfile still turns the badge red), and on demand.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "41 6 * * 1" # Mondays 06:41 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  audit:
+    name: cargo audit (${{ matrix.lockfile }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lockfile: ["Cargo.lock", "python/Cargo.lock"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "false"
+      # Installed from source rather than via a third-party action so the
+      # only things trusted here are crates.io and the RustSec database;
+      # the same command the release checklist runs locally.
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: cargo audit
+        run: cargo audit --deny warnings --file ${{ matrix.lockfile }}
+
+  deny:
+    name: cargo deny check (${{ matrix.manifest }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        manifest: ["./Cargo.toml", "./python/Cargo.toml"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: ${{ matrix.manifest }}
+          # Both crates share the policy at the repository root.
+          arguments: --all-features --config deny.toml
+          command: check
+          command-arguments: advisories licenses bans sources
+
+  sbom:
+    name: CycloneDX SBOM (crate, extension crate, wheel)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            python
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      - name: SBOM for the hardmoney crate (all features, all targets)
+        run: |
+          set -euo pipefail
+          mkdir -p sbom
+          cargo cyclonedx --all-features --target all --format json --spec-version 1.5 \
+            --override-filename hardmoney.cdx
+          mv hardmoney.cdx.json sbom/hardmoney-crate.cdx.json
+
+      - name: SBOM for the Python extension crate (python/Cargo.lock)
+        run: |
+          set -euo pipefail
+          cargo cyclonedx --manifest-path python/Cargo.toml --target all --format json \
+            --spec-version 1.5 --override-filename hardmoney-py.cdx
+          mv python/hardmoney-py.cdx.json sbom/hardmoney-python-extension.cdx.json
+
+      # The wheel has no Python dependencies, so the environment SBOM lists
+      # `hardmoney` (and pip) alone; that absence is the point of recording
+      # it. METADATA is the wheel's own declaration of the same fact
+      # (no `Requires-Dist` lines).
+      - name: Build the wheel and record its Python environment
+        run: |
+          set -euo pipefail
+          python -m venv build-env
+          build-env/bin/python -m pip install --upgrade pip maturin cyclonedx-bom
+          (cd python && ../build-env/bin/maturin build --release --locked --out dist)
+          python -m venv wheel-env
+          wheel-env/bin/python -m pip install --upgrade pip
+          wheel-env/bin/python -m pip install --no-deps python/dist/*.whl
+          wheel-env/bin/python -c "import hardmoney; print('hardmoney', hardmoney.__version__)"
+          build-env/bin/cyclonedx-py environment \
+            --pyproject python/pyproject.toml --mc-type library \
+            --of JSON --sv 1.5 -o sbom/hardmoney-wheel-environment.cdx.json \
+            wheel-env/bin/python
+          python - <<'EOF'
+          import glob, zipfile, pathlib
+          [wheel] = glob.glob("python/dist/*.whl")
+          with zipfile.ZipFile(wheel) as z:
+              [name] = [n for n in z.namelist() if n.endswith(".dist-info/METADATA")]
+              pathlib.Path("sbom/hardmoney-wheel-METADATA.txt").write_bytes(z.read(name))
+          print(pathlib.Path("sbom/hardmoney-wheel-METADATA.txt").read_text())
+          EOF
+
+      - name: Summary
+        run: |
+          set -euo pipefail
+          python - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          import json, glob
+          print("| SBOM | root component | components |")
+          print("|---|---|---|")
+          for path in sorted(glob.glob("sbom/*.cdx.json")):
+              d = json.load(open(path))
+              root = d["metadata"]["component"]
+              print(f"| `{path}` | {root['name']} {root.get('version', '')} | {len(d.get('components', []))} |")
+          EOF
+          cat "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom/
+          if-no-files-found: error

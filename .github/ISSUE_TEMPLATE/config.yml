@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question about using hardmoney
+    url: https://cgorski.github.io/hardmoney/troubleshooting.html
+    about: The book's Troubleshooting and FAQ chapter first; then the Python, CLI, and REST references. If the answer is not there, open a blank issue and say so, and the answer will be added to the book.
+  - name: For FEC staff and filing vendors
+    url: https://cgorski.github.io/hardmoney/for-fec-staff.html
+    about: Workflows by role (RAD review, EFO vendor conformance, FECfile+ integration, Data division), and how to report a disagreement with the FEC's own tools.
+  - name: Security, provenance, and deployment notes
+    url: https://cgorski.github.io/hardmoney/security-and-provenance.html
+    about: What the tool does and does not do on the network, how dependencies and releases are checked, and how to verify a wheel's provenance. Vulnerabilities go to the address in SECURITY.md, not to an issue.

@@ -1,0 +1,64 @@
+# Weekly dependency update proposals. Security advisories are caught
+# sooner by .github/workflows/supply-chain.yml (cargo audit / cargo deny on
+# every push and weekly); this keeps the lockfiles and the pinned actions
+# current in between.
+version: 2
+updates:
+  # The crate (Cargo.lock at the repository root).
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps(cargo)"
+    groups:
+      # Lockfile-only bumps of transitive crates arrive as one PR.
+      patch-and-minor:
+        update-types: ["minor", "patch"]
+
+  # The Python extension crate (python/Cargo.lock; PyO3 and maturin live here).
+  - package-ecosystem: cargo
+    directory: /python
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(python-cargo)"
+    groups:
+      patch-and-minor:
+        update-types: ["minor", "patch"]
+
+  # python/pyproject.toml: the maturin build requirement and the pytest
+  # test extra. The wheel itself has no Python dependencies.
+  - package-ecosystem: pip
+    directory: /python
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(pip)"
+
+  # Actions pinned in .github/workflows/*.yml.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(actions)"
+    groups:
+      actions:
+        patterns: ["*"]

@@ -106,6 +106,22 @@
 //! from [`Filing::validate`] reports them) and reported as
 //! [`LineCheck::reported_unparseable`] on the cover.
 //!
+//! # Column B across a chain of reports
+//!
+//! One file cannot check its own Column B schedule lines: they sum every
+//! report in the period. [`ReportChain`] takes the current report and the
+//! committee's earlier reports and does what the FEC's Form 3X
+//! instructions say a filer does ("add the Calendar Year-to-Date total
+//! from the previous report to the Total This Period"), except from the
+//! schedules: each Column B schedule line is compared with the sum of that
+//! line's schedule sums over every report in the period, and cash on hand
+//! is carried forward from the prior report's close to the current one's
+//! beginning. The period is the calendar year for Form 3X and the election
+//! cycle for Forms 3 and 3P ([`PeriodBasis`]). FECfile+'s
+//! `calculate_summary_column_b` and `calculate_cash_on_hand_fields` are
+//! the FEC's own implementation of the same arithmetic; this one differs
+//! only in reading filed `.fec` files rather than a transaction database.
+//!
 //! # Tolerance
 //!
 //! Comparisons are exact by default. [`Reconciliation::mismatches_over`]
@@ -113,11 +129,12 @@
 
 use std::fmt;
 
+use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 
 use crate::parser::filing::{Filing, ParsedLine};
 use crate::parser::tables::Table;
-use crate::parser::typed::parse_money;
+use crate::parser::typed::{parse_fec_date, parse_money};
 
 /// Which cover-page column a check applies to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, strum::Display)]
@@ -267,6 +284,11 @@ pub struct LineCheck {
     pub relation: Relation,
     /// For schedule sums: how many body lines contributed.
     pub lines_summed: usize,
+    /// How many filings were read to compute `expected`: 1 for every check
+    /// [`Filing::reconcile`] produces and for a cash-on-hand carry-forward
+    /// (which reads one prior report), the number of reports in the period
+    /// for a Column B sum from a [`ReportChain`].
+    pub reports_summed: usize,
     /// True when the cover field was non-blank but not a valid amount
     /// (`reported` is then `None` and counts as 0). A *blank* field gives
     /// `reported == None` with this `false`: blank is a legitimate way to
@@ -441,24 +463,7 @@ fn check_line(
         Source::Formula(_) | Source::Input => Relation::Equal,
     };
     let (expected, lines_summed) = match rule.source {
-        Source::Schedules(_, sums) => {
-            let mut total = Decimal::ZERO;
-            let mut n = 0usize;
-            for line in body.iter().filter(|l| !l.is_memo()) {
-                for s in sums {
-                    if line.table() == s.table
-                        && s.tokens
-                            .iter()
-                            .any(|t| t.eq_ignore_ascii_case(&line.raw_form_type))
-                        && let Some(amount) = line.get_non_empty(s.field).and_then(parse_money)
-                    {
-                        total = total.saturating_add(amount);
-                        n = n.saturating_add(1);
-                    }
-                }
-            }
-            (total, n)
-        }
+        Source::Schedules(_, sums) => schedule_sum(body, sums),
         Source::Input => (reported.unwrap_or(Decimal::ZERO), 0),
         Source::Formula(terms) => {
             let mut total = Decimal::ZERO;
@@ -488,7 +493,583 @@ fn check_line(
         delta,
         relation,
         lines_summed,
+        reports_summed: 1,
         reported_unparseable: unparseable,
+    }
+}
+
+/// Sums `sums` over the non-memo body lines: the total and how many lines
+/// contributed. Amounts that do not parse are skipped.
+fn schedule_sum(body: &[ParsedLine], sums: &[ScheduleSum]) -> (Decimal, usize) {
+    let mut total = Decimal::ZERO;
+    let mut n = 0usize;
+    for line in body.iter().filter(|l| !l.is_memo()) {
+        for s in sums {
+            if line.table() == s.table
+                && s.tokens
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case(&line.raw_form_type))
+                && let Some(amount) = line.get_non_empty(s.field).and_then(parse_money)
+            {
+                total = total.saturating_add(amount);
+                n = n.saturating_add(1);
+            }
+        }
+    }
+    (total, n)
+}
+
+// ---------------------------------------------------------------------------
+// Chains of reports: Column B and cash on hand
+// ---------------------------------------------------------------------------
+
+/// The period a report's Column B accumulates over.
+///
+/// The Form 3X instructions call Column B "Calendar Year-to-Date"; the
+/// Form 3 and 3P instructions call it "Election Cycle-to-Date" ("the
+/// election cycle for disclosure purposes begins the day after the
+/// previous general election for a seat or office, and ends on the day of
+/// the next general election"). A [`ReportChain`] uses the basis to decide
+/// which prior reports feed the Column B sums: for a year-to-date form,
+/// only reports whose coverage ends in the same calendar year the current
+/// report begins in (the rule FECfile+ applies when it sums by the
+/// transaction's calendar year); for a cycle-to-date form, every prior
+/// report given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[non_exhaustive]
+pub enum PeriodBasis {
+    /// Column B is the calendar year to date (Form 3X).
+    YearToDate,
+    /// Column B is the election cycle to date (Forms 3 and 3P).
+    CycleToDate,
+}
+
+impl PeriodBasis {
+    /// The basis a cover form's Column B uses; `None` for forms without
+    /// reconciliation rules.
+    #[must_use]
+    pub fn for_form(form: Table) -> Option<PeriodBasis> {
+        match form {
+            Table::F3X => Some(PeriodBasis::YearToDate),
+            Table::F3 | Table::F3P => Some(PeriodBasis::CycleToDate),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for PeriodBasis {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            PeriodBasis::YearToDate => "year to date",
+            PeriodBasis::CycleToDate => "cycle to date",
+        })
+    }
+}
+
+/// A report's coverage period, from the cover line's `coverage_from_date`
+/// and `coverage_through_date`. Both ends are inclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Coverage {
+    pub from: NaiveDate,
+    pub through: NaiveDate,
+}
+
+impl Coverage {
+    /// True when the two periods share at least one day.
+    #[must_use]
+    pub fn overlaps(&self, other: &Coverage) -> bool {
+        self.from <= other.through && other.from <= self.through
+    }
+}
+
+impl fmt::Display for Coverage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}..{}", self.from, self.through)
+    }
+}
+
+/// The coverage period on a report's cover line, or `None` if either date
+/// is blank, not `YYYYMMDD`, or the period ends before it begins.
+#[must_use]
+pub fn coverage(filing: &Filing) -> Option<Coverage> {
+    let from = filing
+        .summary
+        .get_non_empty("coverage_from_date")
+        .and_then(parse_fec_date)?;
+    let through = filing
+        .summary
+        .get_non_empty("coverage_through_date")
+        .and_then(parse_fec_date)?;
+    (from <= through).then_some(Coverage { from, through })
+}
+
+/// Why a set of reports cannot be chained. `index` is the position of the
+/// offending report in the `prior` iterator given to [`ReportChain::new`],
+/// counting from 0.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ChainError {
+    /// The current report's cover form has no reconciliation rules.
+    #[error(transparent)]
+    UnsupportedForm(#[from] ReconcileError),
+    /// The current report has no usable coverage dates.
+    #[error(
+        "the current report has no usable coverage period (coverage_from_date and \
+         coverage_through_date must both be YYYYMMDD dates, from on or before through)"
+    )]
+    CurrentCoverageMissing,
+    /// A prior report has no usable coverage dates.
+    #[error(
+        "prior report {index} has no usable coverage period (coverage_from_date and \
+         coverage_through_date must both be YYYYMMDD dates, from on or before through)"
+    )]
+    PriorCoverageMissing { index: usize },
+    /// A prior report is on a different cover form.
+    #[error(
+        "prior report {index} is a {found} but the current report is a {expected}; a chain \
+         is one committee's reports on one form"
+    )]
+    FormMismatch {
+        index: usize,
+        expected: Table,
+        found: Table,
+    },
+    /// A prior report was filed by a different committee.
+    #[error(
+        "prior report {index} was filed by {found} but the current report by {expected}; a \
+         chain is one committee's reports"
+    )]
+    FilerMismatch {
+        index: usize,
+        expected: String,
+        found: String,
+    },
+    /// A prior report does not end before the current report begins.
+    #[error(
+        "prior report {index} covers {coverage}, which does not end before the current \
+         report's period {current} begins; only earlier reports belong in the chain"
+    )]
+    NotBeforeCurrent {
+        index: usize,
+        coverage: Coverage,
+        current: Coverage,
+    },
+    /// Two prior reports cover overlapping periods (an original and its
+    /// amendment, for example).
+    #[error(
+        "prior reports {a} ({a_coverage}) and {b} ({b_coverage}) overlap; a chain holds one \
+         version of each report -- keep the most recent amendment and drop the rest"
+    )]
+    Overlap {
+        a: usize,
+        a_coverage: Coverage,
+        b: usize,
+        b_coverage: Coverage,
+    },
+}
+
+/// The cash-on-hand lines a chain carries from one report to the next,
+/// by FEC line label.
+struct CashLines {
+    /// Column A: cash on hand at the beginning of the period.
+    beginning: &'static str,
+    /// Column A: cash on hand at the close of the period.
+    close: &'static str,
+    /// Column B: cash on hand on January 1 (Form 3X only).
+    year_start: Option<&'static str>,
+}
+
+fn cash_lines(form: Table) -> Option<CashLines> {
+    match form {
+        Table::F3X => Some(CashLines {
+            beginning: "6(b)",
+            close: "8",
+            year_start: Some("6(a)"),
+        }),
+        Table::F3 => Some(CashLines {
+            beginning: "23",
+            close: "27",
+            year_start: None,
+        }),
+        Table::F3P => Some(CashLines {
+            beginning: "6",
+            close: "10",
+            year_start: None,
+        }),
+        _ => None,
+    }
+}
+
+/// The cover field a rule table maps a `(column, line)` to.
+fn field_of(rules: &[LineRule], column: Column, line: &str) -> Option<&'static str> {
+    rules
+        .iter()
+        .find(|r| r.column == column && r.line == line)
+        .map(|r| r.field)
+}
+
+fn filer_id(filing: &Filing) -> &str {
+    filing
+        .summary
+        .get_non_empty("filer_committee_id_number")
+        .unwrap_or("")
+        .trim()
+}
+
+/// A periodic report together with the committee's earlier reports, for
+/// the checks one file cannot make on its own: Column B schedule sums and
+/// cash-on-hand carry-forward.
+///
+/// Build one with [`ReportChain::new`], which checks that every prior
+/// report is on the same form, from the same filer, and covers a period
+/// that ends before the current report begins and overlaps no other. Then
+/// [`ReportChain::reconcile`] (or [`column_b_checks`](Self::column_b_checks)
+/// and [`carry_forward_checks`](Self::carry_forward_checks) separately)
+/// produces [`LineCheck`]s. The current report's own Column A and Column B
+/// formula checks come from [`Filing::reconcile`]; the two sets do not
+/// overlap.
+///
+/// The chain need not be complete. Column B sums are only meaningful when
+/// every report of the period is present, so [`gaps`](Self::gaps) reports
+/// the days between the start of the period (January 1 for a year-to-date
+/// form) and the current report that no report in the chain covers.
+///
+/// ```
+/// use hardmoney::Filing;
+/// use hardmoney::parser::reconcile::{Column, ReportChain};
+///
+/// let dir = "tests/fixtures/chain/";
+/// let jan = Filing::open(format!("{dir}F3XN_1948502.fec"))?;
+/// let feb = Filing::open(format!("{dir}F3XA_2011895.fec"))?;
+/// let mar = Filing::open(format!("{dir}F3XA_2011898.fec"))?;
+/// let chain = ReportChain::new(&mar, [&jan, &feb])?;
+/// assert!(chain.gaps().is_empty());
+/// let r = chain.reconcile();
+/// assert!(r.balances(), "{r}");
+/// let itemized = r.line(Column::B, "11(a)(i)").unwrap();
+/// assert_eq!(itemized.reports_summed, 3);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Debug, Clone)]
+pub struct ReportChain<'a> {
+    current: &'a Filing,
+    /// Oldest first.
+    prior: Vec<&'a Filing>,
+    form: Table,
+    basis: PeriodBasis,
+    current_coverage: Coverage,
+}
+
+impl<'a> ReportChain<'a> {
+    /// Chains `prior` (in any order) behind `current`.
+    ///
+    /// Fails with [`ChainError::UnsupportedForm`] if `current` is not an
+    /// F3X, F3, or F3P; [`ChainError::CurrentCoverageMissing`] or
+    /// [`ChainError::PriorCoverageMissing`] if a cover line lacks parseable
+    /// coverage dates; [`ChainError::FormMismatch`] or
+    /// [`ChainError::FilerMismatch`] if a prior report is on another form
+    /// or from another committee; [`ChainError::NotBeforeCurrent`] if a
+    /// prior report does not end before `current` begins; and
+    /// [`ChainError::Overlap`] if two prior reports share a day (an
+    /// original and its amendment, for instance). Prior reports from an
+    /// earlier year are accepted on a year-to-date form: they are left out
+    /// of the Column B sums but supply the cash-on-hand carry-forward.
+    pub fn new<I>(current: &'a Filing, prior: I) -> Result<Self, ChainError>
+    where
+        I: IntoIterator<Item = &'a Filing>,
+    {
+        let form = current.summary.table();
+        let basis = PeriodBasis::for_form(form).ok_or(ChainError::UnsupportedForm(
+            ReconcileError::UnsupportedForm(form),
+        ))?;
+        let current_coverage = coverage(current).ok_or(ChainError::CurrentCoverageMissing)?;
+        let filer = filer_id(current);
+
+        let mut sorted: Vec<(usize, Coverage, &'a Filing)> = Vec::new();
+        for (index, report) in prior.into_iter().enumerate() {
+            let found = report.summary.table();
+            if found != form {
+                return Err(ChainError::FormMismatch {
+                    index,
+                    expected: form,
+                    found,
+                });
+            }
+            let report_filer = filer_id(report);
+            if !report_filer.eq_ignore_ascii_case(filer) {
+                return Err(ChainError::FilerMismatch {
+                    index,
+                    expected: filer.to_string(),
+                    found: report_filer.to_string(),
+                });
+            }
+            let cov = coverage(report).ok_or(ChainError::PriorCoverageMissing { index })?;
+            if cov.through >= current_coverage.from {
+                return Err(ChainError::NotBeforeCurrent {
+                    index,
+                    coverage: cov,
+                    current: current_coverage,
+                });
+            }
+            for (other_index, other, _) in &sorted {
+                if other.overlaps(&cov) {
+                    return Err(ChainError::Overlap {
+                        a: *other_index,
+                        a_coverage: *other,
+                        b: index,
+                        b_coverage: cov,
+                    });
+                }
+            }
+            sorted.push((index, cov, report));
+        }
+        sorted.sort_by_key(|(_, cov, _)| *cov);
+        Ok(ReportChain {
+            current,
+            prior: sorted.into_iter().map(|(_, _, f)| f).collect(),
+            form,
+            basis,
+            current_coverage,
+        })
+    }
+
+    /// The report whose Column B is checked.
+    #[must_use]
+    pub fn current(&self) -> &'a Filing {
+        self.current
+    }
+
+    /// Every prior report, oldest first.
+    #[must_use]
+    pub fn prior(&self) -> &[&'a Filing] {
+        &self.prior
+    }
+
+    /// The cover form every report in the chain is on.
+    #[must_use]
+    pub fn form(&self) -> Table {
+        self.form
+    }
+
+    /// What Column B accumulates over on this form.
+    #[must_use]
+    pub fn basis(&self) -> PeriodBasis {
+        self.basis
+    }
+
+    /// The current report's coverage period.
+    #[must_use]
+    pub fn current_coverage(&self) -> Coverage {
+        self.current_coverage
+    }
+
+    /// The reports whose schedules feed the current report's Column B,
+    /// oldest first and ending with the current report: every prior report
+    /// on a cycle-to-date form, and on a year-to-date form those whose
+    /// coverage ends in the calendar year the current report begins in.
+    #[must_use]
+    pub fn period_reports(&self) -> Vec<&'a Filing> {
+        let year = self.current_coverage.from.year();
+        let mut reports: Vec<&'a Filing> = self
+            .prior
+            .iter()
+            .copied()
+            .filter(|f| match self.basis {
+                PeriodBasis::CycleToDate => true,
+                PeriodBasis::YearToDate => coverage(f).is_some_and(|c| c.through.year() == year),
+            })
+            .collect();
+        reports.push(self.current);
+        reports
+    }
+
+    /// On a year-to-date form, the latest prior report that closed before
+    /// the current report's calendar year began: the one whose cash on hand
+    /// at close is the current year's line 6(a). `None` on a cycle-to-date
+    /// form or when the chain has no earlier-year report.
+    #[must_use]
+    pub fn last_report_of_prior_year(&self) -> Option<&'a Filing> {
+        if self.basis != PeriodBasis::YearToDate {
+            return None;
+        }
+        let year = self.current_coverage.from.year();
+        self.prior
+            .iter()
+            .rev()
+            .copied()
+            .find(|f| coverage(f).is_some_and(|c| c.through.year() < year))
+    }
+
+    /// The days between the start of the period and the current report
+    /// that no report in the chain covers, oldest first. Empty means the
+    /// chain is complete and the Column B sums cover everything they should.
+    ///
+    /// On a year-to-date form the period starts on January 1 of the current
+    /// report's year. On a cycle-to-date form the start of the cycle is not
+    /// known from the filings (it is the day after the previous general
+    /// election for the seat), so only gaps between the reports given are
+    /// reported.
+    #[must_use]
+    pub fn gaps(&self) -> Vec<Coverage> {
+        let mut gaps = Vec::new();
+        let reports = self.period_reports();
+        let mut cursor: Option<NaiveDate> = match self.basis {
+            PeriodBasis::YearToDate => {
+                NaiveDate::from_ymd_opt(self.current_coverage.from.year(), 1, 1)
+            }
+            PeriodBasis::CycleToDate => {
+                // Start from the first report given; nothing before it can be
+                // called a gap.
+                reports.first().and_then(|f| coverage(f)).map(|c| c.from)
+            }
+        };
+        for report in reports {
+            let Some(cov) = coverage(report) else {
+                continue;
+            };
+            if let Some(expected_from) = cursor
+                && cov.from > expected_from
+                && let Some(through) = cov.from.pred_opt()
+            {
+                gaps.push(Coverage {
+                    from: expected_from,
+                    through,
+                });
+            }
+            cursor = cov.through.succ_opt();
+        }
+        gaps
+    }
+
+    /// Column B schedule checks: for every Column A line that is a schedule
+    /// sum, the current report's Column B value compared (with the same
+    /// [`Relation`]) with the sum of that schedule over every report in
+    /// [`period_reports`](Self::period_reports). Lines the current report's
+    /// spec version lacks are omitted. `reports_summed` on each check is the
+    /// number of reports summed.
+    #[must_use]
+    pub fn column_b_checks(&self) -> Vec<LineCheck> {
+        let Some(rules) = rules_for(self.form) else {
+            return Vec::new();
+        };
+        let reports = self.period_reports();
+        let cover = &self.current.summary;
+        let mut checks = Vec::new();
+        for a in rules.iter().filter(|r| r.column == Column::A) {
+            let Source::Schedules(relation, sums) = a.source else {
+                continue;
+            };
+            let Some(b) = rules
+                .iter()
+                .find(|r| r.column == Column::B && r.line == a.line)
+            else {
+                continue;
+            };
+            if cover.get(b.field).is_none() {
+                continue;
+            }
+            let (reported, unparseable) = reported_amount(cover, b.field);
+            let mut expected = Decimal::ZERO;
+            let mut lines_summed = 0usize;
+            for report in &reports {
+                let (total, n) = schedule_sum(&report.lines, sums);
+                expected = expected.saturating_add(total);
+                lines_summed = lines_summed.saturating_add(n);
+            }
+            let delta = reported.unwrap_or(Decimal::ZERO).saturating_sub(expected);
+            checks.push(LineCheck {
+                line: b.line,
+                field: b.field,
+                column: Column::B,
+                rule: format!(
+                    "{} over {} report(s), {}",
+                    a.formula_text(),
+                    reports.len(),
+                    self.basis
+                ),
+                reported,
+                expected,
+                delta,
+                relation,
+                lines_summed,
+                reports_summed: reports.len(),
+                reported_unparseable: unparseable,
+            });
+        }
+        checks
+    }
+
+    /// Cash-on-hand carry-forward checks, each [`Relation::Equal`]:
+    ///
+    /// * the current report's cash on hand at the beginning of the period
+    ///   (F3X 6(b), F3 23, F3P 6; Column A) against the immediately prior
+    ///   report's cash on hand at close (F3X 8, F3 27, F3P 10);
+    /// * on Form 3X, cash on hand on January 1 (6(a); Column B) against the
+    ///   close of [`last_report_of_prior_year`](Self::last_report_of_prior_year),
+    ///   when the chain has one.
+    ///
+    /// Empty when the chain has no prior report.
+    #[must_use]
+    pub fn carry_forward_checks(&self) -> Vec<LineCheck> {
+        let Some(rules) = rules_for(self.form) else {
+            return Vec::new();
+        };
+        let Some(cash) = cash_lines(self.form) else {
+            return Vec::new();
+        };
+        let cover = &self.current.summary;
+        let mut checks = Vec::new();
+        let carry = |line: &'static str, column: Column, from: &Filing| -> Option<LineCheck> {
+            let field = field_of(rules, column, line)?;
+            cover.get(field)?;
+            let close_field = field_of(rules, Column::A, cash.close)?;
+            let (reported, unparseable) = reported_amount(cover, field);
+            let expected = reported_amount(&from.summary, close_field)
+                .0
+                .unwrap_or(Decimal::ZERO);
+            let delta = reported.unwrap_or(Decimal::ZERO).saturating_sub(expected);
+            let when = coverage(from).map_or_else(String::new, |c| format!(" ({c})"));
+            Some(LineCheck {
+                line,
+                field,
+                column,
+                rule: format!("= {} of the prior report{when}", cash.close),
+                reported,
+                expected,
+                delta,
+                relation: Relation::Equal,
+                lines_summed: 0,
+                reports_summed: 1,
+                reported_unparseable: unparseable,
+            })
+        };
+        if let Some(previous) = self.prior.last()
+            && let Some(check) = carry(cash.beginning, Column::A, previous)
+        {
+            checks.push(check);
+        }
+        if let Some(line) = cash.year_start
+            && let Some(previous) = self.last_report_of_prior_year()
+            && let Some(check) = carry(line, Column::B, previous)
+        {
+            checks.push(check);
+        }
+        checks
+    }
+
+    /// [`column_b_checks`](Self::column_b_checks) followed by
+    /// [`carry_forward_checks`](Self::carry_forward_checks), as one
+    /// [`Reconciliation`] for the current report's form.
+    pub fn reconcile(&self) -> Reconciliation {
+        let mut checks = self.column_b_checks();
+        checks.extend(self.carry_forward_checks());
+        Reconciliation {
+            form: self.form,
+            checks,
+        }
     }
 }
 
@@ -1417,5 +1998,445 @@ mod tests {
             .map(ToString::to_string)
             .collect();
         assert!(disagreeing.is_empty(), "{}", disagreeing.join("\n"));
+    }
+
+    // -----------------------------------------------------------------
+    // Chains
+    // -----------------------------------------------------------------
+
+    /// A synthetic F3X report: coverage, cash lines, itemized individuals
+    /// on the cover (Column A and B) and matching `SA11AI` lines.
+    #[allow(clippy::too_many_arguments)] // a test fixture, not an API
+    fn f3x_report(
+        filer: &str,
+        from: &str,
+        through: &str,
+        cash_begin: &str,
+        cash_close: &str,
+        itemized_a: &str,
+        itemized_b: &str,
+        jan_1: &str,
+        schedule: &[&str],
+    ) -> Filing {
+        let mut filing = f3x_with(
+            &[
+                ("coverage_from_date", from),
+                ("coverage_through_date", through),
+                ("col_a_cash_on_hand_beginning_period", cash_begin),
+                ("col_a_cash_on_hand_close_of_period", cash_close),
+                ("col_a_individuals_itemized", itemized_a),
+                ("col_b_individuals_itemized", itemized_b),
+                ("col_b_cash_on_hand_jan_1", jan_1),
+            ],
+            schedule
+                .iter()
+                .map(|amt| body(Table::SchA, "SA11AI", "contribution_amount", amt, false))
+                .collect(),
+        );
+        filing
+            .summary
+            .set("filer_committee_id_number", filer)
+            .unwrap();
+        filing
+    }
+
+    #[test]
+    fn period_basis_per_form() {
+        assert_eq!(
+            PeriodBasis::for_form(Table::F3X),
+            Some(PeriodBasis::YearToDate)
+        );
+        assert_eq!(
+            PeriodBasis::for_form(Table::F3),
+            Some(PeriodBasis::CycleToDate)
+        );
+        assert_eq!(
+            PeriodBasis::for_form(Table::F3P),
+            Some(PeriodBasis::CycleToDate)
+        );
+        assert_eq!(PeriodBasis::for_form(Table::F24), None);
+        assert_eq!(PeriodBasis::YearToDate.to_string(), "year to date");
+    }
+
+    #[test]
+    fn coverage_reads_the_cover_dates() {
+        let f = f3x_report("C1", "20260101", "20260131", "0", "0", "0", "0", "0", &[]);
+        let c = coverage(&f).unwrap();
+        assert_eq!(c.to_string(), "2026-01-01..2026-01-31");
+        // Blank, malformed, or inverted dates give None rather than a panic.
+        let blank = f3x_with(&[("coverage_from_date", "20260101")], vec![]);
+        assert_eq!(coverage(&blank), None);
+        let inverted = f3x_report("C1", "20260201", "20260131", "0", "0", "0", "0", "0", &[]);
+        assert_eq!(coverage(&inverted), None);
+        let garbage = f3x_with(
+            &[
+                ("coverage_from_date", "Jan 1"),
+                ("coverage_through_date", "20260131"),
+            ],
+            vec![],
+        );
+        assert_eq!(coverage(&garbage), None);
+        assert!(
+            Coverage {
+                from: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+                through: NaiveDate::from_ymd_opt(2026, 1, 31).unwrap(),
+            }
+            .overlaps(&Coverage {
+                from: NaiveDate::from_ymd_opt(2026, 1, 31).unwrap(),
+                through: NaiveDate::from_ymd_opt(2026, 2, 28).unwrap(),
+            })
+        );
+    }
+
+    /// Three monthly reports in one year: Column B on the third is the sum
+    /// of the three schedules, and cash on hand carries forward.
+    #[test]
+    fn column_b_sums_the_year_and_cash_carries_forward() {
+        let jan = f3x_report(
+            "C1",
+            "20260101",
+            "20260131",
+            "100.00",
+            "150.00",
+            "50.00",
+            "50.00",
+            "100.00",
+            &["20.00", "30.00"],
+        );
+        let feb = f3x_report(
+            "C1",
+            "20260201",
+            "20260228",
+            "150.00",
+            "160.00",
+            "10.00",
+            "60.00",
+            "100.00",
+            &["10.00"],
+        );
+        let mar = f3x_report(
+            "C1",
+            "20260301",
+            "20260331",
+            "160.00",
+            "200.00",
+            "40.00",
+            "100.00",
+            "100.00",
+            &["40.00"],
+        );
+        // Order of the priors does not matter.
+        let chain = ReportChain::new(&mar, [&feb, &jan]).unwrap();
+        assert_eq!(chain.basis(), PeriodBasis::YearToDate);
+        assert_eq!(chain.form(), Table::F3X);
+        assert_eq!(chain.prior().len(), 2);
+        assert_eq!(
+            coverage(chain.prior()[0]).unwrap().from.to_string(),
+            "2026-01-01"
+        );
+        assert_eq!(chain.period_reports().len(), 3);
+        assert!(chain.gaps().is_empty(), "{:?}", chain.gaps());
+        assert!(chain.last_report_of_prior_year().is_none());
+
+        let r = chain.reconcile();
+        assert_eq!(r.form, Table::F3X);
+        let b = r.line(Column::B, "11(a)(i)").unwrap();
+        assert_eq!(b.expected, dec!(100.00));
+        assert_eq!(b.reported, Some(dec!(100.00)));
+        assert_eq!(b.lines_summed, 4);
+        assert_eq!(b.reports_summed, 3);
+        assert_eq!(b.relation, Relation::Equal);
+        assert!(
+            b.rule.contains("over 3 report(s), year to date"),
+            "{}",
+            b.rule
+        );
+        assert!(b.matches(), "{b}");
+        // Every other Column B schedule line is blank on the cover and has
+        // no schedule lines, so it agrees at zero.
+        assert!(r.column(Column::B).count() >= 25);
+        // 6(b) of March = 8 of February.
+        let carry = r.line(Column::A, "6(b)").unwrap();
+        assert_eq!(carry.expected, dec!(160.00));
+        assert_eq!(carry.reports_summed, 1);
+        assert!(carry.matches(), "{carry}");
+        assert!(
+            carry.rule.contains("2026-02-01..2026-02-28"),
+            "{}",
+            carry.rule
+        );
+        // No prior-year report, so 6(a) is an input.
+        assert!(r.line(Column::B, "6(a)").is_none());
+        assert!(r.balances(), "{r}");
+        assert_eq!(chain.carry_forward_checks().len(), 1);
+        assert_eq!(
+            chain.column_b_checks().len() + chain.carry_forward_checks().len(),
+            r.checks.len()
+        );
+    }
+
+    /// The first report of the year has no priors in the year: its Column B
+    /// must equal its own Column A, and the chain says so.
+    #[test]
+    fn a_single_report_chain_compares_column_b_with_its_own_schedules() {
+        let jan = f3x_report(
+            "C1",
+            "20260101",
+            "20260131",
+            "0",
+            "50.00",
+            "50.00",
+            "55.00",
+            "0",
+            &["50.00"],
+        );
+        let chain = ReportChain::new(&jan, []).unwrap();
+        let r = chain.reconcile();
+        let b = r.line(Column::B, "11(a)(i)").unwrap();
+        assert_eq!(b.reports_summed, 1);
+        assert_eq!(b.delta, dec!(5.00));
+        assert!(!b.matches());
+        assert!(chain.carry_forward_checks().is_empty());
+    }
+
+    /// A December report in the chain feeds only the carry-forward on a
+    /// year-to-date form: 6(a) and January's 6(b) are its close, and its
+    /// schedules stay out of the new year's Column B.
+    #[test]
+    fn a_prior_year_report_feeds_cash_on_hand_but_not_column_b() {
+        let dec_2025 = f3x_report(
+            "C1",
+            "20251201",
+            "20251231",
+            "900.00",
+            "1000.00",
+            "500.00",
+            "5000.00",
+            "0",
+            &["500.00"],
+        );
+        let jan = f3x_report(
+            "C1",
+            "20260101",
+            "20260131",
+            "1000.00",
+            "1010.00",
+            "10.00",
+            "10.00",
+            "1000.00",
+            &["10.00"],
+        );
+        let feb = f3x_report(
+            "C1",
+            "20260201",
+            "20260228",
+            "1010.00",
+            "1030.00",
+            "20.00",
+            "30.00",
+            "999.00",
+            &["20.00"],
+        );
+        let chain = ReportChain::new(&feb, [&dec_2025, &jan]).unwrap();
+        assert_eq!(chain.prior().len(), 2);
+        assert_eq!(chain.period_reports().len(), 2, "December is not in 2026");
+        assert!(chain.gaps().is_empty());
+        assert!(std::ptr::eq(
+            chain.last_report_of_prior_year().unwrap(),
+            &dec_2025
+        ));
+        let r = chain.reconcile();
+        let b = r.line(Column::B, "11(a)(i)").unwrap();
+        assert_eq!(b.expected, dec!(30.00));
+        assert_eq!(b.reports_summed, 2);
+        assert!(b.matches(), "{b}");
+        let six_b = r.line(Column::A, "6(b)").unwrap();
+        assert_eq!(six_b.expected, dec!(1010.00));
+        assert!(six_b.matches(), "{six_b}");
+        // February says cash on Jan 1 was 999.00; December closed at 1000.00.
+        let six_a = r.line(Column::B, "6(a)").unwrap();
+        assert_eq!(six_a.expected, dec!(1000.00));
+        assert_eq!(six_a.delta, dec!(-1.00));
+        assert!(!six_a.matches());
+        assert!(
+            six_a.rule.contains("2025-12-01..2025-12-31"),
+            "{}",
+            six_a.rule
+        );
+
+        // January alone behind December: 6(b) and 6(a) both point at the
+        // December close.
+        let chain = ReportChain::new(&jan, [&dec_2025]).unwrap();
+        let r = chain.reconcile();
+        assert!(r.line(Column::A, "6(b)").unwrap().matches());
+        assert!(r.line(Column::B, "6(a)").unwrap().matches());
+        assert_eq!(r.line(Column::B, "11(a)(i)").unwrap().reports_summed, 1);
+    }
+
+    #[test]
+    fn gaps_name_the_uncovered_days() {
+        let mar = f3x_report("C1", "20260301", "20260331", "0", "0", "0", "0", "0", &[]);
+        let jan = f3x_report("C1", "20260101", "20260115", "0", "0", "0", "0", "0", &[]);
+        // No priors: January 1 through the day before March is uncovered.
+        let chain = ReportChain::new(&mar, []).unwrap();
+        let gaps = chain.gaps();
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].to_string(), "2026-01-01..2026-02-28");
+        // A half-January report leaves the rest of January and February.
+        let chain = ReportChain::new(&mar, [&jan]).unwrap();
+        let gaps = chain.gaps();
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].to_string(), "2026-01-16..2026-02-28");
+        // A report that starts on January 1 leaves none.
+        let full_jan = f3x_report("C1", "20260101", "20260228", "0", "0", "0", "0", "0", &[]);
+        assert!(
+            ReportChain::new(&mar, [&full_jan])
+                .unwrap()
+                .gaps()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn overlapping_and_out_of_order_priors_are_rejected() {
+        let mar = f3x_report("C1", "20260301", "20260331", "0", "0", "0", "0", "0", &[]);
+        let feb = f3x_report("C1", "20260201", "20260228", "0", "0", "0", "0", "0", &[]);
+        let feb_amended = f3x_report("C1", "20260201", "20260228", "0", "0", "0", "0", "0", &[]);
+        // An original and its amendment overlap.
+        let err = ReportChain::new(&mar, [&feb, &feb_amended]).unwrap_err();
+        assert!(
+            matches!(err, ChainError::Overlap { a: 0, b: 1, .. }),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("overlap"), "{err}");
+        // A report that ends on the current report's first day is not prior.
+        let straddles = f3x_report("C1", "20260215", "20260301", "0", "0", "0", "0", "0", &[]);
+        let err = ReportChain::new(&mar, [&straddles]).unwrap_err();
+        assert!(
+            matches!(err, ChainError::NotBeforeCurrent { index: 0, .. }),
+            "{err:?}"
+        );
+        // Nor is a later report.
+        let apr = f3x_report("C1", "20260401", "20260430", "0", "0", "0", "0", "0", &[]);
+        assert!(matches!(
+            ReportChain::new(&mar, [&apr]).unwrap_err(),
+            ChainError::NotBeforeCurrent { .. }
+        ));
+    }
+
+    #[test]
+    fn wrong_committee_form_and_missing_dates_are_rejected() {
+        let mar = f3x_report("C1", "20260301", "20260331", "0", "0", "0", "0", "0", &[]);
+        let other = f3x_report("C2", "20260201", "20260228", "0", "0", "0", "0", "0", &[]);
+        let err = ReportChain::new(&mar, [&other]).unwrap_err();
+        assert_eq!(
+            err,
+            ChainError::FilerMismatch {
+                index: 0,
+                expected: "C1".to_string(),
+                found: "C2".to_string(),
+            }
+        );
+        assert!(err.to_string().contains("filed by C2"), "{err}");
+
+        // Same committee id, different form.
+        let mut f3 = Filing::parse("HDR\u{1c}FEC\u{1c}8.5\u{1c}X\u{1c}1\nF3N\u{1c}C1").unwrap();
+        f3.summary.set("coverage_from_date", "20260101").unwrap();
+        f3.summary.set("coverage_through_date", "20260228").unwrap();
+        let err = ReportChain::new(&mar, [&f3]).unwrap_err();
+        assert_eq!(
+            err,
+            ChainError::FormMismatch {
+                index: 0,
+                expected: Table::F3X,
+                found: Table::F3,
+            }
+        );
+        // And the reverse: an F3 chain is cycle to date with its own cash
+        // lines (23 from the prior 27).
+        let mut f3_prior =
+            Filing::parse("HDR\u{1c}FEC\u{1c}8.5\u{1c}X\u{1c}1\nF3N\u{1c}C1").unwrap();
+        f3_prior
+            .summary
+            .set("coverage_from_date", "20251001")
+            .unwrap();
+        f3_prior
+            .summary
+            .set("coverage_through_date", "20251231")
+            .unwrap();
+        f3_prior
+            .summary
+            .set("col_a_cash_on_hand_close", "77.00")
+            .unwrap();
+        f3.summary
+            .set("col_a_cash_on_hand_beginning_period", "77.00")
+            .unwrap();
+        let chain = ReportChain::new(&f3, [&f3_prior]).unwrap();
+        assert_eq!(chain.basis(), PeriodBasis::CycleToDate);
+        // Cycle to date: the 2025 report is in the period.
+        assert_eq!(chain.period_reports().len(), 2);
+        assert!(chain.last_report_of_prior_year().is_none());
+        assert!(chain.gaps().is_empty());
+        let r = chain.reconcile();
+        let carry = r.line(Column::A, "23").unwrap();
+        assert_eq!(carry.expected, dec!(77.00));
+        assert!(carry.matches(), "{carry}");
+        assert!(
+            carry.rule.starts_with("= 27 of the prior report"),
+            "{}",
+            carry.rule
+        );
+        assert!(r.line(Column::B, "6(a)").is_none());
+
+        // Missing coverage dates.
+        let undated = f3x_with(&[("filer_committee_id_number", "C1")], vec![]);
+        assert_eq!(
+            ReportChain::new(&undated, []).unwrap_err(),
+            ChainError::CurrentCoverageMissing
+        );
+        assert_eq!(
+            ReportChain::new(&mar, [&undated]).unwrap_err(),
+            ChainError::PriorCoverageMissing { index: 0 }
+        );
+
+        // A form without rules.
+        let f24 = Filing::parse("HDR\u{1c}FEC\u{1c}8.5\u{1c}X\u{1c}1\nF24N\u{1c}C1").unwrap();
+        assert_eq!(
+            ReportChain::new(&f24, []).unwrap_err(),
+            ChainError::UnsupportedForm(ReconcileError::UnsupportedForm(Table::F24))
+        );
+    }
+
+    /// A Column B floor line stays a floor across the chain: the cover may
+    /// exceed the itemized sum, never fall below it.
+    #[test]
+    fn column_b_floors_stay_floors() {
+        let mk = |from: &str, through: &str, b_other: &str, sa17: &str| {
+            let mut f = f3x_report("C1", from, through, "0", "0", "0", "0", "0", &[]);
+            f.summary
+                .set("col_b_other_federal_receipts", b_other)
+                .unwrap();
+            f.lines.push(body(
+                Table::SchA,
+                "SA17",
+                "contribution_amount",
+                sa17,
+                false,
+            ));
+            f
+        };
+        let jan = mk("20260101", "20260131", "300.00", "250.00");
+        let feb_over = mk("20260201", "20260228", "700.00", "300.00");
+        let chain = ReportChain::new(&feb_over, [&jan]).unwrap();
+        let c = chain.reconcile().line(Column::B, "17").cloned().unwrap();
+        assert_eq!(c.relation, Relation::AtLeast);
+        assert_eq!(c.expected, dec!(550.00));
+        assert_eq!(c.delta, dec!(150.00));
+        assert!(c.matches(), "{c}");
+        let feb_under = mk("20260201", "20260228", "500.00", "300.00");
+        let chain = ReportChain::new(&feb_under, [&jan]).unwrap();
+        let c = chain.reconcile().line(Column::B, "17").cloned().unwrap();
+        assert_eq!(c.violation(), dec!(50.00));
+        assert!(!c.matches(), "{c}");
     }
 }

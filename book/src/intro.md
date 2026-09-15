@@ -141,7 +141,7 @@ that matches what you're trying to do:
    agree with the schedules? `Filing::reconcile`, the $200 itemization
    threshold, and a real filing that is $200 off.
 10. [Validating a filing](./validating.md): the FEC's acceptance rules
-    as `Filing::validate` and `hardmoney validate`: the 32 rules, where
+    as `Filing::validate` and `hardmoney validate`: the 41 rules, where
     they come from, and where hardmoney deliberately differs.
 11. [Loading bulk data into Postgres](./bulk-etl.md): go from "the FEC's
     own bulk downloads" to a normalized, migrated, queryable schema.

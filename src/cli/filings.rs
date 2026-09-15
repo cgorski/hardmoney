@@ -5,6 +5,7 @@
 //! `hardmoney efile` shares, so a filing found by either route is
 //! processed and reported identically.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use clap::Args;
@@ -12,11 +13,13 @@ use hardmoney::Cycle;
 use hardmoney::db::Namespace;
 use hardmoney::fec::openfec::{FilingRecord, FilingsQuery, OpenFec};
 use hardmoney::fec::{Cache, fetch_filing_bytes};
+use hardmoney::parser::reconcile::{Coverage, ReportChain, coverage};
 use hardmoney::{Filing, ParseOptions};
 use serde::Serialize;
 
 use super::CliResult;
 use super::db_args::DbArgs;
+use super::shared::columns;
 
 /// `--cache-dir`, shared by every command that downloads raw filings.
 #[derive(Args, Debug, Clone)]
@@ -375,6 +378,15 @@ pub struct FilingsArgs {
     #[arg(long)]
     pub reconcile: bool,
 
+    /// Order the reports found by coverage period and check each one
+    /// against the reports before it: Column B against the schedules
+    /// summed over the year (Form 3X) or cycle (Forms 3 and 3P), and cash
+    /// on hand carried forward from the prior report's close. One line per
+    /// report. Use with --most-recent so an original and its amendment are
+    /// not both in the chain.
+    #[arg(long)]
+    pub reconcile_chain: bool,
+
     /// Ingest each filing into Postgres (needs --database-url).
     #[arg(long)]
     pub ingest: bool,
@@ -384,6 +396,179 @@ pub struct FilingsArgs {
 
     #[command(flatten)]
     pub cache: CacheArgs,
+}
+
+/// One report's place in a chain, for `--reconcile-chain`. Serialised as
+/// the `chain` object of `--json` output.
+#[derive(Debug, Default, Serialize)]
+pub struct ChainSummary {
+    pub form: String,
+    pub coverage: Option<Coverage>,
+    /// Reports whose schedules were summed for Column B (this one
+    /// included).
+    pub reports_summed: usize,
+    pub column_a_checks: usize,
+    pub column_a_disagreeing: usize,
+    pub column_b_checks: usize,
+    pub column_b_disagreeing: usize,
+    /// `None` for the first report of the chain (nothing to carry from).
+    pub carry_forward_ok: Option<bool>,
+    /// Periods before this report that no report in the chain covers.
+    pub gaps: Vec<Coverage>,
+    /// Why the report could not be chained (download, parse, or chain
+    /// error). The other fields are then defaults.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Downloads (cache-first) and parses every e-filed record, orders the
+/// reports by coverage, and reconciles each against the ones before it on
+/// the same form. Returns one summary per filing id, in coverage order.
+fn reconcile_chain(records: &[FilingRecord], cache: &Cache) -> Vec<(u64, ChainSummary)> {
+    let mut loaded: Vec<(u64, Filing, Coverage)> = Vec::new();
+    let mut out: Vec<(u64, ChainSummary)> = Vec::new();
+    for record in records {
+        let Some(id) = record.filing_id() else {
+            continue;
+        };
+        let failed = |error: String| {
+            (
+                id,
+                ChainSummary {
+                    form: record.form_type.clone().unwrap_or_default(),
+                    error: Some(error),
+                    ..ChainSummary::default()
+                },
+            )
+        };
+        let bytes = match fetch_filing_bytes(id, cache, record.raw_url().as_deref()) {
+            Ok(b) => b,
+            Err(e) => {
+                out.push(failed(format!("download failed: {e}")));
+                continue;
+            }
+        };
+        let filing = match Filing::parse_bytes_with(&bytes, &ParseOptions::LENIENT) {
+            Ok(lenient) => lenient.value().clone(),
+            Err(e) => {
+                out.push(failed(format!("parse failed: {e}")));
+                continue;
+            }
+        };
+        match coverage(&filing) {
+            Some(cov) => loaded.push((id, filing, cov)),
+            None => out.push(failed(
+                "the cover line has no usable coverage dates".to_string(),
+            )),
+        }
+    }
+    loaded.sort_by_key(|(_, filing, cov)| (filing.summary.table().to_string(), *cov));
+
+    for (i, (id, filing, cov)) in loaded.iter().enumerate() {
+        let form = filing.summary.table();
+        let priors = loaded[..i]
+            .iter()
+            .filter(|(_, f, _)| f.summary.table() == form)
+            .map(|(_, f, _)| f);
+        let mut summary = ChainSummary {
+            form: form.to_string(),
+            coverage: Some(*cov),
+            ..ChainSummary::default()
+        };
+        match filing.reconcile() {
+            Ok(r) => {
+                summary.column_a_checks = r.checks.len();
+                summary.column_a_disagreeing = r.mismatches().count();
+            }
+            Err(e) => {
+                summary.error = Some(e.to_string());
+                out.push((*id, summary));
+                continue;
+            }
+        }
+        match ReportChain::new(filing, priors) {
+            Ok(chain) => {
+                summary.reports_summed = chain.period_reports().len();
+                summary.gaps = chain.gaps();
+                let b = chain.column_b_checks();
+                summary.column_b_checks = b.len();
+                summary.column_b_disagreeing = b.iter().filter(|c| !c.matches()).count();
+                let carry = chain.carry_forward_checks();
+                summary.carry_forward_ok =
+                    (!carry.is_empty()).then(|| carry.iter().all(|c| c.matches()));
+            }
+            Err(e) => summary.error = Some(e.to_string()),
+        }
+        out.push((*id, summary));
+    }
+    out
+}
+
+fn print_chain(rows: &[(u64, ChainSummary)], records: &[FilingRecord]) {
+    let report_type = |id: u64| -> String {
+        records
+            .iter()
+            .find(|r| r.filing_id() == Some(id))
+            .and_then(|r| r.report_type.clone())
+            .unwrap_or_default()
+    };
+    let verdict = |checks: usize, disagreeing: usize| -> String {
+        if disagreeing == 0 {
+            format!("balances ({checks})")
+        } else {
+            format!("{disagreeing} of {checks} disagree")
+        }
+    };
+    let table: Vec<[String; 6]> = rows
+        .iter()
+        .map(|(id, s)| {
+            let (a, b, cash) = match &s.error {
+                Some(e) => (format!("error: {e}"), String::new(), String::new()),
+                None => (
+                    verdict(s.column_a_checks, s.column_a_disagreeing),
+                    format!(
+                        "{}, {} report(s) summed",
+                        verdict(s.column_b_checks, s.column_b_disagreeing),
+                        s.reports_summed
+                    ),
+                    match s.carry_forward_ok {
+                        None => "first report".to_string(),
+                        Some(true) => "ok".to_string(),
+                        Some(false) => "DIFF".to_string(),
+                    },
+                ),
+            };
+            [
+                id.to_string(),
+                report_type(*id),
+                s.coverage.map(|c| c.to_string()).unwrap_or_default(),
+                a,
+                b,
+                cash,
+            ]
+        })
+        .collect();
+    println!(
+        "{}",
+        columns(
+            &[
+                "file_number",
+                "report",
+                "coverage",
+                "column A",
+                "column B (chain)",
+                "cash carried"
+            ],
+            &table
+        )
+    );
+    for (id, s) in rows {
+        for gap in &s.gaps {
+            println!(
+                "  {id}: no report in the chain covers {gap}; its Column B sums are short by that period"
+            );
+        }
+    }
 }
 
 pub async fn run(args: FilingsArgs) -> CliResult {
@@ -495,6 +680,34 @@ pub async fn run(args: FilingsArgs) -> CliResult {
             }
             json_rows.push(v);
         }
+    }
+
+    if args.reconcile_chain {
+        let rows = reconcile_chain(&records, &cache);
+        if args.json {
+            let by_id: HashMap<u64, &ChainSummary> = rows.iter().map(|(id, s)| (*id, s)).collect();
+            for row in &mut json_rows {
+                let id = row.get("file_number").and_then(serde_json::Value::as_u64);
+                if let (Some(id), serde_json::Value::Object(map)) = (id, row)
+                    && let Some(summary) = by_id.get(&id)
+                {
+                    map.insert("chain".to_string(), serde_json::to_value(summary)?);
+                }
+            }
+        } else {
+            if actions.any() {
+                println!();
+            }
+            print_chain(&rows, &records);
+        }
+        failures += rows
+            .iter()
+            .filter(|(_, s)| {
+                s.error.as_deref().is_some_and(|e| {
+                    e.starts_with("download failed") || e.starts_with("parse failed")
+                })
+            })
+            .count();
     }
 
     if args.json {

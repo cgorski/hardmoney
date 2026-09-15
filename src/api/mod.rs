@@ -26,6 +26,7 @@
 //! | `GET /filings` | list directly-ingested filings; `committee_id`, `most_recent`, `form_type` filters |
 //! | `GET /filings/{filing_id}` | a directly-ingested `.fec` filing's header/summary and amendment chain |
 //! | `GET /filings/{filing_id}/schedule-e` | that filing's own Schedule E line items |
+//! | `GET /filings/{filing_id}/processing` | how far the FEC has processed the filing, asked of openFEC live (needs an API key on the server; 503 without one; no database row required) |
 //!
 //! All list routes accept `limit` (default 50, max 500) and `offset`.
 //!
@@ -170,6 +171,10 @@ pub fn router(pool: PgPool, config: &ApiConfig) -> Router {
         .route(
             "/filings/{filing_id}/schedule-e",
             get(routes::filings::schedule_e),
+        )
+        .route(
+            "/filings/{filing_id}/processing",
+            get(routes::filings::processing),
         );
     if config.ui {
         protected = protected.merge(routes::tools::router(routes::tools::Limits {

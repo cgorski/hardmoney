@@ -55,6 +55,8 @@ pub mod error;
 pub mod filing;
 pub mod form;
 pub mod header;
+#[cfg(feature = "serde")]
+pub mod jsonschema;
 pub mod reconcile;
 pub mod schema;
 pub mod stream;

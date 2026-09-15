@@ -1,0 +1,11 @@
+{
+  "file": "f3x.fec",
+  "form_type": "F3XN",
+  "version": "8.5",
+  "line_count": 38,
+  "acceptable": true,
+  "errors": 0,
+  "warnings": 0,
+  "findings_by_rule": {},
+  "findings": []
+}

@@ -1,0 +1,68 @@
+{
+ "api_version": "1.0",
+ "pagination": {
+  "count": 2,
+  "is_count_exact": true,
+  "page": 1,
+  "pages": 1,
+  "per_page": 100
+ },
+ "results": [
+  {
+   "amended_by": null,
+   "amendment_chain": [
+    2011831
+   ],
+   "amendment_number": 0,
+   "amends_file": null,
+   "beginning_image_number": "202609149904202705",
+   "committee_id": "C00140855",
+   "committee_name": "FIRSTENERGY CORP POLITICAL ACTION COMMITTEE",
+   "coverage_end_date": "2026-08-31",
+   "coverage_start_date": "2026-08-01",
+   "csv_url": "https://docquery.fec.gov/csv/831/2011831.csv",
+   "document_description": "SEPTEMBER MONTHLY 2026",
+   "ending_image_number": "202609149904202758",
+   "fec_file_id": "FEC-2011831",
+   "fec_url": "https://docquery.fec.gov/dcdev/posted/2011831.fec",
+   "file_number": 2011831,
+   "filed_date": "2026-09-14",
+   "form_type": "F3XN",
+   "html_url": "https://docquery.fec.gov/cgi-bin/forms/C00140855/2011831/",
+   "is_amended": false,
+   "load_timestamp": "2026-09-14T15:50:28",
+   "most_recent": true,
+   "most_recent_filing": 2011831,
+   "pdf_url": "https://docquery.fec.gov/pdf/705/202609149904202705/202609149904202705.pdf",
+   "receipt_date": "2026-09-14T15:50:19"
+  },
+  {
+   "amended_by": null,
+   "amendment_chain": [
+    2006786
+   ],
+   "amendment_number": 0,
+   "amends_file": null,
+   "beginning_image_number": "202608179899532184",
+   "committee_id": "C00140855",
+   "committee_name": "FIRSTENERGY CORP POLITICAL ACTION COMMITTEE",
+   "coverage_end_date": "2026-07-31",
+   "coverage_start_date": "2026-07-01",
+   "csv_url": "https://docquery.fec.gov/csv/786/2006786.csv",
+   "document_description": "AUGUST MONTHLY 2026",
+   "ending_image_number": "202608179899532234",
+   "fec_file_id": "FEC-2006786",
+   "fec_url": "https://docquery.fec.gov/dcdev/posted/2006786.fec",
+   "file_number": 2006786,
+   "filed_date": "2026-08-17",
+   "form_type": "F3XN",
+   "html_url": "https://docquery.fec.gov/cgi-bin/forms/C00140855/2006786/",
+   "is_amended": false,
+   "load_timestamp": "2026-08-17T11:43:46",
+   "most_recent": true,
+   "most_recent_filing": 2006786,
+   "pdf_url": "https://docquery.fec.gov/pdf/184/202608179899532184/202608179899532184.pdf",
+   "receipt_date": "2026-08-17T11:43:42"
+  }
+ ]
+}

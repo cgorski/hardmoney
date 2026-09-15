@@ -1143,7 +1143,7 @@ Usage: hardmoney spec <COMMAND>
 Commands:
   tables  List every table: version buckets, fields, and FEC spec rows
   fields  The fields of one table at one spec version, in column order
-  export  The complete machine-readable specification, as JSON
+  export  The complete machine-readable specification: JSON, JSON Schema, or CSV
   diff    Fields added, removed, and moved between two spec versions
   help    Print this message or the help of the given subcommand(s)
 
@@ -1251,18 +1251,45 @@ rule}]`, where `required` is `{"level": "error"}` or
 
 ```text
 $ hardmoney spec export --help
-The complete machine-readable specification, as JSON
+The complete machine-readable specification: JSON, JSON Schema, or CSV
 
 Usage: hardmoney spec export [OPTIONS]
 
 Options:
-      --json  Accepted for consistency with the other subcommands; export is always JSON
-  -h, --help  Print help
+      --format <FORMAT>
+          Output format. `json`: the raw data model (every table, every version-bucketed layout, every FEC spec row; 0-based columns). `json-schema`: one JSON Schema (draft 2020-12) per table describing a record as an object keyed by canonical field name, as a `$defs` bundle or, with --table, a standalone document. `csv`: one row per table, version bucket, and field, with the FEC's spec columns, for spreadsheet users. Columns are 1-based in json-schema and csv
+
+          Possible values:
+          - json:        The raw data model, 0-based columns
+          - json-schema: JSON Schema draft 2020-12, one schema per table
+          - csv:         One flat row per table, version bucket, and field
+
+          [default: json]
+
+      --table <TABLE>
+          Only this table (e.g. SchA, F3X, TEXT; case-insensitive)
+
+      --version <VERSION>
+          For json-schema: the spec version the record is at, e.g. 8.5, 7.0 [default: the bundled spec version]; columns come from that version's layout, field rules from the bundled workbook. For json and csv: only layouts that cover this version [default: all]
+
+      --json
+          Accepted for consistency with the other subcommands; the same as `--format json`
+
+  -h, --help
+          Print help (see a summary with '-h')
 ```
 
-The spec-as-data artifact: every table, every version-bucketed layout
-(version list, width, and each field's column), and every FEC spec row,
-in one JSON document.
+Three renderings of the same compiled data; [The spec as
+data](./spec-as-data.md) explains each and where the data comes from.
+`--table` restricts any of them to one table; `--version` restricts `json`
+and `csv` to the layouts covering that version and, for `json-schema`,
+selects the version the record is at. A table with no layout at the
+version, or a version no table has, is exit 1 with the same messages as
+`spec fields` and `spec diff`.
+
+**`--format json`** (the default) is the spec-as-data artifact: every
+table, every version-bucketed layout (version list, width, and each
+field's column), and every FEC spec row, in one JSON document.
 
 ```json
 {
@@ -1291,11 +1318,64 @@ in one JSON document.
 ```
 
 (Real values; lists trimmed with `...`. The whole document is about
-900 KB.) It uses 0-based columns throughout, matching the Rust
+1.7 MB.) It uses 0-based columns throughout, matching the Rust
 `FieldDef::column` and `FieldSpec::column`; it says so in
 `column_base`. It is the complete machine-readable version map for the
 format, suitable for generating bindings in another language or checking
 a vendor's own tables against.
+
+**`--format json-schema`** is one JSON Schema (draft 2020-12) per table.
+Without `--table` it is a bundle with the tables under `$defs`, keyed by
+table name; with `--table SchA` it is one standalone document. Each
+describes a record as an object keyed by canonical field name, every value
+a string: `maxLength` from the FEC's type, `enum` from its code lists and
+`pattern` from its formats (both allowing blank, and both only at the
+bundled version), `required` for `X (error)` fields, and an `x-fec`
+object per field with the workbook row (`column`, 1-based; `type`,
+`required_level`, `sample`, `value_reference`, `rule`, `forms`,
+`allowed_values`, `pattern`). `x-hardmoney` carries `spec_version`,
+`table`, `layout_versions`, and `field_rules_version`.
+
+```text
+$ hardmoney spec export --format json-schema --table SchA | head -12
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SchA record, FEC spec 8.5",
+  "description": "One SchA record at FEC electronic filing spec version 8.5, as an object keyed by canonical field name. Every value is a string as filed (trimmed); a blank field is the empty string. x-fec.column is the 1-based position in the delimited line.",
+  "type": "object",
+  "properties": {
+    "form_type": {
+      "type": "string",
+      "description": "FORM TYPE. Rule: Appendix C. SA3L must be used with the F3L",
+      "maxLength": 8,
+      "x-fec": {
+        "column": 1,
+```
+
+The bundle at 8.5 has 49 `$defs` (1,875 fields) and is about 1.1 MB
+pretty-printed. `--version 7.0` describes a record at that version: the
+columns come from the 7.0 layout and the field rules are joined by name
+from the 8.5 workbook, with `enum` and `pattern` left out (see the
+chapter for why). `tests/spec_export.rs` checks that no record of any
+fixture in `tests/fixtures/` is rejected by the schema for its table.
+
+**`--format csv`** is one flat row per table, version bucket, and field,
+with the FEC's spec columns joined by field name (7,361 rows, about
+970 KB): the FEC's spreadsheet given back as a spreadsheet, complete across
+versions. Columns: `table, versions` (space-separated, the versions the
+bucket covers), `first_version, last_version, width, column` (1-based),
+`field, rules_version` (`8.5`, or blank when the current workbook has no
+row for the field), `description, type, kind, max_len, required_level,
+required_condition, sample, value_reference, rule, forms, allowed_values,
+pattern`. Multi-valued cells are `|`-separated, the workbook's own
+convention; rule text is collapsed to one line.
+
+```text
+$ hardmoney spec export --format csv | grep '^SchA,8.0' | head -3
+SchA,8.0 8.1 8.2 8.3 8.4 8.5,8.0,8.5,45,1,form_type,8.5,FORM TYPE,A/N-8,alpha_numeric,8,error,,SA11AI,SA[line# ref],Appendix C. SA3L must be used with the F3L,F3|F3X|F3P|F3L,,
+SchA,8.0 8.1 8.2 8.3 8.4 8.5,8.0,8.5,45,2,filer_committee_id_number,8.5,FILER COMMITTEE ID NUMBER,A/N-9,alpha_numeric,9,error,,C00123456,,,F3|F3X|F3P|F3L,,
+SchA,8.0 8.1 8.2 8.3 8.4 8.5,8.0,8.5,45,3,transaction_id,8.5,TRANSACTION ID,A/N-20,alpha_numeric,20,error,,A56123456789-1234,,must be unique and UPPER CASE for the life of the report (original + all amendments),F3|F3X|F3P|F3L,,
+```
 
 ### `spec diff`
 

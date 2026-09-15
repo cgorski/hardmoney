@@ -19,7 +19,7 @@
 
 use std::path::Path;
 
-use hardmoney::parser::reconcile::{Column, Relation};
+use hardmoney::parser::reconcile::{ChainError, Column, PeriodBasis, Relation, ReportChain};
 use hardmoney::{Filing, Table};
 
 fn fixtures() -> Vec<(String, Filing)> {
@@ -221,4 +221,161 @@ fn debts_transfers_and_presidential_fixtures_balance() {
         assert_eq!(c.lines_summed, n, "{c}");
         assert!(!c.expected.is_zero(), "{c}");
     }
+}
+
+// ---------------------------------------------------------------------
+// Chains: Column B and cash on hand across a committee's reports
+// ---------------------------------------------------------------------
+
+fn chain_fixture(name: &str) -> Filing {
+    fixture(&format!("chain/{name}"))
+}
+
+/// The Republican Party of Minnesota's first three monthly reports of
+/// 2026 (`tests/fixtures/chain/README.md`): the March report's Column B
+/// equals the January + February + March schedule sums on all 27 lines,
+/// and cash on hand carries forward from each report to the next.
+#[test]
+fn real_chain_column_b_balances_over_three_monthly_reports() {
+    use rust_decimal_macros::dec;
+    let jan = chain_fixture("F3XN_1948502.fec");
+    let feb = chain_fixture("F3XA_2011895.fec");
+    let mar = chain_fixture("F3XA_2011898.fec");
+    for f in [&jan, &feb, &mar] {
+        let r = f.reconcile().unwrap();
+        assert!(r.balances(), "{r}");
+    }
+
+    let chain = ReportChain::new(&mar, [&feb, &jan]).unwrap();
+    assert_eq!(chain.basis(), PeriodBasis::YearToDate);
+    assert!(chain.gaps().is_empty(), "{:?}", chain.gaps());
+    assert_eq!(chain.period_reports().len(), 3);
+    let r = chain.reconcile();
+    assert!(r.balances(), "{r}");
+    assert_eq!(chain.column_b_checks().len(), 27);
+    assert_eq!(chain.carry_forward_checks().len(), 1);
+
+    // Exercised by real records, not satisfied at zero: itemized
+    // individuals, transfers from the nonfederal account (H3), and the
+    // allocated shares (H4) all sum across the three files.
+    let b = |label: &str| r.line(Column::B, label).unwrap();
+    let itemized = b("11(a)(i)");
+    assert_eq!(itemized.reports_summed, 3);
+    assert!(itemized.expected > dec!(100000), "{itemized}");
+    assert!(itemized.lines_summed > 100, "{itemized}");
+    for label in ["18(a)", "21(a)(i)", "21(a)(ii)", "21(b)", "12"] {
+        let c = b(label);
+        assert!(!c.expected.is_zero(), "{c}");
+        assert!(c.matches(), "{c}");
+    }
+    // Cash: March's 6(b) is February's 8.
+    let carry = r.line(Column::A, "6(b)").unwrap();
+    assert_eq!(carry.reported, Some(dec!(63033.71)));
+    assert_eq!(carry.expected, dec!(63033.71));
+
+    // The first report of the year: Column B is its own Column A.
+    let first = ReportChain::new(&jan, []).unwrap();
+    let r = first.reconcile();
+    assert!(r.balances(), "{r}");
+    assert!(r.checks.iter().all(|c| c.reports_summed == 1));
+}
+
+/// Adding the 2025 year-end report to the chain crosses the year boundary:
+/// it stays out of the 2026 Column B sums but supplies 6(a) (cash on hand
+/// January 1) and the January report's 6(b).
+#[test]
+fn real_chain_crossing_the_year_boundary_carries_cash_only() {
+    use rust_decimal_macros::dec;
+    let ye_2025 = chain_fixture("F3XN_1943038.fec");
+    let jan = chain_fixture("F3XN_1948502.fec");
+    let feb = chain_fixture("F3XA_2011895.fec");
+    let mar = chain_fixture("F3XA_2011898.fec");
+
+    let chain = ReportChain::new(&mar, [&ye_2025, &jan, &feb]).unwrap();
+    assert_eq!(chain.prior().len(), 3);
+    assert_eq!(chain.period_reports().len(), 3, "2025 is not in 2026");
+    assert!(chain.gaps().is_empty());
+    let r = chain.reconcile();
+    assert!(r.balances(), "{r}");
+    assert_eq!(chain.carry_forward_checks().len(), 2);
+    let jan_1 = r.line(Column::B, "6(a)").unwrap();
+    assert_eq!(jan_1.reported, Some(dec!(97188.87)));
+    assert_eq!(jan_1.expected, dec!(97188.87));
+    // The 2026 sums are the same with or without the 2025 report.
+    let without = ReportChain::new(&mar, [&jan, &feb]).unwrap().reconcile();
+    assert_eq!(
+        r.line(Column::B, "11(a)(i)").unwrap().expected,
+        without.line(Column::B, "11(a)(i)").unwrap().expected
+    );
+
+    // January behind the year-end: both cash lines point at the same close.
+    let chain = ReportChain::new(&jan, [&ye_2025]).unwrap();
+    let r = chain.reconcile();
+    assert!(r.balances(), "{r}");
+    assert_eq!(r.line(Column::A, "6(b)").unwrap().expected, dec!(97188.87));
+    assert_eq!(r.line(Column::B, "6(a)").unwrap().expected, dec!(97188.87));
+
+    // The chain refuses an original alongside its amendment, and a report
+    // from another committee.
+    let jfc = fixture("F3XN_1965568.fec");
+    assert!(matches!(
+        ReportChain::new(&mar, [&jan, &jfc]).unwrap_err(),
+        ChainError::FilerMismatch { index: 1, .. }
+    ));
+    let dup = chain_fixture("F3XA_2011895.fec");
+    assert!(matches!(
+        ReportChain::new(&mar, [&feb, &dup]).unwrap_err(),
+        ChainError::Overlap { .. }
+    ));
+}
+
+/// The same committee's May 2026 amendment (`tests/fixtures/rad/`) carries
+/// a $200 Column A discrepancy on line 11(c). Chained behind January
+/// through April it shows up again in Column B, by the same $200, and
+/// every other Column B line agrees: the chain isolates the report that
+/// introduced it. Without April the chain has a gap and says so.
+#[test]
+fn real_chain_propagates_a_column_a_discrepancy_into_column_b() {
+    use rust_decimal_macros::dec;
+    let jan = chain_fixture("F3XN_1948502.fec");
+    let feb = chain_fixture("F3XA_2011895.fec");
+    let mar = chain_fixture("F3XA_2011898.fec");
+    let apr = chain_fixture("F3XA_2011901.fec");
+    let may = fixture("rad/F3XA_2011912.fec");
+    assert!(apr.reconcile().unwrap().balances());
+
+    // April on its own chain balances too.
+    let chain = ReportChain::new(&apr, [&jan, &feb, &mar]).unwrap();
+    assert!(chain.gaps().is_empty());
+    let r = chain.reconcile();
+    assert!(r.balances(), "{r}");
+
+    // May's own Column A is $200 over its schedule on 11(c) ...
+    let own = may.reconcile().unwrap();
+    assert_eq!(own.line(Column::A, "11(c)").unwrap().delta, dec!(200.00));
+    // ... and so is its Column B, on that line only.
+    let chain = ReportChain::new(&may, [&jan, &feb, &mar, &apr]).unwrap();
+    assert!(chain.gaps().is_empty());
+    let r = chain.reconcile();
+    let off: Vec<String> = r.mismatches().map(ToString::to_string).collect();
+    assert_eq!(off.len(), 1, "{}", off.join("\n"));
+    let c = r.line(Column::B, "11(c)").unwrap();
+    assert_eq!(c.delta, dec!(200.00));
+    assert_eq!(c.reports_summed, 5);
+    assert!(r.line(Column::A, "6(b)").unwrap().matches());
+
+    // Leave April out and the chain reports the hole rather than blaming
+    // the filer for it.
+    let chain = ReportChain::new(&may, [&jan, &feb, &mar]).unwrap();
+    let gaps = chain.gaps();
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0].to_string(), "2026-04-01..2026-04-30");
+    let r = chain.reconcile();
+    let carry = r.line(Column::A, "6(b)").unwrap();
+    assert!(
+        carry.rule.contains("2026-03-01..2026-03-31"),
+        "{}",
+        carry.rule
+    );
+    assert!(!carry.matches(), "May's 6(b) is April's close, not March's");
 }

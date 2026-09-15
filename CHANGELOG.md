@@ -1,5 +1,171 @@
 # Changelog
 
+## 3.1.0 — 2026-09-15
+
+- **Release hygiene for institutional users.** `SECURITY.md` (supported
+  versions, disclosure address, response commitment, the full list of
+  hosts each CLI command contacts, secret handling); a "Support and
+  security" section in the README with the point of contact and release
+  cadence; a book chapter for security reviewers
+  (`book/src/security-and-provenance.md`: network behaviour, data
+  handling, dependency policy, SBOM, build provenance and how to verify
+  it, reproducibility, licences, data provenance, release process);
+  issue templates for validator and reconcile disagreements and bugs.
+  Supply chain: `deny.toml` (permissive-licence allow-list with three
+  documented crate-scoped exceptions, RustSec advisories, crates.io-only
+  sources, OpenSSL banned) and a `supply-chain.yml` workflow running
+  `cargo audit`, `cargo deny`, and a CycloneDX SBOM (crate, extension
+  crate, wheel) on every push and weekly; Dependabot for Cargo, pip, and
+  Actions. CI now tests the Postgres integration suite on PG 15 (the
+  FEC's version) as well as 18. Python: wheels are built for Windows
+  x86_64, Linux aarch64, and macOS Intel in addition to Linux x86_64 and
+  Apple silicon, with `--locked`; tests run on Windows; `v*` tags
+  produce build provenance attestations (`gh attestation verify`) and a
+  PyPI publish job gated on the `PYPI_PUBLISH` variable and
+  `PYPI_API_TOKEN` secret. `pyproject.toml` gains a `Security` URL. The
+  README's validator count is corrected from 32 to 41 rules.
+- **The spec as JSON Schema and CSV, and a published drift report.**
+  `hardmoney spec export --format json-schema` renders the compiled FEC
+  format as one JSON Schema (draft 2020-12) per table, as a `$defs`
+  bundle or one document with `--table`, at any version with a layout
+  (`--version 7.0`): a record is an object keyed by canonical field name,
+  every value a string, with `maxLength` from the FEC's type (`AMT-n`
+  allows a sign and a point, as the FEC does), `enum` and `pattern` from
+  its code lists and formats (blank always allowed; emitted only at the
+  version the workbook describes, since accepted 3.00 filings violate the
+  8.5 district pattern), `required` for `X (error)` fields, and an
+  `x-fec` object per field carrying the workbook row (1-based `column`,
+  `type` code, `required_level`, `sample`, `value_reference`, `rule`,
+  `forms`) plus `x-hardmoney` document metadata. The rendering is
+  `hardmoney::parser::jsonschema::{table_schema, bundle}` (feature
+  `serde`). `--format csv` writes one flat row per table, version bucket,
+  and field with the spec columns joined (7,361 rows). `--table` and
+  `--version` also filter the JSON export. `tests/spec_export.rs` checks
+  every record of every fixture against its table's schema (in-crate,
+  and with the Python `jsonschema` package under
+  `HARDMONEY_ORACLE_TESTS=1`). `scripts/distill_fec_spec.py
+  --diff-report PATH` writes a Markdown report of what changed against
+  the checked-in spec; the weekly `spec-drift.yml` job now uploads that
+  report, the regenerated JSON, the JSON Schema bundle, and the CSV as a
+  `spec-drift-<date>` artifact and writes the report to the step summary
+  (the deliverable fecfile-validate#302 asks for). New book chapter
+  *The spec as data* (`book/src/spec-as-data.md`).
+- **Golden fixture pack** (`tests/fixtures/golden/`): nine spec-8.5
+  `.fec` files generated deterministically by
+  `examples/golden_fixtures.rs` from `ParsedLine::from_pairs` and
+  `Filing::from_parts`, with every cover page filled to the fixed point of
+  `Filing::reconcile` so each Column A and Column B line balances. F3X
+  (Schedules A, B, C, D, E, F, H3, H4, built from FECfile+'s public-domain
+  `test_calculate_summary_column_a` transaction set), F3, F3P, F24, F1M,
+  F99 (with a `[BEGINTEXT]` block), and three broken F3X variants (a
+  cover total one cent off, a duplicate transaction id, a blank required
+  field) with their intended findings. Beside each file, the exact
+  `hardmoney validate --json` and `hardmoney reconcile --json --all`
+  output; `f3x.expected_column_a.json`, every Column A line keyed the way
+  FECfile+'s `calculate_summary_column_a` keys them, matching that test's
+  values on the lines it computes and carrying the H3/H4-derived values
+  for the five lines it stubs to zero; and a `MANIFEST.json` with SHA-256,
+  provenance, and expected outcomes per file. `tests/golden_fixtures.rs`
+  regenerates the pack in memory and byte-compares it with the committed
+  files, re-validates and re-reconciles each, and compares the sidecars
+  with the CLI's output. All nine were submitted to WebCheck on 2026-09-15
+  (six `SUCCESS` with no findings; the broken ones fail as intended); the
+  pack's `README.md` records the verdicts and why the committee ids are
+  those of committees terminated decades ago (WebCheck checks every id
+  against the FEC registry).
+- **`hardmoney.compat.fecfile_validate` and a pytest plugin.** The
+  Python package gains `hardmoney.compat.fecfile_validate`, which presents
+  whole-file validation in the shape of the FEC's `fecfile-validate`
+  package (`validate_file(data) -> ValidationResult` with `.errors` and
+  `.warnings` of `ValidationError(message, path)`, plus `validator`,
+  `instance`, `severity`, `line_no`, `form_type`), an emulated per-record
+  `validate_record(form_type, fields)` (the record is serialised to one
+  `.fec` line under a minimal header and cover and findings filtered to
+  that line; FECfile+'s field spellings and non-wire keys are accepted),
+  and `summary_column_a(data) -> dict[str, Decimal]` keyed `line_11ai`
+  ... as FECfile+'s `summary.py` keys them. `hardmoney.pytest_plugin`,
+  registered through the `pytest11` entry point, adds a `hardmoney`
+  marker and the `fec_filing`, `assert_fec_acceptable`,
+  `assert_fec_balances`, and `fec_fixture` fixtures with a
+  `--hardmoney-fixtures=DIR` option. New book chapter *Using hardmoney
+  from FECfile+ and other Python projects*
+  (`book/src/python-fecfile-plus.md`).
+- **Section 508 review of the browser UI.** `hardmoney serve --ui` was
+  reviewed against WCAG 2.1 Level AA with axe-core 4.10.2 in headless
+  Chrome over seventeen application states, computed contrast ratios for
+  every colour pair in both themes, and a scripted keyboard-only
+  walkthrough; the result is the new book chapter *Accessibility of the
+  browser UI* (`book/src/accessibility.md`, with a conformance table and
+  the known limitations). Fixes in `src/ui/assets/`: the file chooser is
+  reachable by keyboard; the records grid is one tab stop with a roving
+  tabindex (arrows, Home/End, PageUp/PageDown, Enter to edit, Enter on a
+  header to sort), reports `aria-rowcount`/`aria-rowindex`, keeps focus
+  across virtualised redraws, and never redraws under an open editor;
+  focus moves to the heading after loading or closing a filing and after
+  navigation; the page title changes per view; all three tab strips share
+  one `tabs.js` with `aria-controls`/`tabpanel`; the header tooltip is
+  linked with `aria-describedby`, hoverable, and dismissed by Escape; the
+  theme toggle keeps one label and reports `aria-pressed`; toasts feed two
+  persistent live regions and pause while hovered; a rejected filing id
+  marks the field `aria-invalid` with the message in its description;
+  mismatch rows, edited cells, error lines, the selected tab, and the
+  pressed toggle carry text or a mark as well as colour; a
+  `--control-border` token puts every control boundary at 3:1 or better;
+  the layout reflows at 320 px. New string-level tests in
+  `tests/ui_routes.rs` guard the shell's `lang`, title, skip link, single
+  `main`, labelled controls, live regions, the absence of positive
+  `tabindex` and `outline: none`, and the widget attributes the review
+  verified.
+- **Column B across a chain of reports.** `ReportChain` in
+  `hardmoney::parser::reconcile` takes a report and the committee's
+  earlier reports (any order) and checks what one file cannot: every
+  Column B schedule line against the sum of that schedule over the
+  reports in the period, with the same `Relation` as Column A, and cash
+  on hand carried forward (6(b)/23/6 against the prior report's 8/27/10;
+  Form 3X 6(a) against the last report of the prior year when the chain
+  has one). The period is typed (`PeriodBasis::YearToDate` for Form 3X,
+  `CycleToDate` for Forms 3 and 3P) and follows the FEC's form
+  instructions and FECfile+'s `calculate_summary_column_b` /
+  `calculate_cash_on_hand_fields`. `ReportChain::new` rejects another
+  form, another filer, a report that does not end before the current one
+  begins, and overlapping reports (an original with its amendment), each
+  as a typed `ChainError`; `gaps()` names uncovered days. `LineCheck`
+  gains `reports_summed` (1 for every existing check). CLI: `hardmoney
+  reconcile FILE --with-prior FILE...` appends the chain checks and a
+  `chain` object to `--json`; `hardmoney filings --reconcile-chain`
+  orders a committee's reports by coverage and prints one line per report
+  (Column A, Column B over the chain, cash carried). Verified on the
+  Republican Party of Minnesota's twelve 2025-2026 reports and a national
+  committee's seven 2026 monthlies (52 MB); five of the Minnesota files
+  are fixtures in `tests/fixtures/chain/` with a provenance README, and a
+  known $200 Column A discrepancy is shown propagating into Column B of
+  every later report. Book: "Column B and prior reports" in
+  `reconciling.md`.
+- **Processing lag and `fec_url` resolution.** `hardmoney lag ID...`
+  joins openFEC's `/efile/filings/` (receipt time), `/filings/` (summary
+  processed), and `/operations-log/` (`summary_data_complete_date`,
+  `transaction_data_complete_date`, keyed by beginning image number) to
+  say how far the FEC's processed data is behind each filing, three
+  requests per fifty ids; `--committee C --cycle 2026` measures a whole
+  committee in a handful of requests and prints the distribution (median,
+  p90, max, pending past 30 and 60 days); `--counts` compares the raw
+  filing's Schedule A/B/E line counts with the rows openFEC has processed
+  for the filing's page range. Library: `OpenFec::operations_log`,
+  `processing_status`, `committee_processing_status`, `processed_rows`,
+  `resolve_fec_url`; `OperationsLogQuery`, `OperationsLogRecord`,
+  `ProcessingStatus`, `ProcessingStage`, `ScheduleEndpoint`; repeated
+  `file_number=` on `FilingsQuery` and `EfileQuery`.
+  `hardmoney::fec::resolve_fec_url(id)` asks openFEC for the filing's
+  `fec_url` and falls back to the `docquery.fec.gov` template, and
+  `fetch_filing_bytes` uses it when given no URL (openFEC#6717 is
+  inventorying docquery for retirement). REST: `GET
+  /filings/{id}/processing` asks openFEC live; 503 with guidance when the
+  server has no key, no database row needed. Measured 2026-09-15 on the
+  fifty oldest Form 3X/3 reports in the RSS feed (received 2026-09-08):
+  summary lag 0 days for all, transactions loaded for 42 within 6 days
+  (median 1, p90 6), 8 pending at 7 days. Book: "Processing lag" in
+  `discovery.md`. New openFEC fixtures under `tests/fixtures/openfec/`.
+
 ## 3.0.1 — 2026-09-15
 
 - **For FEC staff** (`book/src/for-fec-staff.md`): a chapter arranged by

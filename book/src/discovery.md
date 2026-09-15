@@ -381,6 +381,107 @@ an `EfileQuery` returns `/efile/filings/` records (`file_number`,
 `committee_id`, `form_type`, `receipt_date`, `fec_url`, ...), which is the
 same immediacy as the feed with openFEC's filtering and pagination.
 
+## Processing lag
+
+The FEC loads an e-filing in two passes. Pass 1 loads the cover page:
+the filing then appears in `/filings/` and `/reports/` with its totals.
+Pass 2 loads every itemized transaction: only then do its rows appear in
+`/schedules/schedule_a/` and the other schedule endpoints. The FEC's own
+`/operations-log/` records when each pass finished
+(`summary_data_complete_date`, `transaction_data_complete_date`), keyed
+by the report's `sub_id` and its beginning image number rather than its
+filing number. `hardmoney lag` joins the three endpoints and answers the
+question in the command's name:
+
+```text
+$ hardmoney lag 2011831 2006786 2011912 999999999
+file_number  form  report  committee  received          in /filings/  summary loaded  transactions loaded
+2011831      F3XN  M9      C00140855  2026-09-14 15:50  yes           2026-09-14 +0d  pending (1d so far)
+2006786      F3XN  M8      C00140855  2026-08-17 11:43  yes           2026-08-17 +0d  2026-08-31 +14d
+2011912      F3XA          C00001313  2026-09-14 19:50  no                            pending (1d so far)
+999999999                                               no
+4 filing(s): 1 unknown to openFEC, 1 received only, 1 summary loaded, 1 transactions loaded
+summary lag median 0 d, p90 0 d; transaction lag median 14 d, p90 14 d, max 14 d; 2 pending (0 past 30 days, 0 past 60 days)
+```
+
+`received` is the e-filing system's timestamp from `/efile/filings/`;
+`in /filings/` says whether pass 1 is done; the two date columns are the
+operations log's completion dates with the lag from receipt in days.
+2011912 was received at 7:50 pm Eastern and missed that night's summary
+load (openFEC issue #3800 describes the cutoff), so a day later it is
+still "received only", and `hardmoney filings --most-recent` still
+returns the report it amends. Ids cost three requests per fifty. `--json`
+emits one object per filing and a `summary` object.
+
+`--counts` adds what pass 2 has to load: the raw filing (downloaded
+cache-first) is parsed and its Schedule A, B, and E lines counted, memo
+entries included because the FEC loads those too, against the rows the
+schedule endpoints hold for the filing's page range (three more requests
+per filing; the count is exact unless the endpoint says otherwise):
+
+```text
+$ hardmoney lag 2006786 1986128 --counts
+...
+  2006786: SchA raw 131 line(s) (131 non-memo); processed 131
+  2006786: SchB raw 2 line(s) (2 non-memo); processed 2
+  2006786: SchE raw 0 line(s) (0 non-memo); processed 0
+  1986128: SchA raw 1056 line(s) (1047 non-memo); processed 1056
+  1986128: SchB raw 77 line(s) (77 non-memo); processed 77
+  1986128: SchE raw 0 line(s) (0 non-memo); processed 0
+```
+
+Sums are not compared: openFEC has no per-filing aggregate, and paging
+through a large filing's rows to add them up would cost one request per
+hundred rows.
+
+`--committee` measures a whole committee's cycle in a handful of
+requests (one `/filings/` page per hundred filings, one operations-log
+page per hundred rows) and prints the distribution:
+
+```text
+$ hardmoney lag --committee C00010603 --cycle 2026 --form-type F3X
+file_number  form  report  committee  received    in /filings/  summary loaded  transactions loaded
+2009202      F3X   M8      C00010603  2026-08-20  yes           2026-08-20 +0d  2026-08-26 +6d
+2003519      F3X   M6      C00010603  2026-08-01  yes           2026-08-01 +0d  2026-08-19 +18d
+...
+1923132      F3X   M10     C00010603  2025-10-20  yes           2025-10-20 +0d  2026-01-07 +79d
+...
+26 filing(s): 0 unknown to openFEC, 0 received only, 0 summary loaded, 26 transactions loaded
+summary lag median 0 d, p90 0 d; transaction lag median 5 d, p90 25 d, max 79 d; 0 pending (0 past 30 days, 0 past 60 days)
+```
+
+(Receipt times here are dates: `/filings/` records the day, not the
+second.)
+
+Measured on 2026-09-15 over the fifty oldest Form 3X/3 reports then in
+the RSS feed, all received on 2026-09-08: summary lag 0 days for all
+fifty; transactions loaded for 42 of 50 within 6 days (median 1 day,
+p90 6 days); 8 still pending after 7 days; none pending past 30 or 60
+days. The fifty newest, received that afternoon, were all "received
+only", waiting for the nightly summary load. A deadline week looks
+different: the 300 F3/F3X reports received around the July 2026
+quarterly deadline measured a 13-day median and 26-day p90 for pass 2,
+with 2.7% still pending after 60 days (`tmp/agent-fec-deep/REPORT.md`),
+and the committee above waited 54 and 79 days for its October and
+November 2025 monthlies. The FEC's own guidance is "up to 30 days"
+(openFEC issue #5911).
+
+The REST API exposes the same lookup as `GET /filings/{id}/processing`,
+asked of openFEC live (the server needs a key in `FEC_API_KEY` or
+`~/fec_api_key.txt`; without one the route answers 503 and says so).
+The filing need not have been ingested. The body is the
+`ProcessingStatus` fields plus `stage` (`received`, `summary_loaded`,
+`transactions_loaded`), `summary_lag_days`, `transaction_lag_days`,
+`days_pending`, and `as_of`.
+
+The download URL comes from the same place now. `fetch_filing_bytes`
+with no URL asks openFEC for the filing's `fec_url` (`/efile/filings/`
+first, then `/filings/`; `hardmoney::fec::resolve_fec_url`) and only
+falls back to the `docquery.fec.gov` template when there is no key,
+no record, or the request fails. The FEC opened an inventory of docquery
+for retirement in September 2026 (openFEC issue #6717); when the host
+changes, the resolved URL follows it and the template does not.
+
 ## In Rust
 
 ```rust,no_run

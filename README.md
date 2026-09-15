@@ -70,9 +70,12 @@ have.
 Most people who work with FEC data work in Python, so the whole parser,
 writer, validator, and reconciler are on PyPI as `hardmoney`, with typed
 stubs and no Python dependencies. Wheels are published for Linux
-(x86_64, aarch64) and macOS (Intel, Apple silicon), Python 3.9 and newer;
-other platforms build from the source distribution, which needs a Rust
-toolchain.
+(x86_64, aarch64), macOS (Intel, Apple silicon), and Windows (x86_64),
+Python 3.9 and newer; other platforms build from the source distribution,
+which needs a Rust toolchain. Projects that already use FECfile+'s
+`fecfile_validate` can call `hardmoney.compat.fecfile_validate`, and a
+pytest plugin (`assert_fec_acceptable`, `assert_fec_balances`) ships in
+the wheel.
 
 ```bash
 pip install hardmoney
@@ -122,10 +125,10 @@ Facts below were checked against each project's source in September 2026.
 | Spec versions parsed | 3.x–8.5 (2001–present) | 3.x–8.5 | 3.x–8.5 | 8.0+ (~2018–present) | 8.x | 8.5 only |
 | Money type | exact decimal | float | double | string | f64 | decimal |
 | Writes `.fec` files | yes, round-trip exact | no | no | no | no | yes (5 form types) |
-| Validates against FEC rules | yes, 32 rules; checked against the FEC's WebCheck | no | field-count warnings | no | no | no (users are told to run WebCheck separately) |
-| Cover page vs. schedules | F3X, F3, F3P, incl. allocation schedules H3–H6 | no | no | no | no | F3X only, five lines stubbed to zero; F3 computed as all zeros |
+| Validates against FEC rules | yes, 41 rules implementing the FEC's published failing and warning messages; checked against the FEC's WebCheck | no | field-count warnings | no | no | no (users are told to run WebCheck separately) |
+| Cover page vs. schedules | F3X, F3, F3P, incl. allocation schedules H3–H6; Column B and cash-on-hand carry-forward across a committee's chain of reports | no | no | no | no | F3X only, five lines stubbed to zero; F3 computed as all zeros |
 | Compile-time-checked field access | yes (`Field<T>`) | – | – | no | no | – |
-| Machine-readable spec, version diff | yes (`spec export`, `spec diff`) | no | no | no | no | no |
+| Machine-readable spec, version diff | yes (`spec export` as JSON, JSON Schema, or CSV; `spec diff`; weekly drift check against the FEC's sources) | no | no | no | no | no (its spreadsheet-vs-schema checker is unmaintained) |
 | Streaming large filings | yes (9.8 MB RSS on a 135 MB file) | yes | yes | yes | yes | – |
 | Export to CSV / Parquet / SQLite | CSV, JSON Lines, Parquet, SQLite | dicts | CSV | SQLite, CSV, JSON, Excel | CSV, Parquet | – |
 | Filing discovery via openFEC, latest amendment only | yes | no | no | yes | no | – |
@@ -211,7 +214,7 @@ pip install hardmoney              # Python package (https://pypi.org/project/ha
 hardmoney = { version = "3", default-features = false, features = ["fetch"] }
 ```
 
-Rust 1.94 or newer. Postgres 18 for the ETL and API.
+Rust 1.94 or newer. Postgres 15 or newer for the ETL and API (tested on 15 and 18).
 
 ## Sixty-second tour
 
@@ -294,9 +297,39 @@ about the format in `data/` rather than in Rust, and docs that match the
 code.
 
 CI runs fmt, clippy, rustdoc with warnings denied, an MSRV build, the test
-suite against Postgres 18, `cargo package`, and a weekly job that
-re-derives the bundled FEC field specification from the FEC's current
-sources and fails if it has drifted.
+suite against Postgres 15 and 18, `cargo package`, `cargo audit` and
+`cargo deny`, a CycloneDX SBOM, wheel builds on Linux, macOS, and Windows
+with build-provenance attestations, and a weekly job that re-derives the
+bundled FEC field specification from the FEC's current sources and fails
+if it has drifted (its report is uploaded as an artifact). See
+[Security, provenance, and deployment notes](https://cgorski.github.io/hardmoney/security-and-provenance.html).
+
+## Support and security
+
+Point of contact: [GitHub issues](https://github.com/cgorski/hardmoney/issues)
+for anything that can be public; cgorski@cgorski.org for anything that
+cannot, including security reports (see [`SECURITY.md`](./SECURITY.md):
+acknowledgement within five business days, a fix or mitigation plan
+within thirty).
+
+Release cadence: semantic versioning. A minor release when the FEC
+publishes a change to the electronic filing format (the bundled spec is
+re-derived weekly from the FEC's sources, so drift is noticed within a
+week); a patch release when a validator or reconcile disagreement is
+confirmed against the FEC's WebCheck or FECfile+ and hardmoney is the
+one that is wrong; patch releases for security fixes on the current 3.x.
+Every release is listed in [`CHANGELOG.md`](./CHANGELOG.md).
+
+Reporting a disagreement with the FEC's own tools: use the
+[validator disagreement](https://github.com/cgorski/hardmoney/issues/new?template=validator-disagreement.yml)
+or [reconcile disagreement](https://github.com/cgorski/hardmoney/issues/new?template=reconcile-disagreement.yml)
+issue template. A filing id and the `--json` output are enough to
+reproduce.
+
+What the software does on the network, how dependencies are checked,
+where the SBOM is, and how to verify a wheel's provenance are in the
+book chapter
+[Security, provenance, and deployment notes](https://cgorski.github.io/hardmoney/security-and-provenance.html).
 
 ## License and provenance
 

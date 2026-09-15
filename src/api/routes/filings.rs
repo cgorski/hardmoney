@@ -1,7 +1,10 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sqlx::PgPool;
 
 use crate::api::error::ApiError;
@@ -151,6 +154,108 @@ pub struct ScheduleELine {
     pub candidate_id: Option<String>,
     pub candidate_name: Option<String>,
     pub candidate_office_state: Option<String>,
+}
+
+/// Errors from `GET /filings/{filing_id}/processing`, which talks to
+/// openFEC rather than the database: 503 when the server has no openFEC
+/// key to talk with (the message says where to put one), 502 when openFEC
+/// could not be reached or refused the request, 404 when no openFEC
+/// endpoint knows the filing id, 501 in a build without the `fetch`
+/// feature.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ProcessingError {
+    #[error("{0}")]
+    NoApiKey(String),
+    #[error("{0}")]
+    Upstream(String),
+    #[error("{0}")]
+    NotFound(String),
+    #[error("{0}")]
+    NotImplemented(String),
+}
+
+impl IntoResponse for ProcessingError {
+    fn into_response(self) -> Response {
+        let status = match &self {
+            ProcessingError::NoApiKey(_) => StatusCode::SERVICE_UNAVAILABLE,
+            ProcessingError::Upstream(_) => StatusCode::BAD_GATEWAY,
+            ProcessingError::NotFound(_) => StatusCode::NOT_FOUND,
+            ProcessingError::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
+        };
+        (status, Json(json!({ "error": self.to_string() }))).into_response()
+    }
+}
+
+/// `GET /filings/{filing_id}/processing`: where the FEC's own pipeline
+/// stands for a filing, asked of openFEC at request time (three requests:
+/// `/efile/filings/`, `/filings/`, `/operations-log/`). The response is
+/// the [`ProcessingStatus`](crate::fec::openfec::ProcessingStatus) fields
+/// plus `stage`, `summary_lag_days`, `transaction_lag_days`, and
+/// `days_pending` (as of today, UTC). Needs no database row: the filing
+/// need not have been ingested. The openFEC key comes from `FEC_API_KEY`
+/// or `~/fec_api_key.txt` on the server; without one the route answers
+/// 503 and says so.
+#[cfg(feature = "fetch")]
+pub async fn processing(
+    Path(filing_id): Path<u64>,
+) -> Result<Json<serde_json::Value>, ProcessingError> {
+    use crate::fec::FecApiError;
+    use crate::fec::openfec::{OpenFec, ProcessingStage};
+
+    let api = match OpenFec::from_env() {
+        Ok(api) => api,
+        Err(e @ FecApiError::MissingApiKey { .. }) => {
+            return Err(ProcessingError::NoApiKey(format!(
+                "this server cannot ask openFEC about processing: {e}"
+            )));
+        }
+        Err(e) => return Err(ProcessingError::Upstream(e.to_string())),
+    };
+    let statuses = tokio::task::spawn_blocking(move || api.processing_status(&[filing_id]))
+        .await
+        .map_err(|e| ProcessingError::Upstream(format!("openFEC lookup task failed: {e}")))?
+        .map_err(|e| ProcessingError::Upstream(format!("openFEC request failed: {e}")))?;
+    let Some(status) = statuses.into_iter().next() else {
+        return Err(ProcessingError::NotFound(format!(
+            "openFEC has no record of filing {filing_id}"
+        )));
+    };
+    if status.stage() == ProcessingStage::Unknown {
+        return Err(ProcessingError::NotFound(format!(
+            "openFEC has no record of filing {filing_id} in /efile/filings/ or /filings/"
+        )));
+    }
+    let today = chrono::Utc::now().date_naive();
+    let mut value = serde_json::to_value(&status).map_err(|e| {
+        ProcessingError::Upstream(format!("could not serialise the processing status: {e}"))
+    })?;
+    if let serde_json::Value::Object(map) = &mut value {
+        map.insert("stage".to_string(), json!(status.stage()));
+        map.insert(
+            "summary_lag_days".to_string(),
+            json!(status.summary_lag_days()),
+        );
+        map.insert(
+            "transaction_lag_days".to_string(),
+            json!(status.transaction_lag_days()),
+        );
+        map.insert(
+            "days_pending".to_string(),
+            json!(status.days_pending(today)),
+        );
+        map.insert("as_of".to_string(), json!(today));
+    }
+    Ok(Json(value))
+}
+
+/// `GET /filings/{filing_id}/processing` in a build without the `fetch`
+/// feature: always 501.
+#[cfg(not(feature = "fetch"))]
+pub async fn processing(Path(filing_id): Path<u64>) -> ProcessingError {
+    ProcessingError::NotImplemented(format!(
+        "cannot ask openFEC about filing {filing_id}: this build of hardmoney has no `fetch` feature"
+    ))
 }
 
 /// `GET /filings/{filing_id}/schedule-e`: the filing's Schedule E lines in

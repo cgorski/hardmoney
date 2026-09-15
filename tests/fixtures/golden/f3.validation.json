@@ -1,0 +1,11 @@
+{
+  "file": "f3.fec",
+  "form_type": "F3N",
+  "version": "8.5",
+  "line_count": 6,
+  "acceptable": true,
+  "errors": 0,
+  "warnings": 0,
+  "findings_by_rule": {},
+  "findings": []
+}

@@ -1,0 +1,22 @@
+{
+  "file": "f3x_missing_required_field.fec",
+  "form_type": "F3XN",
+  "version": "8.5",
+  "line_count": 38,
+  "acceptable": false,
+  "errors": 1,
+  "warnings": 0,
+  "findings_by_rule": {
+    "required_field_empty": 1
+  },
+  "findings": [
+    {
+      "severity": "error",
+      "rule": "required_field_empty",
+      "line_no": 3,
+      "form_type": "SA11AI",
+      "field": "contributor_last_name",
+      "message": "CONTRIBUTOR LAST NAME is Required, but field is Empty"
+    }
+  ]
+}
