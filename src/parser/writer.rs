@@ -22,12 +22,18 @@
 //!   both removed by the parser as wire conventions -- are not re-emitted.
 //! * A Form 99's free text is emitted as a `[BEGINTEXT]`/`[ENDTEXT]` block
 //!   after the cover line, with the cover's `text` column left blank, which
-//!   is how the FEC's own software files it.
+//!   is how the FEC's own software files it. Any other record whose `text`
+//!   contains a line break -- what the parser yields for a block that
+//!   followed a body line -- is written the same way, so the breaks
+//!   survive; single-line text stays inline. Spec 3.x-5.x filings predate
+//!   the block convention (their parser reads `[BEGINTEXT]` as a record),
+//!   so there text is always inline.
 //! * Blank lines are dropped.
-//! * A value can only contain what the parser can hand back. A line feed
-//!   or an ASCII-28 inside a value -- possible only through
-//!   [`ParsedLine::set`], never from a parse -- is replaced with a space
-//!   rather than corrupting the record structure (an ASCII-28 in a
+//! * A value can only contain what the parser can hand back. An ASCII-28
+//!   inside a value, or a line feed where a block cannot carry it (a
+//!   record without a `text` column, or a pre-6.0 filing) -- possible only
+//!   through [`ParsedLine::set`], never from a parse -- is replaced with a
+//!   space rather than corrupting the record structure (an ASCII-28 in a
 //!   comma-delimited file would make the re-parse pick the wrong
 //!   delimiter). A bare carriage return *does* survive a parse (only `\n`
 //!   ends a record) and is written back verbatim so the round trip stays
@@ -57,11 +63,16 @@ impl Filing {
     #[must_use]
     pub fn to_fec_string(&self) -> String {
         let mut out = String::new();
-        let mut w = LineWriter::for_version(self.version.uses_fs_delimiter());
+        let blocks = self.version.uses_fs_delimiter();
+        let mut w = LineWriter::for_version(blocks);
         w.write_record(&mut out, &self.header.to_fields());
-        write_cover(&mut w, &mut out, &self.summary);
+        // The FEC's own software files a Form 99's text as a block even
+        // when it is one line; every other record hoists only what inline
+        // cannot carry.
+        let f99_cover = self.summary.table() == Table::F99;
+        write_record_with_text(&mut w, &mut out, &self.summary, blocks, f99_cover);
         for line in &self.lines {
-            w.write_record(&mut out, &line.to_cells());
+            write_record_with_text(&mut w, &mut out, line, blocks, false);
         }
         out
     }
@@ -101,16 +112,27 @@ fn encode(text: &str) -> Vec<u8> {
     }
 }
 
-/// Writes the cover line, hoisting a Form 99's free text into a
-/// `[BEGINTEXT]` block.
-fn write_cover(w: &mut LineWriter, out: &mut String, cover: &ParsedLine) {
-    let free_text = (cover.table() == Table::F99)
-        .then(|| cover.get_non_empty("text"))
-        .flatten();
-    match free_text {
+/// Writes one record, hoisting its `text` into a `[BEGINTEXT]`/`[ENDTEXT]`
+/// block after it when the format allows blocks (spec 6.0+) and either
+/// `always` is set (the Form 99 cover) or the text has a line break that
+/// an inline column cannot carry. The parser splices a block back into
+/// the record it follows, so this is the exact inverse of how the text
+/// was read.
+fn write_record_with_text(
+    w: &mut LineWriter,
+    out: &mut String,
+    record: &ParsedLine,
+    blocks_allowed: bool,
+    always: bool,
+) {
+    let hoisted = blocks_allowed
+        .then(|| record.get_non_empty("text"))
+        .flatten()
+        .filter(|text| always || text.contains('\n'));
+    match hoisted {
         Some(text) => {
-            let mut cells = cover.to_cells();
-            if let Some(idx) = cover.layout().field("text").map(|f| usize::from(f.column))
+            let mut cells = record.to_cells();
+            if let Some(idx) = record.layout().field("text").map(|f| usize::from(f.column))
                 && let Some(slot) = cells.get_mut(idx)
             {
                 *slot = "";
@@ -125,7 +147,7 @@ fn write_cover(w: &mut LineWriter, out: &mut String, cover: &ParsedLine) {
             out.push_str("[ENDTEXT]");
             out.push_str(CRLF);
         }
-        None => w.write_record(out, &cover.to_cells()),
+        None => w.write_record(out, &record.to_cells()),
     }
 }
 
@@ -275,6 +297,69 @@ mod tests {
         // The cover's own text column is blank on the wire.
         let cover_line = out.split(CRLF).nth(1).unwrap();
         assert!(!cover_line.contains("First paragraph"));
+        assert_round_trip(&filing);
+    }
+
+    /// A `[BEGINTEXT]` block can follow a body line as well as the cover;
+    /// the parser splices it into that line's `text` with the line breaks
+    /// kept. The writer must put it back as a block, or the breaks become
+    /// spaces and the round trip is lossy.
+    #[test]
+    fn text_block_after_a_body_line_is_written_back_as_a_block() {
+        let text = [
+            "HDR\u{1c}FEC\u{1c}8.5\u{1c}FECfile\u{1c}8.5.1.0(f34)\u{1c}\u{1c}",
+            "F99\u{1c}C00944124\u{1c}REVIVE OREGON\u{1c}PO BOX 26141\u{1c}\u{1c}ALEXANDRIA\u{1c}VA\u{1c}22313\u{1c}MARSTON\u{1c}CHRIS\u{1c}\u{1c}\u{1c}\u{1c}20260914\u{1c}MST\u{1c}\u{1c}",
+            "TEXT\u{1c}C00944124\u{1c}T1\u{1c}\u{1c}\u{1c}",
+            "[BEGINTEXT]",
+            "Line one of the note.",
+            "Line two.",
+            "[ENDTEXT]",
+            "TEXT\u{1c}C00944124\u{1c}T2\u{1c}\u{1c}\u{1c}inline text stays inline",
+        ]
+        .join("\n");
+        let filing = Filing::parse(&text).unwrap();
+        assert_eq!(
+            filing.lines[0].get("text"),
+            Some("Line one of the note.\nLine two.")
+        );
+        let out = filing.to_fec_string();
+        assert!(
+            out.contains(
+                "\r\n[BEGINTEXT]\r\nLine one of the note.\r\nLine two.\r\n[ENDTEXT]\r\nTEXT\u{1c}"
+            ),
+            "the block must follow its record: {out:?}"
+        );
+        // The record's own text column is blank on the wire, and a
+        // single-line text stays inline.
+        let records: Vec<&str> = out.split(CRLF).collect();
+        assert!(records[2].starts_with("TEXT\u{1c}C00944124\u{1c}T1\u{1c}"));
+        assert!(!records[2].contains("Line one"));
+        assert!(
+            records
+                .iter()
+                .any(|r| r.ends_with("inline text stays inline"))
+        );
+        assert_round_trip(&filing);
+        assert_eq!(Filing::parse(&out).unwrap().to_fec_string(), out);
+    }
+
+    /// Pre-6.0 filings predate the block convention: the parser reads a
+    /// `[BEGINTEXT]` line as a (bad) record there, so the writer must keep
+    /// a 5.x Form 99's text inline.
+    #[test]
+    fn comma_delimited_f99_text_stays_inline() {
+        let text = "HDR,FEC,5.3,SoftCo,1.0\nF99,C00123456,SOME PAC,1 MAIN ST,,TOWN,VA,22313,SMITH,20260914,MST,The whole explanation on one line.\n";
+        let filing = Filing::parse(text).unwrap();
+        assert_eq!(
+            filing.summary.get("text"),
+            Some("The whole explanation on one line.")
+        );
+        let out = filing.to_fec_string();
+        assert!(!out.contains("[BEGINTEXT]"), "{out:?}");
+        assert!(
+            out.contains(",The whole explanation on one line."),
+            "{out:?}"
+        );
         assert_round_trip(&filing);
     }
 

@@ -89,8 +89,9 @@ blank lines; the writer emits one fixed choice for each:
 | Record width | every record has the full column count of its layout: trailing empty columns the original omitted are added, and padding beyond the layout is dropped |
 | Field values | as the parser holds them: trimmed, one wrapping quote pair removed, otherwise verbatim |
 | Form 99 free text | a `[BEGINTEXT]`/`[ENDTEXT]` block after the cover line, with the cover's `text` column blank, which is how FECfile itself writes it |
+| Multi-line `text` on any other record | the same block, after that record: a `[BEGINTEXT]` block that followed a body line in the original is spliced into that line's `text` with its line breaks, and only a block can carry the breaks back out. Single-line text stays inline. Spec 3.x-5.x filings predate the convention, so there text is always inline |
 | Blank lines | dropped |
-| A delimiter or line break inside a value | replaced with a space (it could not have survived parsing anyway) |
+| A delimiter inside a value, or a line break where no block can carry it | replaced with a space (neither could have come from a parse) |
 
 Here is the fixture above, original and canonical, through `cat -v` so
 the control characters show (`^\` is ASCII 28, `^M` is the carriage

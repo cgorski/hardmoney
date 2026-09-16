@@ -43,6 +43,16 @@
   (it ran the suite without a database before). CI workflows pin every
   action to a commit, grant `contents: read` by default, build with
   `--locked`, and cancel superseded pull-request runs.
+- **Writer: a `[BEGINTEXT]` block after a body line round-trips.** The
+  parser splices such a block into that line's `text` with its line
+  breaks; the writer wrote the value back inline with the breaks turned
+  into spaces, so `parse(to_fec(parse(f)))` was not `parse(f)` for those
+  filings (none of the corpus fixtures, all of whose blocks follow the
+  cover). Now any record whose `text` contains a line break is written
+  with a block after it, exactly as read; single-line text stays inline.
+  Also fixed: a spec 3.x-5.x Form 99 with text had its text hoisted into
+  a block those formats do not have, which the parser then read as a bad
+  record; pre-6.0 text is always written inline.
 - **Blocking work leaves the async runtime.** The `/tools/*` handlers
   parse, validate, reconcile, and write a filing on tokio's blocking pool
   instead of a runtime worker, so one 32 MiB upload no longer stalls every
