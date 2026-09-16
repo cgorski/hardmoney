@@ -85,6 +85,24 @@ $ hardmoney validate tests/fixtures/rad/F3XA_2011912.fec
 ACCEPTABLE: F3XA, 1232 body line(s), 0 error(s), 0 warning(s)
 ```
 
+`hardmoney review` (and `Filing.review()` in Python) runs the rest of a
+first pass as one command: individuals over $200 with a blank employer or
+occupation (and, separately, those reported under best efforts),
+contributions over the limit for the committee's kind and cycle,
+receipts dated after the period, a missing treasurer signature, earmarks
+counted twice, the cover lines `reconcile` flags, unexplained negative
+entries, and duplicate transactions; with the committee's earlier reports,
+cash carried forward, Column B, and aggregates that cross $200 across
+reports. On the same May report it lists the $200, five unexplained
+negative Schedule A entries, three same-day repeats at $200 and over, and
+sixteen best-efforts contributors. The checks were measured against the
+FEC's own RFAI letters for the 2024 cycle (98 lettered reports, 96 clean
+ones): a report with any observation is a lettered one 51% of the time at
+report level and 80% of the time against committees that received no
+letter at all, at 37% recall, because most letters concern things a file
+cannot show. The concerns, their sources in 11 CFR, the method, and the
+full table are in [Reviewing a filing](./reviewing.md).
+
 ### An amendment against its original
 
 `hardmoney filings` queries openFEC and, with `--json`, returns its

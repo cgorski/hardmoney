@@ -22,6 +22,7 @@ use rust_decimal::Decimal;
 
 use crate::error::{fec_error, field_error, unsupported_form};
 use crate::reconcile::Reconciliation;
+use crate::review::Review;
 use crate::validate::Validation;
 
 /// The parsed filing plus whatever a lenient parse skipped.
@@ -124,8 +125,10 @@ pub(crate) fn parse_file(py: Python<'_>, path: PathBuf, lenient: bool) -> PyResu
 }
 
 /// Downloads a filing from the FEC's document store
-/// (`docquery.fec.gov/dcdev/posted/<filing_id>.fec`) and parses it
-/// strictly. Network failures raise `FecError`.
+/// (`https://docquery.fec.gov/dcdev/posted/<filing_id>.fec`, or the same
+/// path under `HARDMONEY_DOCQUERY_BASE` when that variable is set) and
+/// parses it strictly. Network failures, and a `HARDMONEY_DOCQUERY_BASE`
+/// that is not an `http(s)://` URL, raise `FecError`.
 #[pyfunction]
 pub(crate) fn fetch(py: Python<'_>, filing_id: u64) -> PyResult<Filing> {
     let result = py.detach(|| {
@@ -322,6 +325,18 @@ impl Filing {
             .reconcile()
             .map(Reconciliation::from)
             .map_err(|e| unsupported_form(py, &e))
+    }
+
+    /// The RAD-style review: the checks that lead to a Request for
+    /// Additional Information. Never raises for a parsed filing.
+    /// `recipient` names the committee's kind for the contribution limit
+    /// (`"candidate"`, `"pac"`, `"national-party"`, `"state-party"`,
+    /// `"unlimited"`); by default Forms 3 and 3P are candidates and a Form
+    /// 3X has no limit checked. `ValueError` for any other name.
+    #[pyo3(signature = (recipient=None))]
+    fn review(&self, recipient: Option<&str>) -> PyResult<Review> {
+        let options = crate::review::options(recipient)?;
+        Ok(Review::from(read(&self.inner).filing.review_with(&options)))
     }
 
     fn __repr__(&self) -> String {

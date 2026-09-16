@@ -75,6 +75,10 @@ and only to do what the command says:
 `bulk-resolve-chains`, `query`, and `serve` make no outbound connection.
 `serve` listens on the address you give it and never calls out; the
 embedded browser UI loads no third-party scripts, fonts, or analytics.
+Every host above is a default that a flag or a `HARDMONEY_*` environment
+variable replaces, for deployments behind a mirror or an egress proxy
+(see "Pointing hardmoney at a mirror or proxy" in the book's security
+chapter); a malformed override is refused before any request is made.
 
 Filing data you parse is never sent anywhere. The only filing bytes that
 leave the machine are the one file you pass to `validate --oracle

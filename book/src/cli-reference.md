@@ -20,6 +20,7 @@ Commands:
   write                Parse a `.fec` filing and write it back out in canonical form
   reconcile            Recompute a report's cover-page totals from its schedules and show every line that disagrees
   validate             Check a .fec file against the FEC's acceptance rules
+  review               RAD-style review of a report: the checks that lead to an RFAI
   export               Export a .fec filing's records as CSV, JSON Lines, Parquet, or SQLite
   schema-init          Create or upgrade the Postgres schema in the target namespace
   schema-status        Show migration state and recorded loads for the target namespace
@@ -71,6 +72,30 @@ so `DATABASE_URL=...` and `HARDMONEY_SCHEMA=...` can live there. Real
 environment variables and explicit flags always win over `.env`. Log
 output goes to stderr and is controlled by `RUST_LOG` (default
 `info,sqlx=warn`).
+
+## The FEC endpoint flags every network command shares
+
+Every command that contacts the FEC (`validate` with `--oracle`,
+`filings`, `lag`, `efile watch`, `efile backfill`, the `bulk-*` commands
+that download, `dumps check`/`import`/`status`/`update`, and `serve`)
+takes the same group of flags, shown under "FEC endpoints" in its help.
+Each replaces one production host and reads a `HARDMONEY_*` variable when
+the flag is absent (the `.env` file works for these too):
+
+| Flag | Environment variable | Default |
+|---|---|---|
+| `--fec-www-base <URL>` | `HARDMONEY_FEC_WWW_BASE` | `https://www.fec.gov` |
+| `--openfec-base <URL>` | `HARDMONEY_OPENFEC_BASE` | `https://api.open.fec.gov/v1/` |
+| `--docquery-base <URL>` | `HARDMONEY_DOCQUERY_BASE` | `https://docquery.fec.gov` |
+| `--efile-rss-url <URL>` | `HARDMONEY_EFILE_RSS_URL` | `https://efilingapps.fec.gov/rss/generate?preDefinedFilingType=ALL` |
+| `--webcheck-endpoint <URL>` | `HARDMONEY_WEBCHECK_ENDPOINT` | `https://efoservices.fec.gov/webcheck` |
+| (no flag) | `HARDMONEY_EFILINGAPPS_BASE` | `https://efilingapps.fec.gov` |
+
+A value that is not an `http://` or `https://` URL with a host is an
+error naming the flag and the variable, before any request. What each
+base is used for, and how to point a deployment at a mirror or through
+a proxy, is in
+[Security and provenance](./security-and-provenance.md#pointing-hardmoney-at-a-mirror-or-proxy).
 
 ## `parse`
 
@@ -268,16 +293,42 @@ Options:
 
       --webcheck-api-key <WEBCHECK_API_KEY>
           FEC vendor API key for WebCheck's SOAP service. Without it the credential-free upload channel (what the WebCheck web page uses) is taken. Ignored without `--oracle webcheck`
-
+          
           [env: WEBCHECK_API_KEY]
 
       --webcheck-email <WEBCHECK_EMAIL>
           Contact e-mail to pass WebCheck's SOAP service (it e-mails results for files over 20 MB). Ignored without `--webcheck-api-key`
-
+          
           [env: WEBCHECK_EMAIL]
 
   -h, --help
           Print help (see a summary with '-h')
+
+FEC endpoints:
+      --fec-www-base <URL>
+          Base URL of www.fec.gov: bulk zips, pg_dump archives, daily e-file zips, data dictionaries. Default: https://www.fec.gov
+          
+          [env: HARDMONEY_FEC_WWW_BASE=]
+
+      --openfec-base <URL>
+          Root of the openFEC API. Default: https://api.open.fec.gov/v1/
+          
+          [env: HARDMONEY_OPENFEC_BASE=]
+
+      --docquery-base <URL>
+          Base URL of the FEC's raw-filing document store (/dcdev/posted/<id>.fec is appended). Default: https://docquery.fec.gov
+          
+          [env: HARDMONEY_DOCQUERY_BASE=]
+
+      --efile-rss-url <URL>
+          Complete URL of the e-file RSS feed. Default: https://efilingapps.fec.gov/rss/generate?preDefinedFilingType=ALL
+          
+          [env: HARDMONEY_EFILE_RSS_URL=]
+
+      --webcheck-endpoint <URL>
+          Base URL of the FEC's WebCheck validator (/services/upload is appended). Default: https://efoservices.fec.gov/webcheck
+          
+          [env: HARDMONEY_WEBCHECK_ENDPOINT=]
 ```
 
 Parses the file leniently (a line the FEC would ignore is a finding, not
@@ -319,6 +370,115 @@ the deliberate deviations from the FEC's validator, the oracle, and the
 library API are in [Validating a filing](./validating.md); the
 `FieldSpec` data the per-field rules read is described in
 [The schema](./library-schema.md#fieldspec-what-the-fec-says-about-a-field).
+
+## `review`
+
+```text
+$ hardmoney review --help
+RAD-style review of a report: the checks that lead to an RFAI
+
+Usage: hardmoney review [OPTIONS] [FILE|ID]...
+
+Arguments:
+  [FILE|ID]...
+          `.fec` files, or filing ids (file numbers) to download cache-first
+
+Options:
+      --with-prior <FILE>...
+          The same committee's earlier reports on the same form (files), for the checks one file cannot make: cash on hand carried forward, Column B against the period's schedules, aggregates crossing $200 across reports, and contributions repeated from an earlier report. Takes one current report
+
+      --recipient <RECIPIENT>
+          What kind of committee filed the report, for the contribution limit. Default: candidate for Forms 3 and 3P; no limit checked on a Form 3X, since the file does not say whether the filer is a PAC, a party, or unlimited
+
+          Possible values:
+          - candidate:      A candidate's committee: the per-election limit
+          - pac:            A PAC: $5,000 per calendar year
+          - national-party: A national party committee: the four accounts' limits together
+          - state-party:    A state, district, or local party committee: $10,000 per year
+          - unlimited:      Independent-expenditure-only or hybrid: no limit checked
+
+      --json
+          One JSON array with an object per input: form, committee, recipient, observations, summary
+
+      --all
+          Print every observation; without it, observations beyond the first twenty per concern are counted, not listed
+
+      --eval
+          Measure the checks against the FEC's RFAI letters for --cycle (needs an openFEC key in FEC_API_KEY or ~/fec_api_key.txt)
+
+      --cycle <CYCLE>
+          Two-year cycle to evaluate, e.g. 2024
+
+      --sample <SAMPLE>
+          How many RFAI'd reports and how many clean reports to review
+
+          [default: 100]
+
+      --out <PATH>
+          Where to write the evaluation as JSON (per-report rows and the metrics). Default: hardmoney-review-eval-<cycle>.json
+
+      --rescore <PATH>
+          Re-review the reports listed in an earlier --eval JSON (same labels, same versions, read from the filing cache) and recompute the metrics. No openFEC requests: for measuring a rule change on the same sample
+
+      --max-requests <MAX_REQUESTS>
+          Stop the evaluation once this many openFEC requests have been made (the API allows 1,000 per hour per key)
+
+          [default: 450]
+
+      --page-stride <PAGE_STRIDE>
+          Read every Nth page of the RFAI list and of the clean-report lists. Default: chosen so the pages read are spread over the whole list, not its last weeks
+
+      --cache-dir <CACHE_DIR>
+          Where downloaded filings and daily archives are kept across runs
+
+          [env: HARDMONEY_CACHE_DIR=]
+          [default: /Users/chris.gorski/.cache/hardmoney]
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+Runs the checks a Reports Analysis Division analyst makes before sending
+a Request for Additional Information (blank employer or occupation over
+$200, contributions over the limit, receipts dated after the period, a
+missing treasurer signature, earmarks counted twice, cover lines the
+schedules do not support, unexplained negative amounts, duplicate
+transactions) on each input, parsed leniently, and prints the
+observations grouped by concern with a count and the amount at issue,
+then a summary line:
+
+```text
+$ hardmoney review tests/fixtures/rad/F3XA_2011912.fec
+tests/fixtures/rad/F3XA_2011912.fec F3XA C00001313 (20260501..20260531)
+  best_efforts_claimed: 16 observation(s), 23558.33 at issue (heuristic)
+    line 97 SA11AI.172101904 240.00: BRYNGELSON, LEE aggregates 240.00 and the employer/occupation fields read 'INFORMATION REQUESTED' / 'INFORMATION REQUESTED': the committee is reporting under best efforts (11 CFR 104.7(b))
+    ...
+  cover_not_supported: 1 observation(s), 200.00 at issue
+    line 2 200.00: column A line 11(c) reports 2045.00 but the rule = sum of SchA.contribution_amount on SA11C gives 1845.00; delta 200.00
+  negative_itemization: 5 observation(s), 1100.00 at issue
+    ...
+  duplicate_transaction: 3 observation(s), 705.00 at issue (heuristic)
+    ...
+  25 observation(s) in 4 concern(s); amount at issue 25563.33
+```
+
+A review is advisory: the exit status is 0 whatever is observed, and 1
+only when an input cannot be read, downloaded, or parsed, or
+`--with-prior` is given reports that do not chain (another committee,
+another form, overlapping periods). `--json` prints one array with an
+object per input: `{file, filing_id, form_type, committee_id,
+coverage_from_date, coverage_through_date, recipient, observations:
+[{concern, line_no, transaction_id, amount, detail, rfai_request_type}],
+summary: {observations, amount_at_issue, by_concern}}`, plus `chain`
+with `--with-prior`, amounts as strings.
+
+`--eval --cycle YYYY` samples reports whose committee received an RFAI
+that cycle and reports no letter names, reviews both, prints precision,
+recall, and F1 with per-concern lift, and writes the per-report rows as
+JSON; `--rescore FILE` recomputes an earlier run's metrics from the
+cached filings without touching the API. The concerns, their sources,
+the limits table, the method, and the measured numbers are in
+[Reviewing a filing](./reviewing.md).
 
 ## `schema-init`
 
@@ -418,12 +578,12 @@ Arguments:
 Options:
       --database-url <DATABASE_URL>
           Postgres connection URL. Include a username: postgres://user@host/db
-
+          
           [env: DATABASE_URL=]
 
       --schema <SCHEMA>
           Namespace (Postgres schema) to operate in. Each namespace is a fully isolated set of hardmoney tables: use one per cycle, per snapshot, per investigation, or per CI run. Default: public
-
+          
           [env: HARDMONEY_SCHEMA=]
           [default: public]
 
@@ -437,7 +597,7 @@ Options:
           Possible values:
           - replace: Delete this cycle's existing rows, then load, in one transaction (reproduces the FEC's current file exactly, including deletions)
           - append:  Load on top of existing rows; fails on any duplicate key
-
+          
           [default: replace]
 
       --yes
@@ -451,6 +611,32 @@ Options:
 
   -h, --help
           Print help (see a summary with '-h')
+
+FEC endpoints:
+      --fec-www-base <URL>
+          Base URL of www.fec.gov: bulk zips, pg_dump archives, daily e-file zips, data dictionaries. Default: https://www.fec.gov
+          
+          [env: HARDMONEY_FEC_WWW_BASE=]
+
+      --openfec-base <URL>
+          Root of the openFEC API. Default: https://api.open.fec.gov/v1/
+          
+          [env: HARDMONEY_OPENFEC_BASE=]
+
+      --docquery-base <URL>
+          Base URL of the FEC's raw-filing document store (/dcdev/posted/<id>.fec is appended). Default: https://docquery.fec.gov
+          
+          [env: HARDMONEY_DOCQUERY_BASE=]
+
+      --efile-rss-url <URL>
+          Complete URL of the e-file RSS feed. Default: https://efilingapps.fec.gov/rss/generate?preDefinedFilingType=ALL
+          
+          [env: HARDMONEY_EFILE_RSS_URL=]
+
+      --webcheck-endpoint <URL>
+          Base URL of the FEC's WebCheck validator (/services/upload is appended). Default: https://efoservices.fec.gov/webcheck
+          
+          [env: HARDMONEY_WEBCHECK_ENDPOINT=]
 ```
 
 `--cycle` must be an even year from 1976 through 2100; anything else is
@@ -468,12 +654,12 @@ Usage: hardmoney bulk-load-all [OPTIONS] --database-url <DATABASE_URL> --cycle <
 Options:
       --database-url <DATABASE_URL>
           Postgres connection URL. Include a username: postgres://user@host/db
-
+          
           [env: DATABASE_URL=]
 
       --schema <SCHEMA>
           Namespace (Postgres schema) to operate in. Each namespace is a fully isolated set of hardmoney tables: use one per cycle, per snapshot, per investigation, or per CI run. Default: public
-
+          
           [env: HARDMONEY_SCHEMA=]
           [default: public]
 
@@ -487,7 +673,7 @@ Options:
           Possible values:
           - replace: Delete this cycle's existing rows, then load, in one transaction (reproduces the FEC's current file exactly, including deletions)
           - append:  Load on top of existing rows; fails on any duplicate key
-
+          
           [default: replace]
 
       --yes
@@ -501,6 +687,32 @@ Options:
 
   -h, --help
           Print help (see a summary with '-h')
+
+FEC endpoints:
+      --fec-www-base <URL>
+          Base URL of www.fec.gov: bulk zips, pg_dump archives, daily e-file zips, data dictionaries. Default: https://www.fec.gov
+          
+          [env: HARDMONEY_FEC_WWW_BASE=]
+
+      --openfec-base <URL>
+          Root of the openFEC API. Default: https://api.open.fec.gov/v1/
+          
+          [env: HARDMONEY_OPENFEC_BASE=]
+
+      --docquery-base <URL>
+          Base URL of the FEC's raw-filing document store (/dcdev/posted/<id>.fec is appended). Default: https://docquery.fec.gov
+          
+          [env: HARDMONEY_DOCQUERY_BASE=]
+
+      --efile-rss-url <URL>
+          Complete URL of the e-file RSS feed. Default: https://efilingapps.fec.gov/rss/generate?preDefinedFilingType=ALL
+          
+          [env: HARDMONEY_EFILE_RSS_URL=]
+
+      --webcheck-endpoint <URL>
+          Base URL of the FEC's WebCheck validator (/services/upload is appended). Default: https://efoservices.fec.gov/webcheck
+          
+          [env: HARDMONEY_WEBCHECK_ENDPOINT=]
 ```
 
 Runs the ten sources in the order listed under `bulk-load`'s `<SOURCE>`,
@@ -527,6 +739,13 @@ Options:
       --jobs <JOBS>                  pg_restore parallel workers (helps when restoring several cycles) [default: 1]
       --cache-dir <CACHE_DIR>        Where to keep downloaded dumps (re-used across runs; an interrupted download resumes from its .partial file) [env: HARDMONEY_CACHE_DIR=] [default: /Users/chris.gorski/.cache/hardmoney/dumps]
   -h, --help                         Print help
+
+FEC endpoints:
+      --fec-www-base <URL>       Base URL of www.fec.gov: bulk zips, pg_dump archives, daily e-file zips, data dictionaries. Default: https://www.fec.gov [env: HARDMONEY_FEC_WWW_BASE=]
+      --openfec-base <URL>       Root of the openFEC API. Default: https://api.open.fec.gov/v1/ [env: HARDMONEY_OPENFEC_BASE=]
+      --docquery-base <URL>      Base URL of the FEC's raw-filing document store (/dcdev/posted/<id>.fec is appended). Default: https://docquery.fec.gov [env: HARDMONEY_DOCQUERY_BASE=]
+      --efile-rss-url <URL>      Complete URL of the e-file RSS feed. Default: https://efilingapps.fec.gov/rss/generate?preDefinedFilingType=ALL [env: HARDMONEY_EFILE_RSS_URL=]
+      --webcheck-endpoint <URL>  Base URL of the FEC's WebCheck validator (/services/upload is appended). Default: https://efoservices.fec.gov/webcheck [env: HARDMONEY_WEBCHECK_ENDPOINT=]
 ```
 
 The `--cache-dir` default shown is `$XDG_CACHE_HOME/hardmoney/dumps` if
@@ -556,6 +775,13 @@ Options:
       --offline                      Skip the HEAD requests to fec.gov (sizes and dates come from the cache's sidecar files only)
       --cache-dir <CACHE_DIR>        Where downloaded dumps are kept [env: HARDMONEY_CACHE_DIR=] [default: /Users/chris.gorski/.cache/hardmoney/dumps]
   -h, --help                         Print help
+
+FEC endpoints:
+      --fec-www-base <URL>       Base URL of www.fec.gov: bulk zips, pg_dump archives, daily e-file zips, data dictionaries. Default: https://www.fec.gov [env: HARDMONEY_FEC_WWW_BASE=]
+      --openfec-base <URL>       Root of the openFEC API. Default: https://api.open.fec.gov/v1/ [env: HARDMONEY_OPENFEC_BASE=]
+      --docquery-base <URL>      Base URL of the FEC's raw-filing document store (/dcdev/posted/<id>.fec is appended). Default: https://docquery.fec.gov [env: HARDMONEY_DOCQUERY_BASE=]
+      --efile-rss-url <URL>      Complete URL of the e-file RSS feed. Default: https://efilingapps.fec.gov/rss/generate?preDefinedFilingType=ALL [env: HARDMONEY_EFILE_RSS_URL=]
+      --webcheck-endpoint <URL>  Base URL of the FEC's WebCheck validator (/services/upload is appended). Default: https://efoservices.fec.gov/webcheck [env: HARDMONEY_WEBCHECK_ENDPOINT=]
 ```
 
 One row per dump (remote size and `Last-Modified`, what is cached, what
@@ -626,6 +852,13 @@ Options:
       --filing-id <FILING_ID>        Override the filing id derived from the filename
       --no-resolve                   Skip recomputing the filing's amendment chain (`most_recent`, `amendment_chain`, ...) after the insert. For scripted batch loads: ingest every file with this flag, then resolve the whole table once
   -h, --help                         Print help
+
+FEC endpoints:
+      --fec-www-base <URL>       Base URL of www.fec.gov: bulk zips, pg_dump archives, daily e-file zips, data dictionaries. Default: https://www.fec.gov [env: HARDMONEY_FEC_WWW_BASE=]
+      --openfec-base <URL>       Root of the openFEC API. Default: https://api.open.fec.gov/v1/ [env: HARDMONEY_OPENFEC_BASE=]
+      --docquery-base <URL>      Base URL of the FEC's raw-filing document store (/dcdev/posted/<id>.fec is appended). Default: https://docquery.fec.gov [env: HARDMONEY_DOCQUERY_BASE=]
+      --efile-rss-url <URL>      Complete URL of the e-file RSS feed. Default: https://efilingapps.fec.gov/rss/generate?preDefinedFilingType=ALL [env: HARDMONEY_EFILE_RSS_URL=]
+      --webcheck-endpoint <URL>  Base URL of the FEC's WebCheck validator (/services/upload is appended). Default: https://efoservices.fec.gov/webcheck [env: HARDMONEY_WEBCHECK_ENDPOINT=]
 ```
 
 For a local path, the filing id is the last run of four or more digits
@@ -712,6 +945,13 @@ Options:
       --json                Print one JSON object instead of text (for scripts). Implies no questions are asked
   -y, --yes                 If the namespace is not set up yet, run `schema-init` without asking
   -h, --help                Print help
+
+FEC endpoints:
+      --fec-www-base <URL>       Base URL of www.fec.gov: bulk zips, pg_dump archives, daily e-file zips, data dictionaries. Default: https://www.fec.gov [env: HARDMONEY_FEC_WWW_BASE=]
+      --openfec-base <URL>       Root of the openFEC API. Default: https://api.open.fec.gov/v1/ [env: HARDMONEY_OPENFEC_BASE=]
+      --docquery-base <URL>      Base URL of the FEC's raw-filing document store (/dcdev/posted/<id>.fec is appended). Default: https://docquery.fec.gov [env: HARDMONEY_DOCQUERY_BASE=]
+      --efile-rss-url <URL>      Complete URL of the e-file RSS feed. Default: https://efilingapps.fec.gov/rss/generate?preDefinedFilingType=ALL [env: HARDMONEY_EFILE_RSS_URL=]
+      --webcheck-endpoint <URL>  Base URL of the FEC's WebCheck validator (/services/upload is appended). Default: https://efoservices.fec.gov/webcheck [env: HARDMONEY_WEBCHECK_ENDPOINT=]
 ```
 
 Prints one line per check (`✓` pass, `!` warning, `✗` failure) with a
@@ -745,6 +985,13 @@ Options:
       --json                Print one JSON object instead of text (for scripts). Implies no questions are asked
       --jobs <N>            pg_restore parallel workers (helps when loading several cycles) [default: 1]
   -h, --help                Print help
+
+FEC endpoints:
+      --fec-www-base <URL>       Base URL of www.fec.gov: bulk zips, pg_dump archives, daily e-file zips, data dictionaries. Default: https://www.fec.gov [env: HARDMONEY_FEC_WWW_BASE=]
+      --openfec-base <URL>       Root of the openFEC API. Default: https://api.open.fec.gov/v1/ [env: HARDMONEY_OPENFEC_BASE=]
+      --docquery-base <URL>      Base URL of the FEC's raw-filing document store (/dcdev/posted/<id>.fec is appended). Default: https://docquery.fec.gov [env: HARDMONEY_DOCQUERY_BASE=]
+      --efile-rss-url <URL>      Complete URL of the e-file RSS feed. Default: https://efilingapps.fec.gov/rss/generate?preDefinedFilingType=ALL [env: HARDMONEY_EFILE_RSS_URL=]
+      --webcheck-endpoint <URL>  Base URL of the FEC's WebCheck validator (/services/upload is appended). Default: https://efoservices.fec.gov/webcheck [env: HARDMONEY_WEBCHECK_ENDPOINT=]
 ```
 
 Runs the checks (stops if any fail, unless `--explain`), prints the
@@ -781,6 +1028,13 @@ Options:
       --cache-dir <DIR>     Folder where downloaded dump files are kept between runs (an interrupted download resumes from there) [env: HARDMONEY_CACHE_DIR=] [default: /Users/chris.gorski/.cache/hardmoney/dumps]
       --json                Print one JSON object instead of text (for scripts). Implies no questions are asked
   -h, --help                Print help
+
+FEC endpoints:
+      --fec-www-base <URL>       Base URL of www.fec.gov: bulk zips, pg_dump archives, daily e-file zips, data dictionaries. Default: https://www.fec.gov [env: HARDMONEY_FEC_WWW_BASE=]
+      --openfec-base <URL>       Root of the openFEC API. Default: https://api.open.fec.gov/v1/ [env: HARDMONEY_OPENFEC_BASE=]
+      --docquery-base <URL>      Base URL of the FEC's raw-filing document store (/dcdev/posted/<id>.fec is appended). Default: https://docquery.fec.gov [env: HARDMONEY_DOCQUERY_BASE=]
+      --efile-rss-url <URL>      Complete URL of the e-file RSS feed. Default: https://efilingapps.fec.gov/rss/generate?preDefinedFilingType=ALL [env: HARDMONEY_EFILE_RSS_URL=]
+      --webcheck-endpoint <URL>  Base URL of the FEC's WebCheck validator (/services/upload is appended). Default: https://efoservices.fec.gov/webcheck [env: HARDMONEY_WEBCHECK_ENDPOINT=]
 ```
 
 Per dump: the table and view, whether it is in the database (estimated
@@ -808,6 +1062,13 @@ Options:
       --cache-dir <DIR>     Folder where downloaded dump files are kept between runs (an interrupted download resumes from there) [env: HARDMONEY_CACHE_DIR=] [default: /Users/chris.gorski/.cache/hardmoney/dumps]
       --json                Print one JSON object instead of text (for scripts). Implies no questions are asked
   -h, --help                Print help
+
+FEC endpoints:
+      --fec-www-base <URL>       Base URL of www.fec.gov: bulk zips, pg_dump archives, daily e-file zips, data dictionaries. Default: https://www.fec.gov [env: HARDMONEY_FEC_WWW_BASE=]
+      --openfec-base <URL>       Root of the openFEC API. Default: https://api.open.fec.gov/v1/ [env: HARDMONEY_OPENFEC_BASE=]
+      --docquery-base <URL>      Base URL of the FEC's raw-filing document store (/dcdev/posted/<id>.fec is appended). Default: https://docquery.fec.gov [env: HARDMONEY_DOCQUERY_BASE=]
+      --efile-rss-url <URL>      Complete URL of the e-file RSS feed. Default: https://efilingapps.fec.gov/rss/generate?preDefinedFilingType=ALL [env: HARDMONEY_EFILE_RSS_URL=]
+      --webcheck-endpoint <URL>  Base URL of the FEC's WebCheck validator (/services/upload is appended). Default: https://efoservices.fec.gov/webcheck [env: HARDMONEY_WEBCHECK_ENDPOINT=]
 ```
 
 For each imported dump, compares the fec.gov file's ETag (then
@@ -865,11 +1126,19 @@ Options:
       --fetch <DIR>                  Download each filing's raw .fec (cache-first) into this directory as <id>.fec
       --validate                     Run the FEC's acceptance rules on each filing and print the error/warning counts
       --reconcile                    Recompute each report's cover-page totals from its schedules and print whether it balances
+      --reconcile-chain              Order the reports found by coverage period and check each one against the reports before it: Column B against the schedules summed over the year (Form 3X) or cycle (Forms 3 and 3P), and cash on hand carried forward from the prior report's close. One line per report. Use with --most-recent so an original and its amendment are not both in the chain
       --ingest                       Ingest each filing into Postgres (needs --database-url)
       --database-url <DATABASE_URL>  Postgres connection URL for --ingest. Include a username: postgres://user@host/db [env: DATABASE_URL=]
       --schema <SCHEMA>              Namespace (Postgres schema) for --ingest. Default: public [env: HARDMONEY_SCHEMA=] [default: public]
       --cache-dir <CACHE_DIR>        Where downloaded filings and daily archives are kept across runs [env: HARDMONEY_CACHE_DIR=] [default: /Users/chris.gorski/.cache/hardmoney]
   -h, --help                         Print help
+
+FEC endpoints:
+      --fec-www-base <URL>       Base URL of www.fec.gov: bulk zips, pg_dump archives, daily e-file zips, data dictionaries. Default: https://www.fec.gov [env: HARDMONEY_FEC_WWW_BASE=]
+      --openfec-base <URL>       Root of the openFEC API. Default: https://api.open.fec.gov/v1/ [env: HARDMONEY_OPENFEC_BASE=]
+      --docquery-base <URL>      Base URL of the FEC's raw-filing document store (/dcdev/posted/<id>.fec is appended). Default: https://docquery.fec.gov [env: HARDMONEY_DOCQUERY_BASE=]
+      --efile-rss-url <URL>      Complete URL of the e-file RSS feed. Default: https://efilingapps.fec.gov/rss/generate?preDefinedFilingType=ALL [env: HARDMONEY_EFILE_RSS_URL=]
+      --webcheck-endpoint <URL>  Base URL of the FEC's WebCheck validator (/services/upload is appended). Default: https://efoservices.fec.gov/webcheck [env: HARDMONEY_WEBCHECK_ENDPOINT=]
 ```
 
 Queries openFEC's `/filings/` with an API key from `FEC_API_KEY` or
@@ -929,6 +1198,13 @@ Options:
       --schema <SCHEMA>              Namespace (Postgres schema) for --ingest. Default: public [env: HARDMONEY_SCHEMA=] [default: public]
       --cache-dir <CACHE_DIR>        Where downloaded filings and daily archives are kept across runs [env: HARDMONEY_CACHE_DIR=] [default: /Users/chris.gorski/.cache/hardmoney]
   -h, --help                         Print help
+
+FEC endpoints:
+      --fec-www-base <URL>       Base URL of www.fec.gov: bulk zips, pg_dump archives, daily e-file zips, data dictionaries. Default: https://www.fec.gov [env: HARDMONEY_FEC_WWW_BASE=]
+      --openfec-base <URL>       Root of the openFEC API. Default: https://api.open.fec.gov/v1/ [env: HARDMONEY_OPENFEC_BASE=]
+      --docquery-base <URL>      Base URL of the FEC's raw-filing document store (/dcdev/posted/<id>.fec is appended). Default: https://docquery.fec.gov [env: HARDMONEY_DOCQUERY_BASE=]
+      --efile-rss-url <URL>      Complete URL of the e-file RSS feed. Default: https://efilingapps.fec.gov/rss/generate?preDefinedFilingType=ALL [env: HARDMONEY_EFILE_RSS_URL=]
+      --webcheck-endpoint <URL>  Base URL of the FEC's WebCheck validator (/services/upload is appended). Default: https://efoservices.fec.gov/webcheck [env: HARDMONEY_WEBCHECK_ENDPOINT=]
 ```
 
 Seen ids live in `<cache-dir>/efile-seen.txt`; every new id is recorded,
@@ -959,6 +1235,13 @@ Options:
       --schema <SCHEMA>              Namespace (Postgres schema) for --ingest. Default: public [env: HARDMONEY_SCHEMA=] [default: public]
       --cache-dir <CACHE_DIR>        Where downloaded filings and daily archives are kept across runs [env: HARDMONEY_CACHE_DIR=] [default: /Users/chris.gorski/.cache/hardmoney]
   -h, --help                         Print help
+
+FEC endpoints:
+      --fec-www-base <URL>       Base URL of www.fec.gov: bulk zips, pg_dump archives, daily e-file zips, data dictionaries. Default: https://www.fec.gov [env: HARDMONEY_FEC_WWW_BASE=]
+      --openfec-base <URL>       Root of the openFEC API. Default: https://api.open.fec.gov/v1/ [env: HARDMONEY_OPENFEC_BASE=]
+      --docquery-base <URL>      Base URL of the FEC's raw-filing document store (/dcdev/posted/<id>.fec is appended). Default: https://docquery.fec.gov [env: HARDMONEY_DOCQUERY_BASE=]
+      --efile-rss-url <URL>      Complete URL of the e-file RSS feed. Default: https://efilingapps.fec.gov/rss/generate?preDefinedFilingType=ALL [env: HARDMONEY_EFILE_RSS_URL=]
+      --webcheck-endpoint <URL>  Base URL of the FEC's WebCheck validator (/services/upload is appended). Default: https://efoservices.fec.gov/webcheck [env: HARDMONEY_WEBCHECK_ENDPOINT=]
 ```
 
 Archives are cached under `<cache-dir>/efile/YYYYMMDD.zip`. A day with no
@@ -1024,6 +1307,13 @@ Options:
           Also serve the browser UI at /ui and the filing tools at /tools/* (parse, validate, reconcile, write). Raises the request body cap from 64 KiB to 32 MiB so a filing can be uploaded
   -h, --help
           Print help
+
+FEC endpoints:
+      --fec-www-base <URL>       Base URL of www.fec.gov: bulk zips, pg_dump archives, daily e-file zips, data dictionaries. Default: https://www.fec.gov [env: HARDMONEY_FEC_WWW_BASE=]
+      --openfec-base <URL>       Root of the openFEC API. Default: https://api.open.fec.gov/v1/ [env: HARDMONEY_OPENFEC_BASE=]
+      --docquery-base <URL>      Base URL of the FEC's raw-filing document store (/dcdev/posted/<id>.fec is appended). Default: https://docquery.fec.gov [env: HARDMONEY_DOCQUERY_BASE=]
+      --efile-rss-url <URL>      Complete URL of the e-file RSS feed. Default: https://efilingapps.fec.gov/rss/generate?preDefinedFilingType=ALL [env: HARDMONEY_EFILE_RSS_URL=]
+      --webcheck-endpoint <URL>  Base URL of the FEC's WebCheck validator (/services/upload is appended). Default: https://efoservices.fec.gov/webcheck [env: HARDMONEY_WEBCHECK_ENDPOINT=]
 ```
 
 Runs until `SIGINT`/`SIGTERM`. See [The REST API](./rest-api.md) and

@@ -54,6 +54,7 @@ use rust_decimal::Decimal;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use super::endpoints::Endpoints;
 use super::{FecApiError, Result, agent, get_ok, redact_url};
 
 /// An openFEC API key. `Debug` and `Display` print `REDACTED`; the only
@@ -153,8 +154,8 @@ impl fmt::Debug for OpenFec {
 }
 
 impl OpenFec {
-    /// The production API root.
-    pub const BASE_URL: &'static str = "https://api.open.fec.gov/v1/";
+    /// The production API root: the default of [`Endpoints::openfec_base`].
+    pub const BASE_URL: &'static str = Endpoints::DEFAULT_OPENFEC_BASE;
 
     /// Default retry budget on 429: three retries ...
     pub const DEFAULT_MAX_RETRIES: u32 = 3;
@@ -162,7 +163,8 @@ impl OpenFec {
     pub const DEFAULT_MAX_WAIT: Duration = Duration::from_secs(60);
 
     /// A client for [`Self::BASE_URL`] with `key` and the default retry
-    /// policy.
+    /// policy. Does not read the environment for the API root; see
+    /// [`Self::with_endpoints`] and [`Self::from_env`].
     #[must_use]
     pub fn new(key: ApiKey) -> Self {
         OpenFec {
@@ -174,13 +176,20 @@ impl OpenFec {
         }
     }
 
-    /// [`Self::new`] with the key from [`ApiKey::from_env`].
+    /// [`Self::new`] with the key from [`ApiKey::from_env`] and the API
+    /// root from [`Endpoints::from_env`] (`HARDMONEY_OPENFEC_BASE`).
+    ///
+    /// Fails with [`FecApiError::MissingApiKey`] without a key and
+    /// [`FecApiError::Endpoint`] if an endpoint override is malformed.
     pub fn from_env() -> Result<Self> {
-        Ok(Self::new(ApiKey::from_env()?))
+        let key = ApiKey::from_env()?;
+        let endpoints = Endpoints::from_env()?;
+        Ok(Self::new(key).with_endpoints(&endpoints))
     }
 
     /// Points the client at another API root (a proxy, a recording
-    /// server). A trailing slash is added if missing.
+    /// server). A trailing slash is added if missing. This sets the same
+    /// value as [`Self::with_endpoints`], without the URL check.
     #[must_use]
     pub fn with_base_url(mut self, base: impl Into<String>) -> Self {
         let mut base: String = base.into();
@@ -189,6 +198,12 @@ impl OpenFec {
         }
         self.base = base;
         self
+    }
+
+    /// Points the client at [`Endpoints::openfec_base`].
+    #[must_use]
+    pub fn with_endpoints(self, endpoints: &Endpoints) -> Self {
+        self.with_base_url(endpoints.openfec_base.as_str())
     }
 
     /// Sets how many times a 429 is retried and the longest single sleep
@@ -286,8 +301,10 @@ impl OpenFec {
     /// request fails.
     ///
     /// This is the replacement for building the `docquery.fec.gov` URL by
-    /// hand ([`docquery_url`](super::docquery_url)), which the FEC has said
-    /// it is inventorying for retirement (`openFEC#6717`).
+    /// hand ([`Endpoints::docquery_filing`]), which the FEC has said it is
+    /// inventorying for retirement (`openFEC#6717`). The URL is returned as
+    /// openFEC gave it; [`super::fetch_filing_bytes_with`] rebases it onto
+    /// the configured document store before downloading.
     pub fn resolve_fec_url(&self, filing_id: u64) -> Result<Option<String>> {
         let efile = self.efile_filings(&EfileQuery::new().file_number(filing_id).per_page(1))?;
         if let Some(url) = efile.results.into_iter().find_map(|r| r.fec_url) {
@@ -1084,8 +1101,10 @@ impl FilingRecord {
     }
 
     /// The raw-filing URL to fetch: `fec_url` if the API gave one, else
-    /// the document store's URL for [`Self::filing_id`]. `None` without
-    /// either (paper filings).
+    /// the production document store's URL for [`Self::filing_id`]
+    /// ([`super::docquery_url`]). `None` without either (paper filings).
+    /// Pass the result to [`super::fetch_filing_bytes_with`], which
+    /// rebases a production `docquery` host onto the configured one.
     #[must_use]
     pub fn raw_url(&self) -> Option<String> {
         self.fec_url

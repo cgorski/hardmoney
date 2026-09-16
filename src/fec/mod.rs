@@ -17,6 +17,16 @@
 //! (`~/.cache/hardmoney/filings/<id>.fec`, override with
 //! `HARDMONEY_CACHE_DIR`).
 //!
+//! # Where the requests go
+//!
+//! Every URL this module requests is built by [`Endpoints`] from a base
+//! that defaults to the FEC's production host and can be overridden by a
+//! `HARDMONEY_*` environment variable or a builder ([`endpoints`] has the
+//! table). Functions here that take an `&Endpoints` use it; the ones that
+//! do not and return a `Result` read [`Endpoints::from_env`] and fail if
+//! an override is malformed; infallible constructors (`EfileFeed::new`,
+//! `OpenFec::new`) use the production defaults.
+//!
 //! # Feature flags
 //!
 //! This module is enabled by the `fetch` feature. The openFEC client in
@@ -65,6 +75,7 @@
 
 pub mod cache;
 pub mod efile;
+pub mod endpoints;
 #[cfg(feature = "serde")]
 pub mod openfec;
 
@@ -76,6 +87,7 @@ use ureq::http;
 
 pub use cache::{Cache, CacheInfo};
 pub use efile::{DailyZipFilings, EfileFeed, FeedItem, daily_zip_filings};
+pub use endpoints::{EndpointError, Endpoints, Url};
 #[cfg(feature = "serde")]
 pub use openfec::{
     ApiKey, EfileQuery, EfileRecord, FilingRecord, FilingsIter, FilingsQuery, OpenFec,
@@ -153,6 +165,11 @@ pub enum FecApiError {
         #[source]
         source: zip::result::ZipError,
     },
+
+    /// A `HARDMONEY_*` endpoint override is not a usable URL (see
+    /// [`Endpoints::from_env`]). Raised before any request is made.
+    #[error("{0}")]
+    Endpoint(#[from] EndpointError),
 }
 
 fn body_hint(snippet: &str) -> String {
@@ -170,40 +187,57 @@ pub type Result<T> = std::result::Result<T, FecApiError>;
 /// identify themselves.
 pub const USER_AGENT: &str = concat!("hardmoney/", env!("CARGO_PKG_VERSION"));
 
-/// The raw-filing URL on the FEC's document store for a filing id.
+/// The raw-filing URL on the FEC's production document store for a
+/// filing id: `https://docquery.fec.gov/dcdev/posted/<id>.fec`.
 ///
+/// This is [`Endpoints::docquery_filing`] at the default base; use that
+/// method when a `HARDMONEY_DOCQUERY_BASE` override must be honoured.
 /// openFEC's `fec_url` is this same URL today, but the FEC is
 /// inventorying `docquery.fec.gov` for retirement (`openFEC#6717`), so
 /// prefer [`resolve_fec_url`], which asks openFEC and only falls back to
 /// this template. [`fetch_filing_bytes`] does that when no URL is given.
 #[must_use]
 pub fn docquery_url(filing_id: u64) -> String {
-    format!("https://docquery.fec.gov/dcdev/posted/{filing_id}.fec")
+    Endpoints::default().docquery_filing(filing_id)
 }
 
 /// The URL to download `filing_id`'s raw `.fec` from.
 ///
+/// [`resolve_fec_url_with`] at [`Endpoints::from_env`]. Fails with
+/// [`FecApiError::Endpoint`] if a `HARDMONEY_*` override is malformed,
+/// otherwise as `resolve_fec_url_with` does.
+pub fn resolve_fec_url(filing_id: u64) -> Result<String> {
+    resolve_fec_url_with(filing_id, &Endpoints::from_env()?)
+}
+
+/// The URL to download `filing_id`'s raw `.fec` from, with the openFEC
+/// and document-store hosts taken from `endpoints`.
+///
 /// With an openFEC key available ([`openfec::ApiKey::from_env`]) and the
 /// `serde` feature, asks `/efile/filings/` and then `/filings/` for the
 /// filing's `fec_url` ([`openfec::OpenFec::resolve_fec_url`]); that is one
-/// or two API requests. Returns [`docquery_url`] when there is no key,
-/// when neither endpoint knows the filing, or in a build without `serde`.
-/// Fails only when an API request fails ([`FecApiError::Http`],
+/// or two API requests. The answer has any production `docquery.fec.gov`
+/// host rewritten to `endpoints.docquery_base`
+/// ([`Endpoints::rewrite_docquery`]). Returns
+/// [`Endpoints::docquery_filing`] when there is no key, when neither
+/// endpoint knows the filing, or in a build without `serde`. Fails only
+/// when an API request fails ([`FecApiError::Http`],
 /// [`FecApiError::RateLimited`], [`FecApiError::Transport`], ...).
-pub fn resolve_fec_url(filing_id: u64) -> Result<String> {
+pub fn resolve_fec_url_with(filing_id: u64, endpoints: &Endpoints) -> Result<String> {
     #[cfg(feature = "serde")]
     {
-        match openfec::OpenFec::from_env() {
-            Ok(api) => {
+        match openfec::ApiKey::from_env() {
+            Ok(key) => {
+                let api = openfec::OpenFec::new(key).with_endpoints(endpoints);
                 if let Some(url) = api.resolve_fec_url(filing_id)? {
-                    return Ok(url);
+                    return Ok(endpoints.rewrite_docquery(&url));
                 }
             }
             Err(FecApiError::MissingApiKey { .. }) => {}
             Err(e) => return Err(e),
         }
     }
-    Ok(docquery_url(filing_id))
+    Ok(endpoints.docquery_filing(filing_id))
 }
 
 /// Parses an HTTP `Retry-After` header value: either a non-negative
@@ -303,8 +337,8 @@ pub(crate) fn get_ok(agent: &ureq::Agent, url: &str) -> Result<http::Response<ur
 
 /// Two `ureq` error variants quote the request URI in their message
 /// (`bad uri: <uri> is missing scheme`, `configured for https only:
-/// <uri>`); with a misconfigured [`openfec::OpenFec::with_base_url`] that
-/// URI carries the key. Everything else passes through unchanged.
+/// <uri>`); with a misconfigured `OpenFec::with_base_url` that URI
+/// carries the key. Everything else passes through unchanged.
 fn redact_transport_error(e: ureq::Error) -> FecApiError {
     FecApiError::Transport(match e {
         ureq::Error::BadUri(s) => ureq::Error::BadUri(redact_url(&s)),
@@ -325,33 +359,52 @@ pub(crate) fn collapse_whitespace(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Downloads a raw `.fec` filing, cache-first.
+/// Downloads a raw `.fec` filing, cache-first, at [`Endpoints::from_env`].
+///
+/// [`fetch_filing_bytes_with`] with the endpoints from the environment.
+/// Fails with [`FecApiError::Endpoint`] if a `HARDMONEY_*` override is
+/// malformed (checked before the cache is consulted, so a bad
+/// configuration is never masked by a cache hit), otherwise as
+/// `fetch_filing_bytes_with` does.
+pub fn fetch_filing_bytes(id: u64, cache: &Cache, url_hint: Option<&str>) -> Result<Vec<u8>> {
+    fetch_filing_bytes_with(id, cache, url_hint, &Endpoints::from_env()?)
+}
+
+/// Downloads a raw `.fec` filing, cache-first, from the hosts in
+/// `endpoints`.
 ///
 /// Order of business:
 ///
 /// 1. If `cache` already holds `<id>.fec`, return it without touching the
 ///    network.
 /// 2. Otherwise GET `url_hint` (openFEC's `fec_url`, or the RSS `<link>`)
-///    if one is given. Without a hint, ask openFEC for the filing's
-///    `fec_url` ([`resolve_fec_url`]; one or two requests, skipped when
-///    there is no API key) and GET that. If the URL is not the document
-///    store's and fails with an HTTP error, or the resolution itself
-///    fails, fall back to [`docquery_url`].
+///    if one is given, with a production `docquery.fec.gov` host rewritten
+///    to `endpoints.docquery_base` ([`Endpoints::rewrite_docquery`]).
+///    Without a hint, ask openFEC for the filing's `fec_url`
+///    ([`resolve_fec_url_with`]; one or two requests, skipped when there
+///    is no API key) and GET that. If the URL is not the document store's
+///    and fails with an HTTP error, or the resolution itself fails, fall
+///    back to [`Endpoints::docquery_filing`].
 /// 3. Store the bytes in the cache (atomically) and return them.
 ///
 /// Fails with [`FecApiError::Http`] if the filing does not exist (the
 /// document store answers 404) or if the server returned an HTML page
 /// instead of a filing, [`FecApiError::Transport`] on network failure,
 /// and [`FecApiError::Io`] if the cache cannot be written.
-pub fn fetch_filing_bytes(id: u64, cache: &Cache, url_hint: Option<&str>) -> Result<Vec<u8>> {
+pub fn fetch_filing_bytes_with(
+    id: u64,
+    cache: &Cache,
+    url_hint: Option<&str>,
+    endpoints: &Endpoints,
+) -> Result<Vec<u8>> {
     if let Some(bytes) = cache.read_filing(id)? {
         return Ok(bytes);
     }
-    let fallback = docquery_url(id);
+    let fallback = endpoints.docquery_filing(id);
     let url = match url_hint.map(str::trim).filter(|u| !u.is_empty()) {
-        Some(hint) => hint.to_string(),
+        Some(hint) => endpoints.rewrite_docquery(hint),
         // Best effort: a failed lookup is not a failed download.
-        None => resolve_fec_url(id).unwrap_or_else(|_| fallback.clone()),
+        None => resolve_fec_url_with(id, endpoints).unwrap_or_else(|_| fallback.clone()),
     };
     let bytes = if url == fallback {
         download_filing(&fallback)?
@@ -364,6 +417,17 @@ pub fn fetch_filing_bytes(id: u64, cache: &Cache, url_hint: Option<&str>) -> Res
     };
     cache.write_filing(id, &bytes)?;
     Ok(bytes)
+}
+
+/// Downloads `filing_id` from `endpoints.docquery_filing(filing_id)`
+/// with no cache and no openFEC lookup: one GET of the document store.
+///
+/// Fails with [`FecApiError::Http`] if the store answers non-2xx or with
+/// an HTML page instead of a filing, and [`FecApiError::Transport`] on
+/// network failure. This is [`crate::Filing::fetch_bytes`] with explicit
+/// endpoints and typed errors.
+pub fn download_filing_bytes(filing_id: u64, endpoints: &Endpoints) -> Result<Vec<u8>> {
+    download_filing(&endpoints.docquery_filing(filing_id))
 }
 
 fn download_filing(url: &str) -> Result<Vec<u8>> {

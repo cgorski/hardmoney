@@ -38,6 +38,7 @@
 - [Exporting a filing](./exporting.md)
 - [Reconciling a filing](./reconciling.md)
 - [Validating a filing](./validating.md)
+- [Reviewing a filing](./reviewing.md)
 - [Finding filings: openFEC and the e-file feed](./discovery.md)
 
 # Data in Postgres

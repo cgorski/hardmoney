@@ -60,7 +60,7 @@ function renderEmpty() {
         <input type="text" id="filing-id" inputmode="numeric" pattern="[0-9]+" placeholder="2011827" required autocomplete="off" aria-describedby="fetch-help">
         <button type="submit" class="btn btn-primary">Fetch from the FEC</button>
       </form>
-      <p id="fetch-help" class="muted">The id is the number in an FEC.gov filing URL. The server downloads the file from docquery.fec.gov.</p>
+      <p id="fetch-help" class="muted">The id is the number in an FEC.gov filing URL. The server downloads the file from the FEC's document store (docquery.fec.gov unless the server is configured for a mirror).</p>
     </div>
     <p id="load-status" class="muted" role="status" aria-live="polite"></p>`;
   ui.setTitle(title());

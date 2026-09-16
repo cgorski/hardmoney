@@ -1,5 +1,5 @@
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use rust_decimal::Decimal;
@@ -9,6 +9,7 @@ use sqlx::PgPool;
 
 use crate::api::error::ApiError;
 use crate::api::pagination::Pagination;
+use crate::fec::Endpoints;
 
 /// A raw `.fec` filing previously ingested via `hardmoney bulk-load-filing`
 /// (which uses the `parser` module directly against the filing's own
@@ -49,7 +50,9 @@ pub struct Filing {
     pub report_type: Option<String>,
     pub coverage_start_date: Option<chrono::NaiveDate>,
     pub coverage_end_date: Option<chrono::NaiveDate>,
-    /// Where to download the filing's raw bytes from the FEC.
+    /// Where to download the filing's raw bytes: the server's configured
+    /// document store ([`ApiConfig::endpoints`](crate::api::ApiConfig::endpoints),
+    /// `docquery.fec.gov` by default) plus `/dcdev/posted/<id>.fec`.
     pub fec_url: String,
     pub header: Option<serde_json::Value>,
     pub summary: Option<serde_json::Value>,
@@ -61,30 +64,38 @@ pub struct Filing {
 /// The column list behind [`Filing`], shared by the get and list routes so
 /// the two cannot drift. Storage names are aliased to openFEC's. A macro
 /// (not a `const`) so the queries stay `concat!`-able string literals.
+/// `$prefix` names the bound parameter holding
+/// [`Endpoints::docquery_filing_prefix`]; the URL is never interpolated
+/// into the SQL text.
 macro_rules! filing_columns {
-    () => {
-        "filing_id, form_type, fec_version, committee_id, is_amendment, amends_filing_id, \
-         CASE WHEN is_amendment THEN 'A' ELSE 'N' END AS amendment_indicator, \
-         amendment_version, amendment_chain, most_recent, \
-         most_recent_filing_id AS most_recent_file_number, \
-         previous_filing_id AS previous_file_number, chain_unresolved, \
-         report_code AS report_type, coverage_from AS coverage_start_date, \
-         coverage_through AS coverage_end_date, \
-         'https://docquery.fec.gov/dcdev/posted/' || filing_id || '.fec' AS fec_url, \
-         header, summary, skipped_lines, ingested_at"
+    ($prefix:literal) => {
+        concat!(
+            "filing_id, form_type, fec_version, committee_id, is_amendment, amends_filing_id, \
+             CASE WHEN is_amendment THEN 'A' ELSE 'N' END AS amendment_indicator, \
+             amendment_version, amendment_chain, most_recent, \
+             most_recent_filing_id AS most_recent_file_number, \
+             previous_filing_id AS previous_file_number, chain_unresolved, \
+             report_code AS report_type, coverage_from AS coverage_start_date, \
+             coverage_through AS coverage_end_date, ",
+            $prefix,
+            "::text || filing_id || '.fec' AS fec_url, \
+             header, summary, skipped_lines, ingested_at"
+        )
     };
 }
 
 pub async fn get(
     State(pool): State<PgPool>,
+    Extension(endpoints): Extension<Endpoints>,
     Path(filing_id): Path<i64>,
 ) -> Result<Json<Filing>, ApiError> {
     let row = sqlx::query_as::<_, Filing>(concat!(
         "SELECT ",
-        filing_columns!(),
+        filing_columns!("$2"),
         " FROM filings WHERE filing_id = $1"
     ))
     .bind(filing_id)
+    .bind(endpoints.docquery_filing_prefix())
     .fetch_optional(&pool)
     .await?;
     row.map(Json)
@@ -110,6 +121,7 @@ pub struct ListParams {
 /// Lists ingested filings, newest filing id first.
 pub async fn list(
     State(pool): State<PgPool>,
+    Extension(endpoints): Extension<Endpoints>,
     Query(params): Query<ListParams>,
 ) -> Result<Json<Vec<Filing>>, ApiError> {
     let page = Pagination::new(params.limit, params.offset).validate()?;
@@ -121,7 +133,7 @@ pub async fn list(
         .map(str::to_ascii_uppercase);
     let rows = sqlx::query_as::<_, Filing>(concat!(
         "SELECT ",
-        filing_columns!(),
+        filing_columns!("$6"),
         " FROM filings \
          WHERE ($1::text IS NULL OR committee_id = $1) \
            AND ($2::boolean IS NULL OR most_recent = $2) \
@@ -133,6 +145,7 @@ pub async fn list(
     .bind(form_type)
     .bind(page.limit())
     .bind(page.offset())
+    .bind(endpoints.docquery_filing_prefix())
     .fetch_all(&pool)
     .await?;
     Ok(Json(rows))
@@ -195,16 +208,18 @@ impl IntoResponse for ProcessingError {
 /// `days_pending` (as of today, UTC). Needs no database row: the filing
 /// need not have been ingested. The openFEC key comes from `FEC_API_KEY`
 /// or `~/fec_api_key.txt` on the server; without one the route answers
-/// 503 and says so.
+/// 503 and says so. The openFEC host is the server's configured
+/// [`Endpoints::openfec_base`].
 #[cfg(feature = "fetch")]
 pub async fn processing(
+    Extension(endpoints): Extension<Endpoints>,
     Path(filing_id): Path<u64>,
 ) -> Result<Json<serde_json::Value>, ProcessingError> {
     use crate::fec::FecApiError;
-    use crate::fec::openfec::{OpenFec, ProcessingStage};
+    use crate::fec::openfec::{ApiKey, OpenFec, ProcessingStage};
 
-    let api = match OpenFec::from_env() {
-        Ok(api) => api,
+    let api = match ApiKey::from_env() {
+        Ok(key) => OpenFec::new(key).with_endpoints(&endpoints),
         Err(e @ FecApiError::MissingApiKey { .. }) => {
             return Err(ProcessingError::NoApiKey(format!(
                 "this server cannot ask openFEC about processing: {e}"

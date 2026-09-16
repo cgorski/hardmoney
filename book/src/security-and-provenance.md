@@ -30,10 +30,10 @@ Postgres you provide.
 The Python package contacts one host, and only when you call the one
 function that does:
 
-| Call | Host | When |
-|---|---|---|
-| `hardmoney.fetch(id)` | `docquery.fec.gov` | when called |
-| everything else (`parse`, `parse_file`, `validate`, `reconcile`, `to_fec`, spec queries) | none | never |
+| Call | Host | When | Override |
+|---|---|---|---|
+| `hardmoney.fetch(id)` | `docquery.fec.gov` | when called | `HARDMONEY_DOCQUERY_BASE` |
+| everything else (`parse`, `parse_file`, `validate`, `reconcile`, `to_fec`, spec queries) | none | never | |
 
 In the Rust crate, network access is confined to `Filing::fetch`, the
 `fec` module (openFEC client, e-file feed, daily archives; behind the
@@ -44,25 +44,29 @@ calls. The CLI commands below are the callers of those modules, so the
 host list is the same.
 
 The CLI contacts only FEC hosts, only for the commands that exist to talk
-to the FEC:
+to the FEC. Every host is a default that a flag or an environment
+variable replaces (the "Override" column; see [Pointing hardmoney at a
+mirror or proxy](#pointing-hardmoney-at-a-mirror-or-proxy)):
 
-| Command | Hosts | When | What is sent |
-|---|---|---|---|
-| `validate --oracle webcheck` | `efoservices.fec.gov` | only with `--oracle` | the `.fec` file under test; with `--webcheck-api-key`, also the key and `--webcheck-email` |
-| `filings` | `api.open.fec.gov`; `docquery.fec.gov` with `--fetch`, `--validate`, `--reconcile`, or `--ingest` | every run | the query filters; the openFEC API key as `?api_key=` |
-| `efile watch` | `efilingapps.fec.gov`, `docquery.fec.gov` | every poll | GET only |
-| `efile backfill` | `www.fec.gov` (the daily e-file archives; the filings come from inside them) | every run | GET only |
-| `bulk-load`, `bulk-load-all` | `www.fec.gov` | every run (unless the file is cached and `--if-changed` finds it unchanged) | GET / HEAD only |
-| `bulk-load-filing <numeric id>` | `docquery.fec.gov` | when given an id rather than a path | GET only |
-| `bulk-restore-dump`, `bulk-dump-info`, `dumps`, `dumps check`, `dumps import`, `dumps status`, `dumps update` | `www.fec.gov` | every run, except `dumps check` and `dumps status` with `--offline` | GET / HEAD only |
+| Command | Hosts | When | What is sent | Override |
+|---|---|---|---|---|
+| `validate --oracle webcheck` | `efoservices.fec.gov` | only with `--oracle` | the `.fec` file under test; with `--webcheck-api-key`, also the key and `--webcheck-email` | `--webcheck-endpoint` / `HARDMONEY_WEBCHECK_ENDPOINT` |
+| `filings` | `api.open.fec.gov`; `docquery.fec.gov` with `--fetch`, `--validate`, `--reconcile`, or `--ingest` | every run | the query filters; the openFEC API key as `?api_key=` | `--openfec-base` / `HARDMONEY_OPENFEC_BASE`; `--docquery-base` / `HARDMONEY_DOCQUERY_BASE` |
+| `lag` | `api.open.fec.gov`; `docquery.fec.gov` with `--counts` | every run | the filing ids or committee filter; the openFEC API key | `--openfec-base`; `--docquery-base` |
+| `efile watch` | `efilingapps.fec.gov`, `docquery.fec.gov` | every poll | GET only | `--efile-rss-url` / `HARDMONEY_EFILE_RSS_URL` (or `HARDMONEY_EFILINGAPPS_BASE`); `--docquery-base` |
+| `efile backfill` | `www.fec.gov` (the daily e-file archives; the filings come from inside them) | every run | GET only | `--fec-www-base` / `HARDMONEY_FEC_WWW_BASE` |
+| `bulk-load`, `bulk-load-all` | `www.fec.gov` | every run (unless the file is cached and `--if-changed` finds it unchanged) | GET / HEAD only | `--fec-www-base` |
+| `bulk-load-filing <numeric id>` | `docquery.fec.gov` | when given an id rather than a path | GET only | `--docquery-base` |
+| `bulk-restore-dump`, `bulk-dump-info`, `dumps`, `dumps check`, `dumps import`, `dumps status`, `dumps update` | `www.fec.gov` | every run, except `dumps check` and `dumps status` with `--offline` | GET / HEAD only | `--fec-www-base` (the bare `dumps` overview reads only the variable) |
+| `serve` | none by itself; `docquery.fec.gov` for `GET /tools/fetch/{id}` (with `--ui`) and `api.open.fec.gov` for `GET /filings/{id}/processing`, when a client asks | per request | GET only; the openFEC API key on `/processing` | `--docquery-base` (also sets the `fec_url` in `/filings` responses); `--openfec-base` |
 
 Commands not in the table (`parse`, `write`, `export`, `reconcile`,
 `validate` without `--oracle`, `spec`, `schema-init`, `schema-status`,
 `schema-list`, `schema-drop`, `bulk-dump-index`, `bulk-dump-compare`,
-`bulk-resolve-chains`, `dumps remove`, `query`, `serve`) open no outbound
-connection. `serve` listens where you tell it and calls nothing; its
-embedded browser UI ships its own assets and loads no third-party
-scripts, fonts, or analytics.
+`bulk-resolve-chains`, `dumps remove`, `query`) open no outbound
+connection. `serve` listens where you tell it and, apart from the two
+routes above, calls nothing; its embedded browser UI ships its own
+assets and loads no third-party scripts, fonts, or analytics.
 
 There is no telemetry, no update check, and no crash reporting. The
 only filing bytes that ever leave the machine are the single file passed
@@ -76,11 +80,80 @@ Transport details a network team may want:
   (`webpki-roots`). The operating system trust store is not consulted,
   so a TLS-inspecting proxy with a private root causes a certificate
   error rather than being silently trusted. If your network requires
-  such a proxy, run the offline commands only, or fetch files with your
-  own tooling and pass paths.
-- `HTTPS_PROXY`, `HTTP_PROXY`, and `ALL_PROXY` are honoured.
+  such a proxy, point hardmoney at an internal mirror over plain
+  `http://` or a host with a public certificate (next section), run the
+  offline commands only, or fetch files with your own tooling and pass
+  paths.
+- Proxy variables are read by the HTTP client (`ureq` 3): the first of
+  `ALL_PROXY`, `all_proxy`, `HTTPS_PROXY`, `https_proxy`, `HTTP_PROXY`,
+  `http_proxy` that holds a parseable proxy URI is used for every request
+  (there is no per-scheme selection, so `ALL_PROXY` takes precedence over
+  `HTTPS_PROXY` when both are set), and `NO_PROXY` / `no_proxy` lists
+  hosts that bypass it (exact names, `*.suffix`, `.suffix`, or `*`).
+  Only `http://` and `https://` proxy URIs are supported; hardmoney
+  does not enable the client's SOCKS feature. A proxy URI may carry
+  `user:password@`.
 - User agent: `hardmoney/<version>`. The FEC clients use a 30 s connect
   timeout and a 60 s response timeout.
+
+### Pointing hardmoney at a mirror or proxy
+
+Every FEC address hardmoney requests is built from one of six bases, each
+with the production address as its default. The Rust type is
+`hardmoney::fec::Endpoints`; on the CLI each base is a flag on every
+command that uses it, and each flag reads an environment variable when
+absent, so a deployment sets the variables once (in the environment or
+a `.env` file next to the command) and changes nothing else:
+
+| Variable | Flag | Default | Used for |
+|---|---|---|---|
+| `HARDMONEY_FEC_WWW_BASE` | `--fec-www-base` | `https://www.fec.gov` | bulk zips (`/files/bulk-downloads/<cycle>/`), `pg_dump` archives (`/files/bulk-downloads/data-dump/schedules/`), daily e-file zips (`/files/bulk-downloads/electronic/`), data dictionaries |
+| `HARDMONEY_OPENFEC_BASE` | `--openfec-base` | `https://api.open.fec.gov/v1/` | the openFEC API |
+| `HARDMONEY_DOCQUERY_BASE` | `--docquery-base` | `https://docquery.fec.gov` | raw filings (`/dcdev/posted/<id>.fec`); also the `fec_url` the REST API reports and the target of `hardmoney.fetch` in Python |
+| `HARDMONEY_EFILINGAPPS_BASE` | (variable only) | `https://efilingapps.fec.gov` | the e-filing applications host; the RSS feed is `/rss/generate?preDefinedFilingType=ALL` under it |
+| `HARDMONEY_EFILE_RSS_URL` | `--efile-rss-url` | `https://efilingapps.fec.gov/rss/generate?preDefinedFilingType=ALL` | the e-file RSS feed as a complete URL; wins over the derived one |
+| `HARDMONEY_WEBCHECK_ENDPOINT` | `--webcheck-endpoint` | `https://efoservices.fec.gov/webcheck` | the WebCheck validator (`/services/upload`, `/services/validate`) |
+
+A mirror that serves the FEC's files under the same paths needs one
+variable per host it replaces:
+
+```bash
+export HARDMONEY_FEC_WWW_BASE=https://mirror.example.gov
+export HARDMONEY_DOCQUERY_BASE=https://mirror.example.gov/docquery
+hardmoney dumps import all-small          # downloads from mirror.example.gov
+hardmoney efile watch --once --validate   # feed items are fetched from the mirror
+```
+
+The paths under each base are fixed (a mirror is expected to preserve
+the FEC's layout), and a trailing slash on a base is optional. Links the
+FEC hands out that name `docquery.fec.gov` (in the RSS feed and in
+openFEC's `fec_url`) are rewritten onto `HARDMONEY_DOCQUERY_BASE`
+before the download, so feed- and API-driven fetches follow the mirror
+too. The `fec_url` in `hardmoney serve`'s `/filings` responses is built
+from the same base, as a bound SQL parameter.
+
+A value that is not an `http://` or `https://` URL with a host (or, for
+the five bases, that carries a query string) is refused before any
+request is made, with a message naming the variable and the flag:
+
+```text
+error: --docquery-base / HARDMONEY_DOCQUERY_BASE: "mirror.example.gov" is not a usable URL: it must start with http:// or https://
+```
+
+An empty variable counts as unset. Nothing falls back to the production
+host when an override is present but wrong.
+
+For an egress proxy that does not rewrite hosts, leave the bases alone
+and set `HTTPS_PROXY` (or `ALL_PROXY`) and, if needed, `NO_PROXY`, as
+described above. The two mechanisms compose: a base can name a mirror
+while the proxy variables route the connection.
+
+In the Rust crate, `Endpoints::from_env()` reads the six variables and
+returns the error above for a bad one; `Endpoints::default()` is
+production; the `with_*` builders set a base explicitly. Constructors
+named `new` (`OpenFec::new`, `EfileFeed::new`, `WebCheck::new`) do not
+read the environment; `OpenFec::from_env`, `WebCheck::from_env`,
+`Filing::fetch`, and the `fec::fetch_filing_bytes` family do.
 
 ## Data handling
 

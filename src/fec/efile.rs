@@ -13,6 +13,11 @@
 //! Both describe filings *as received*: before the FEC's processing, so
 //! before openFEC's `/filings/` knows about them, and including filings
 //! the FEC will later reject.
+//!
+//! The hosts come from [`Endpoints`]: [`EfileFeed::with_endpoints`] and
+//! [`daily_zip_filings_with`] take them explicitly; [`EfileFeed::new`]
+//! and [`daily_zip_url`] use the production defaults; [`daily_zip_filings`]
+//! reads [`Endpoints::from_env`].
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -20,12 +25,16 @@ use std::io::Read;
 use chrono::{DateTime, FixedOffset, NaiveDate};
 
 use super::cache::{Cache, write_atomically};
+use super::endpoints::Endpoints;
 use super::{FecApiError, Result, agent, get_ok, read_all};
 
-/// The FEC's "all filings" RSS feed.
-pub const FEED_URL: &str = "https://efilingapps.fec.gov/rss/generate?preDefinedFilingType=ALL";
+/// The FEC's "all filings" RSS feed: the production default of
+/// [`Endpoints::efile_rss_url`].
+pub const FEED_URL: &str = Endpoints::DEFAULT_EFILE_RSS_URL;
 
-/// Where the daily archives live; the file name is `YYYYMMDD.zip`.
+/// Where the daily archives live in production; the file name is
+/// `YYYYMMDD.zip`. [`Endpoints::daily_efile_zip`] builds the URL from the
+/// configured base.
 pub const DAILY_ZIP_BASE: &str = "https://www.fec.gov/files/bulk-downloads/electronic/";
 
 /// The first day with a daily archive (2001-02-01).
@@ -52,8 +61,10 @@ pub struct FeedItem {
     pub committee_name: Option<String>,
     /// When the FEC published the item (`pubDate`, else `dc:date`).
     pub published: Option<DateTime<FixedOffset>>,
-    /// The raw `.fec` URL, upgraded to `https` (the feed says `http` and
-    /// the document store redirects).
+    /// The raw `.fec` URL. The feed says `http://docquery.fec.gov`; the
+    /// host is rewritten to the configured document store
+    /// ([`Endpoints::rewrite_docquery`]), which at the default base means
+    /// `https://docquery.fec.gov` (the store redirects to it anyway).
     pub url: String,
     /// Report type description (`SEPTEMBER MONTHLY`), when given.
     pub report_type: Option<String>,
@@ -96,6 +107,8 @@ pub fn base_form_type(form_type: &str) -> &str {
 #[derive(Debug, Clone)]
 pub struct EfileFeed {
     url: String,
+    /// For rewriting each item's `docquery.fec.gov` link.
+    endpoints: Endpoints,
 }
 
 impl Default for EfileFeed {
@@ -105,17 +118,31 @@ impl Default for EfileFeed {
 }
 
 impl EfileFeed {
-    /// The feed at [`FEED_URL`].
+    /// The feed at [`FEED_URL`], with item links on the production
+    /// document store. Does not read the environment; see
+    /// [`EfileFeed::with_endpoints`].
     #[must_use]
     pub fn new() -> Self {
+        Self::with_endpoints(&Endpoints::default())
+    }
+
+    /// The feed at [`Endpoints::efile_rss`], with each item's link
+    /// rewritten to [`Endpoints::docquery_base`].
+    #[must_use]
+    pub fn with_endpoints(endpoints: &Endpoints) -> Self {
         EfileFeed {
-            url: FEED_URL.to_string(),
+            url: endpoints.efile_rss().to_string(),
+            endpoints: endpoints.clone(),
         }
     }
 
-    /// A feed at another URL (a mirror, or a fixture served locally).
+    /// A feed at another URL (a mirror, or a fixture served locally);
+    /// item links point at the production document store.
     pub fn with_url(url: impl Into<String>) -> Self {
-        EfileFeed { url: url.into() }
+        EfileFeed {
+            url: url.into(),
+            endpoints: Endpoints::default(),
+        }
     }
 
     /// The URL polled.
@@ -133,7 +160,7 @@ impl EfileFeed {
     pub fn poll(&self) -> Result<Vec<FeedItem>> {
         let response = get_ok(agent(), &self.url)?;
         let bytes = read_all(response)?;
-        parse_feed(&decode_feed(&bytes))
+        parse_feed_with(&decode_feed(&bytes), &self.endpoints)
     }
 }
 
@@ -146,8 +173,16 @@ fn decode_feed(bytes: &[u8]) -> String {
     }
 }
 
-/// Parses the feed's XML into items. Exposed so a captured feed can be
-/// parsed without the network.
+/// Parses the feed's XML into items, with item links on the production
+/// document store. Exposed so a captured feed can be parsed without the
+/// network. See [`parse_feed_with`].
+pub fn parse_feed(xml: &str) -> Result<Vec<FeedItem>> {
+    parse_feed_with(xml, &Endpoints::default())
+}
+
+/// Parses the feed's XML into items, rewriting each item's
+/// `docquery.fec.gov` link to `endpoints.docquery_base`
+/// ([`Endpoints::rewrite_docquery`]).
 ///
 /// The FEC's feed is plain RSS 2.0 with fixed element names, so this is
 /// a small tolerant extractor rather than a full XML parser: it finds
@@ -159,7 +194,7 @@ fn decode_feed(bytes: &[u8]) -> String {
 /// Fails with [`FecApiError::Rss`] if there is no `<rss>`/`<channel>`
 /// element at all (an error page, say). Items without a filing id are
 /// skipped, not fatal.
-pub fn parse_feed(xml: &str) -> Result<Vec<FeedItem>> {
+pub fn parse_feed_with(xml: &str, endpoints: &Endpoints) -> Result<Vec<FeedItem>> {
     if !(xml.contains("<rss") || xml.contains("<channel")) {
         let head: String = xml.chars().take(120).collect();
         return Err(FecApiError::Rss(format!(
@@ -177,7 +212,7 @@ pub fn parse_feed(xml: &str) -> Result<Vec<FeedItem>> {
             Some(end) => (&body[..end], &body[end + "</item>".len()..]),
             None => (body, ""),
         };
-        if let Some(item) = parse_item(item_xml) {
+        if let Some(item) = parse_item(item_xml, endpoints) {
             items.push(item);
         }
         rest = remaining;
@@ -185,7 +220,7 @@ pub fn parse_feed(xml: &str) -> Result<Vec<FeedItem>> {
     Ok(items)
 }
 
-fn parse_item(item: &str) -> Option<FeedItem> {
+fn parse_item(item: &str, endpoints: &Endpoints) -> Option<FeedItem> {
     let title = element_text(item, "title");
     let link = element_text(item, "link").unwrap_or_default();
     let description = element_text(item, "description").unwrap_or_default();
@@ -212,10 +247,10 @@ fn parse_item(item: &str) -> Option<FeedItem> {
         .or_else(|| {
             element_text(item, "dc:date").and_then(|d| DateTime::parse_from_rfc3339(d.trim()).ok())
         });
-    let url = if link.is_empty() {
-        super::docquery_url(filing_id)
+    let url = if link.trim().is_empty() {
+        endpoints.docquery_filing(filing_id)
     } else {
-        upgrade_docquery(&link)
+        endpoints.rewrite_docquery(&link)
     };
     Some(FeedItem {
         filing_id,
@@ -269,14 +304,6 @@ fn id_from_url(url: &str) -> Option<u64> {
         .unwrap_or(file)
         .parse::<u64>()
         .ok()
-}
-
-fn upgrade_docquery(url: &str) -> String {
-    let url = url.trim();
-    match url.strip_prefix("http://docquery.fec.gov") {
-        Some(rest) => format!("https://docquery.fec.gov{rest}"),
-        None => url.to_string(),
-    }
 }
 
 /// `MM/DD/YYYY` as the feed writes coverage dates.
@@ -392,14 +419,22 @@ pub(crate) fn decode_entities_lenient(s: &str) -> String {
     out
 }
 
-/// The URL of the daily archive for `date`.
+/// The URL of the daily archive for `date` on the production host:
+/// [`Endpoints::daily_efile_zip`] at the default base.
 #[must_use]
 pub fn daily_zip_url(date: NaiveDate) -> String {
-    format!("{DAILY_ZIP_BASE}{}.zip", date.format("%Y%m%d"))
+    Endpoints::default().daily_efile_zip(date)
 }
 
-/// Downloads (unless cached) the daily e-filing archive for `date` and
-/// returns an iterator over its filings as `(filing_id, bytes)`.
+/// [`daily_zip_filings_with`] at [`Endpoints::from_env`]. Fails with
+/// [`FecApiError::Endpoint`] if a `HARDMONEY_*` override is malformed.
+pub fn daily_zip_filings(date: NaiveDate, cache: &Cache) -> Result<DailyZipFilings> {
+    daily_zip_filings_with(date, cache, &Endpoints::from_env()?)
+}
+
+/// Downloads (unless cached) the daily e-filing archive for `date` from
+/// `endpoints.www_base` and returns an iterator over its filings as
+/// `(filing_id, bytes)`.
 ///
 /// The archive is kept at `<cache>/efile/YYYYMMDD.zip`. Entries whose
 /// name is not `<digits>.fec` are skipped.
@@ -410,7 +445,11 @@ pub fn daily_zip_url(date: NaiveDate) -> String {
 /// [`FecApiError::Zip`] if the file is not a zip, and
 /// [`FecApiError::Io`] on cache trouble. Individual entries that fail to
 /// read come back as `Err` items; the iterator continues past them.
-pub fn daily_zip_filings(date: NaiveDate, cache: &Cache) -> Result<DailyZipFilings> {
+pub fn daily_zip_filings_with(
+    date: NaiveDate,
+    cache: &Cache,
+    endpoints: &Endpoints,
+) -> Result<DailyZipFilings> {
     let today = chrono::Utc::now().date_naive();
     if date < FIRST_DAILY_ZIP || date > today {
         return Err(FecApiError::InvalidQuery(format!(
@@ -420,7 +459,7 @@ pub fn daily_zip_filings(date: NaiveDate, cache: &Cache) -> Result<DailyZipFilin
     }
     let path = cache.daily_zip_path(date);
     if !path.exists() {
-        let url = daily_zip_url(date);
+        let url = endpoints.daily_efile_zip(date);
         let response = get_ok(agent(), &url)?;
         let mut reader = response.into_body().into_reader();
         write_atomically(&path, |file| std::io::copy(&mut reader, file).map(|_| ()))?;
@@ -618,19 +657,53 @@ mod tests {
     #[test]
     fn daily_zip_rejects_dates_outside_the_archive() {
         let cache = Cache::at(std::env::temp_dir().join("hardmoney-never-created"));
+        let endpoints = Endpoints::default();
         let early = NaiveDate::from_ymd_opt(2001, 1, 31).unwrap();
         assert!(matches!(
-            daily_zip_filings(early, &cache),
+            daily_zip_filings_with(early, &cache, &endpoints),
             Err(FecApiError::InvalidQuery(_))
         ));
         let future = NaiveDate::from_ymd_opt(2200, 1, 1).unwrap();
         assert!(matches!(
-            daily_zip_filings(future, &cache),
+            daily_zip_filings_with(future, &cache, &endpoints),
             Err(FecApiError::InvalidQuery(_))
         ));
+        let day = NaiveDate::from_ymd_opt(2026, 9, 6).unwrap();
         assert_eq!(
-            daily_zip_url(NaiveDate::from_ymd_opt(2026, 9, 6).unwrap()),
+            daily_zip_url(day),
             "https://www.fec.gov/files/bulk-downloads/electronic/20260906.zip"
         );
+        // The legacy constant and the centralised default agree.
+        assert_eq!(daily_zip_url(day), format!("{DAILY_ZIP_BASE}20260906.zip"));
+        assert_eq!(FEED_URL, EfileFeed::new().url());
+    }
+
+    /// Feed-driven downloads follow a mirror: every item link is rebased
+    /// onto the configured document store, and an item without a link
+    /// gets the configured template.
+    #[test]
+    fn item_links_follow_the_configured_docquery_base() {
+        let mirror = Endpoints::default()
+            .with_docquery_base(super::super::Url::parse("https://mirror.example.gov/dq").unwrap());
+        let items = parse_feed_with(ITEM, &mirror).unwrap();
+        assert_eq!(
+            items[0].url,
+            "https://mirror.example.gov/dq/dcdev/posted/2011407.fec"
+        );
+        assert_eq!(
+            items[1].url,
+            "https://mirror.example.gov/dq/dcdev/posted/2011914.fec"
+        );
+        let no_link = r#"<rss><channel><item>
+            <description>FilingId: 42 | FormType: F3XN</description>
+        </item></channel></rss>"#;
+        let items = parse_feed_with(no_link, &mirror).unwrap();
+        assert_eq!(
+            items[0].url,
+            "https://mirror.example.gov/dq/dcdev/posted/42.fec"
+        );
+        let feed = EfileFeed::with_endpoints(&mirror);
+        assert_eq!(feed.url(), FEED_URL);
+        assert_eq!(feed.endpoints, mirror);
     }
 }

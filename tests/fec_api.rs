@@ -293,6 +293,94 @@ mod openfec {
         assert_eq!(handle.join().unwrap().len(), 2);
     }
 
+    /// The same local server reached through `Endpoints` instead of
+    /// `with_base_url`: the two set the same value, and the request goes
+    /// to the configured root.
+    #[test]
+    fn endpoints_point_the_client_at_a_local_server() {
+        use hardmoney::fec::{Endpoints, Url};
+
+        let (addr, handle) = serve_fixtures(
+            vec![(
+                "/v1/efile/filings/",
+                fixture("efile_filings_by_file_number.json"),
+            )],
+            1,
+        );
+        let endpoints = Endpoints::default()
+            .with_openfec_base(Url::parse(&format!("http://{addr}/v1")).unwrap());
+        let client = OpenFec::new(ApiKey::new("K").unwrap()).with_endpoints(&endpoints);
+        assert_eq!(client.base_url(), format!("http://{addr}/v1/"));
+        assert_eq!(
+            client.base_url(),
+            OpenFec::new(ApiKey::new("K").unwrap())
+                .with_base_url(format!("http://{addr}/v1"))
+                .base_url()
+        );
+        assert_eq!(
+            client.url("efile/filings/", "page=1"),
+            endpoints.openfec("efile/filings/", "api_key=REDACTED&page=1")
+        );
+        let url = client.resolve_fec_url(2011831).unwrap();
+        let seen = handle.join().unwrap();
+        assert!(
+            seen[0].starts_with("GET /v1/efile/filings/?api_key=K&"),
+            "{seen:?}"
+        );
+        assert!(
+            url.as_deref()
+                .is_some_and(|u| u.starts_with("https://docquery.fec.gov/dcdev/posted/")),
+            "{url:?}"
+        );
+    }
+
+    /// A raw-filing download follows the configured document store: the
+    /// production `docquery` URL openFEC or the feed hands out is rebased
+    /// onto `docquery_base`, and the bytes land in the cache.
+    #[test]
+    fn fetch_filing_bytes_with_rebases_hints_onto_the_configured_docquery() {
+        use hardmoney::fec::{Endpoints, Url, download_filing_bytes, fetch_filing_bytes_with};
+
+        const FEC: &str = "HDR\u{1c}FEC\u{1c}8.5\u{1c}test\r\n";
+        let (addr, handle) = serve_fixtures(vec![("/dq/dcdev/posted/", FEC.to_string())], 2);
+        let mirror = Endpoints::default()
+            .with_docquery_base(Url::parse(&format!("http://{addr}/dq/")).unwrap());
+        let root =
+            std::env::temp_dir().join(format!("hardmoney-fec-api-mirror-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cache = Cache::at(&root);
+
+        // The hint names production; the request goes to the mirror.
+        let bytes = fetch_filing_bytes_with(
+            2011407,
+            &cache,
+            Some("http://docquery.fec.gov/dcdev/posted/2011407.fec"),
+            &mirror,
+        )
+        .unwrap();
+        assert_eq!(bytes, FEC.as_bytes());
+        assert_eq!(
+            cache.read_filing(2011407).unwrap().as_deref(),
+            Some(FEC.as_bytes())
+        );
+        // Cached now: no request.
+        let again = fetch_filing_bytes_with(2011407, &cache, None, &mirror).unwrap();
+        assert_eq!(again, FEC.as_bytes());
+
+        // The direct, uncached download uses the template at the mirror.
+        assert_eq!(download_filing_bytes(99, &mirror).unwrap(), FEC.as_bytes());
+
+        let seen = handle.join().unwrap();
+        assert_eq!(
+            seen,
+            [
+                "GET /dq/dcdev/posted/2011407.fec HTTP/1.1",
+                "GET /dq/dcdev/posted/99.fec HTTP/1.1",
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn decodes_an_amendment_chain_page() {
         let page: Page<FilingRecord> =
@@ -928,6 +1016,98 @@ fn feed_client_defaults_to_the_fec_url() {
     );
     assert_eq!(EfileFeed::default().url(), feed.url());
     assert_eq!(EfileFeed::with_url("http://x/feed").url(), "http://x/feed");
+}
+
+/// Every host the crate used before `Endpoints` existed is the default it
+/// has now, as seen through the public constants and helpers that kept
+/// their names.
+#[test]
+fn endpoint_defaults_pin_the_previous_constants() {
+    use hardmoney::fec::efile::{DAILY_ZIP_BASE, FEED_URL, daily_zip_url};
+    use hardmoney::fec::{Endpoints, docquery_url};
+    use hardmoney::parser::webcheck::{DEFAULT_ENDPOINT, WebCheck};
+
+    let e = Endpoints::default();
+    assert_eq!(e.efile_rss(), FEED_URL);
+    assert_eq!(
+        e.daily_efile_zip(ymd(2026, 9, 6)),
+        format!("{DAILY_ZIP_BASE}20260906.zip")
+    );
+    assert_eq!(
+        e.daily_efile_zip(ymd(2026, 9, 6)),
+        daily_zip_url(ymd(2026, 9, 6))
+    );
+    assert_eq!(e.docquery_filing(2011915), docquery_url(2011915));
+    assert_eq!(
+        docquery_url(2011915),
+        "https://docquery.fec.gov/dcdev/posted/2011915.fec"
+    );
+    assert_eq!(e.webcheck_endpoint.as_str(), DEFAULT_ENDPOINT);
+    assert_eq!(
+        WebCheck::with_endpoints(&e).upload_url(),
+        WebCheck::new().upload_url()
+    );
+    #[cfg(feature = "serde")]
+    assert_eq!(
+        e.openfec_base.as_str(),
+        hardmoney::fec::openfec::OpenFec::BASE_URL
+    );
+    assert_eq!(
+        e.dump_readme(),
+        "https://www.fec.gov/files/bulk-downloads/data-dump/schedules/README.txt"
+    );
+    assert!(e.is_default());
+}
+
+/// A feed client built from mirrored endpoints polls the mirror's feed
+/// and rebases each item's link; the lookup-based constructor is how the
+/// CLI merges flags and variables without touching the process
+/// environment.
+#[test]
+fn feed_client_follows_endpoints_from_a_lookup() {
+    use hardmoney::fec::efile::parse_feed_with;
+    use hardmoney::fec::{EndpointError, Endpoints};
+
+    let vars = [
+        (Endpoints::EFILING_APPS_BASE_VAR, "https://apps.mirror.gov"),
+        (Endpoints::DOCQUERY_BASE_VAR, "https://dq.mirror.gov/store/"),
+    ];
+    let lookup = |var: &str| {
+        vars.iter()
+            .find(|(k, _)| *k == var)
+            .map(|(_, v)| v.to_string())
+    };
+    let endpoints = Endpoints::from_lookup(lookup).unwrap();
+    let feed = EfileFeed::with_endpoints(&endpoints);
+    assert_eq!(
+        feed.url(),
+        "https://apps.mirror.gov/rss/generate?preDefinedFilingType=ALL"
+    );
+    let items = parse_feed_with(&fixture("rss_sample.xml"), &endpoints).unwrap();
+    assert_eq!(items.len(), 10);
+    assert!(
+        items.iter().all(|i| i.url
+            == format!(
+                "https://dq.mirror.gov/store/dcdev/posted/{}.fec",
+                i.filing_id
+            )),
+        "{:?}",
+        items.iter().map(|i| i.url.as_str()).collect::<Vec<_>>()
+    );
+
+    // A malformed override fails before any request, naming the variable.
+    let err = Endpoints::from_lookup(|var| {
+        (var == Endpoints::DOCQUERY_BASE_VAR).then(|| "dq.mirror.gov".to_string())
+    })
+    .unwrap_err();
+    assert!(matches!(
+        &err,
+        EndpointError::InvalidOverride { var, .. } if *var == Endpoints::DOCQUERY_BASE_VAR
+    ));
+    assert_eq!(
+        err.to_string(),
+        "HARDMONEY_DOCQUERY_BASE is set to \"dq.mirror.gov\", which is not a usable URL: it must start with http:// or https://"
+    );
 }
 
 /// Polls the live feed once, as `hardmoney efile watch --once` does, and

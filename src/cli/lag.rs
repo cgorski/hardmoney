@@ -6,14 +6,16 @@
 
 use clap::Args;
 use hardmoney::Cycle;
-use hardmoney::fec::fetch_filing_bytes;
-use hardmoney::fec::openfec::{OpenFec, ProcessingStage, ProcessingStatus, ScheduleEndpoint};
+use hardmoney::fec::openfec::{
+    ApiKey, OpenFec, ProcessingStage, ProcessingStatus, ScheduleEndpoint,
+};
+use hardmoney::fec::{Endpoints, fetch_filing_bytes_with};
 use hardmoney::{Filing, ParseOptions, Table};
 use serde::Serialize;
 
 use super::CliResult;
 use super::filings::CacheArgs;
-use super::shared::columns;
+use super::shared::{EndpointArgs, columns};
 
 #[derive(Args, Debug)]
 pub struct LagArgs {
@@ -52,6 +54,9 @@ pub struct LagArgs {
 
     #[command(flatten)]
     pub cache: CacheArgs,
+
+    #[command(flatten)]
+    pub endpoints: EndpointArgs,
 }
 
 /// Raw versus processed row counts for one schedule of one filing.
@@ -164,9 +169,14 @@ fn row(status: ProcessingStatus, today: chrono::NaiveDate) -> LagRow {
 
 /// Fills `row.counts`: raw lines per schedule from the parsed filing,
 /// processed rows from the three schedule endpoints.
-fn add_counts(api: &OpenFec, cache: &hardmoney::fec::Cache, row: &mut LagRow) {
+fn add_counts(
+    api: &OpenFec,
+    cache: &hardmoney::fec::Cache,
+    endpoints: &Endpoints,
+    row: &mut LagRow,
+) {
     let id = row.status.filing_id;
-    let bytes = match fetch_filing_bytes(id, cache, row.status.fec_url.as_deref()) {
+    let bytes = match fetch_filing_bytes_with(id, cache, row.status.fec_url.as_deref(), endpoints) {
         Ok(b) => b,
         Err(e) => {
             row.errors.push(format!("download failed: {e}"));
@@ -319,7 +329,8 @@ fn print_summary(s: &LagSummary) {
 }
 
 pub fn run(args: LagArgs) -> CliResult {
-    let api = OpenFec::from_env()?;
+    let endpoints = args.endpoints.resolve()?;
+    let api = OpenFec::new(ApiKey::from_env()?).with_endpoints(&endpoints);
     let today = chrono::Utc::now().date_naive();
     let statuses = match (&args.committee, args.cycle) {
         (Some(committee), Some(cycle)) => api.committee_processing_status(
@@ -336,7 +347,7 @@ pub fn run(args: LagArgs) -> CliResult {
     if args.counts {
         let cache = args.cache.cache();
         for r in &mut rows {
-            add_counts(&api, &cache, r);
+            add_counts(&api, &cache, &endpoints, r);
         }
     }
     let summary = summarize(&rows);

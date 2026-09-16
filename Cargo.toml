@@ -1,7 +1,7 @@
 [package]
 build = "build.rs"
 name = "hardmoney"
-version = "3.1.0"
+version = "3.2.0"
 edition = "2024"
 rust-version = "1.94"
 license = "Apache-2.0 OR BSD-3-Clause"
@@ -103,7 +103,9 @@ default = ["fetch", "bulk", "api", "cli", "export"]
 fetch = ["dep:ureq", "dep:zip"]
 serde = ["dep:serde", "dep:serde_json", "rust_decimal/serde", "compact_str/serde"]
 export = ["dep:arrow", "dep:parquet", "dep:rusqlite", "serde"]
-bulk = ["dep:sqlx", "dep:whoami", "dep:zip", "dep:tokio", "dep:ureq", "dep:indicatif", "serde"]
+# `fetch` is included because the bulk downloaders build their URLs from
+# `fec::Endpoints` (the one place the FEC's hosts are configured).
+bulk = ["dep:sqlx", "dep:whoami", "dep:zip", "dep:tokio", "dep:ureq", "dep:indicatif", "serde", "fetch"]
 api = ["dep:axum", "dep:tower", "dep:tower-http", "dep:tracing", "dep:tracing-subscriber", "dep:tokio", "dep:rust-embed", "bulk", "serde"]
 cli = ["dep:clap", "dep:dotenvy", "bulk", "api", "fetch", "export"]
 

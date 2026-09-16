@@ -52,8 +52,11 @@ def parse_file(path: Union[str, os.PathLike[str]], *, lenient: bool = False) -> 
     """
 
 def fetch(filing_id: int) -> Filing:
-    """Download a filing from ``docquery.fec.gov/dcdev/posted/<filing_id>.fec``
-    and parse it strictly. Network failures raise :class:`FecError`."""
+    """Download a filing from ``https://docquery.fec.gov/dcdev/posted/<filing_id>.fec``
+    (or the same path under ``HARDMONEY_DOCQUERY_BASE`` when that environment
+    variable is set, for a mirror or the FEC's test environment) and parse it
+    strictly. Network failures, and a ``HARDMONEY_DOCQUERY_BASE`` that is not
+    an ``http(s)://`` URL, raise :class:`FecError`."""
 
 def tables() -> list[str]:
     """Every table hardmoney knows, by FEC-style name (``"F3X"``, ``"SchA"``,
@@ -159,6 +162,24 @@ class Filing:
         """Recompute every cover-page line from the schedules and other cover
         lines. Raises :class:`UnsupportedForm` unless the cover is F3X, F3,
         or F3P."""
+
+    def review(self, recipient: Optional[str] = None) -> Review:
+        """The Reports Analysis Division-style review: the deterministic
+        checks that lead to a Request for Additional Information (blank
+        employer/occupation over $200, contributions over the limit,
+        receipts dated after the period, missing treasurer signature,
+        earmarks counted twice, cover lines not supported by the schedules,
+        unexplained negative amounts, duplicate transactions). Never raises
+        for a parsed filing; a form without cover rules gets the
+        schedule-level checks only. Advisory: an observation is a question
+        to ask, not a violation found.
+
+        ``recipient`` names the committee's kind for the contribution
+        limit: ``"candidate"`` (per election), ``"pac"``,
+        ``"national-party"``, ``"state-party"`` (per calendar year), or
+        ``"unlimited"`` (no limit checked). By default Forms 3 and 3P are
+        candidates and a Form 3X, whose filer could be any of the rest, has
+        no limit checked. ``ValueError`` for any other name."""
 
     def __repr__(self) -> str:
         """``<hardmoney.Filing F3XN v8.5 (144 body lines)>``."""
@@ -415,3 +436,109 @@ class LineCheck:
     def __repr__(self) -> str:
         """``<hardmoney.LineCheck col A line 11(a)(i) ok>`` (``DIFF`` when the
         check fails)."""
+
+@final
+class Review:
+    """Every observation a RAD-style review makes of one filing, from
+    :meth:`Filing.review`.
+
+    Iterating yields :class:`Observation` objects in line order; ``len(r)``
+    is the number of observations; ``bool(r)`` is whether there are any;
+    ``str(r)`` prints one observation per line and a summary line, as
+    ``hardmoney review`` does.
+    """
+
+    @property
+    def observations(self) -> list[Observation]:
+        """Every observation, in line order (report-level ones last)."""
+
+    @property
+    def summary(self) -> dict[str, Any]:
+        """``{"observations": int, "amount_at_issue": Decimal, "by_concern":
+        {name: {"count": int, "amount": Decimal}}}``; amounts are the sums of
+        the observations' absolute amounts."""
+
+    @property
+    def concerns(self) -> list[str]:
+        """The concern names observed, in a fixed order."""
+
+    def by_concern(self, concern: str) -> list[Observation]:
+        """The observations for one concern name, e.g.
+        ``r.by_concern("cover_not_supported")``. ``ValueError`` for a name
+        that is not a concern."""
+
+    def has(self, concern: str) -> bool:
+        """True when at least one observation has the concern."""
+
+    def strict(self) -> list[Observation]:
+        """The observations whose concern is not heuristic (see
+        :attr:`Observation.heuristic`)."""
+
+    def __len__(self) -> int:
+        """The number of observations."""
+
+    def __iter__(self) -> Iterator[Observation]:
+        """Iterate over the observations in line order."""
+
+    def __bool__(self) -> bool:
+        """True when there is at least one observation."""
+
+    def __str__(self) -> str:
+        """One observation per line (see :meth:`Observation.__str__`), then
+        ``N observation(s) in K concern(s); amount at issue X`` or
+        ``no observations``."""
+
+    def __repr__(self) -> str:
+        """``<hardmoney.Review 25 observation(s) in 4 concern(s)>``."""
+
+@final
+class Observation:
+    """One thing a Reports Analysis Division analyst would ask about."""
+
+    @property
+    def concern(self) -> str:
+        """The concern's snake_case name: ``employer_occupation_missing``,
+        ``best_efforts_claimed``, ``over_limit_aggregate``,
+        ``date_outside_coverage``, ``treasurer_signature_missing``,
+        ``memo_double_count``, ``memo_without_parent``,
+        ``cover_not_supported``, ``negative_itemization``,
+        ``unitemized_inconsistent``, ``duplicate_transaction_id``,
+        ``duplicate_transaction``, or ``chain_cash_mismatch``."""
+
+    @property
+    def line_no(self) -> Optional[int]:
+        """1-based physical line in the ``.fec`` file (2 = cover), or ``None``
+        for an observation about the report as a whole."""
+
+    @property
+    def transaction_id(self) -> Optional[str]:
+        """The line's transaction id, when it has one."""
+
+    @property
+    def amount(self) -> Optional[decimal.Decimal]:
+        """The dollar amount at issue (the contribution, the excess over a
+        limit, the violation of a cover rule), or ``None``."""
+
+    @property
+    def detail(self) -> str:
+        """A complete sentence a treasurer or analyst could act on."""
+
+    @property
+    def rfai_request_type(self) -> Optional[int]:
+        """The openFEC ``request_type`` code of the RFAI letter this most
+        resembles (``2``, a report of receipts and expenditures), or ``None``
+        for the informational ``best_efforts_claimed``."""
+
+    @property
+    def heuristic(self) -> bool:
+        """True for concerns that fire on accepted filings often enough to be
+        weighed rather than trusted: ``memo_without_parent``,
+        ``unitemized_inconsistent``, ``duplicate_transaction``,
+        ``best_efforts_claimed``."""
+
+    def __str__(self) -> str:
+        """``employer_occupation_missing line 45 SA11AI.123 250.00: <detail>``
+        (``report`` instead of ``line N`` for a report-level observation)."""
+
+    def __repr__(self) -> str:
+        """``<hardmoney.Observation cover_not_supported line 2>``."""

@@ -704,6 +704,63 @@ async fn full_router_mounts_ui_and_tools_only_when_enabled() {
     assert_eq!(status, StatusCode::OK);
 }
 
+/// A one-shot local HTTP server answering `connections` requests with
+/// `body`, returning the request lines it saw.
+fn serve_bytes(
+    body: &'static [u8],
+    connections: usize,
+) -> (std::net::SocketAddr, std::thread::JoinHandle<Vec<String>>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        for _ in 0..connections {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = vec![0u8; 16384];
+            let n = stream.read(&mut buf).unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            seen.push(request.lines().next().unwrap_or("").to_string());
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+        }
+        seen
+    });
+    (addr, handle)
+}
+
+/// `GET /tools/fetch/{id}` downloads from the document store the API was
+/// configured with (`ApiConfig::endpoints`, here a local server standing
+/// in for a mirror), not from `docquery.fec.gov`.
+#[tokio::test]
+async fn tools_fetch_downloads_from_the_configured_docquery_base() {
+    use axum::extract::Extension;
+    use hardmoney::fec::{Endpoints, Url};
+
+    let (addr, handle) = serve_bytes(FIXTURE, 1);
+    let mirror = Endpoints::default()
+        .with_docquery_base(Url::parse(&format!("http://{addr}/mirror")).unwrap());
+    // The same layer `hardmoney::api::router` adds from `ApiConfig`.
+    let app = Router::new()
+        .merge(tools::router(Limits {
+            max_body_bytes: 1024 * 1024,
+        }))
+        .layer(Extension(mirror));
+
+    let (status, _, body) = get(&app, "/tools/fetch/2011827").await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let doc = json(&body);
+    assert_eq!(doc["line_count"], FIXTURE_LINES);
+    assert_eq!(doc["form_type"], "F3XA");
+    let seen = handle.join().unwrap();
+    assert_eq!(seen, ["GET /mirror/dcdev/posted/2011827.fec HTTP/1.1"]);
+}
+
 // ---------------------------------------------------------------------------
 // Accessibility invariants of the shell and the assets (WCAG 2.1 AA)
 // ---------------------------------------------------------------------------

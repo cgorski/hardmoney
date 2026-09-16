@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "hardmoney"
-version = "3.1.1"
+version = "3.2.0"
 description = "Read, validate, reconcile, edit, and write FEC electronic filings (.fec) with exact decimal money. Every spec version since 2001; typed; no dependencies."
 readme = "README.md"
 requires-python = ">=3.9"

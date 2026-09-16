@@ -3,8 +3,9 @@
 A thin wrapper over the Rust crate `hardmoney <https://crates.io/crates/hardmoney>`_:
 parse a filing (spec 3.x through 8.5), read any field by its canonical
 name, edit and write it back, validate it against the FEC's acceptance
-rules, and reconcile a cover page against its schedules -- with money as
-exact :class:`decimal.Decimal` values, never floats.
+rules, reconcile a cover page against its schedules, and review it the way
+the FEC's Reports Analysis Division does -- with money as exact
+:class:`decimal.Decimal` values, never floats.
 
 ::
 
@@ -25,7 +26,9 @@ from hardmoney._hardmoney import (
     Finding,
     Line,
     LineCheck,
+    Observation,
     Reconciliation,
+    Review,
     UnsupportedForm,
     Validation,
     __version__,
@@ -44,7 +47,9 @@ __all__ = [
     "Finding",
     "Line",
     "LineCheck",
+    "Observation",
     "Reconciliation",
+    "Review",
     "UnsupportedForm",
     "Validation",
     "__version__",

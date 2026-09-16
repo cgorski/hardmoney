@@ -19,6 +19,8 @@ use hardmoney::parser::webcheck::{Credentials, OracleDiff, OracleReport, WebChec
 use hardmoney::parser::{Severity, Validation};
 use hardmoney::{Filing, ParseOptions};
 
+use super::shared::EndpointArgs;
+
 /// An external validator to compare our findings against.
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Oracle {
@@ -61,6 +63,11 @@ pub struct ValidateArgs {
     /// for files over 20 MB). Ignored without `--webcheck-api-key`.
     #[arg(long, env = "WEBCHECK_EMAIL", hide_env_values = true)]
     pub webcheck_email: Option<String>,
+
+    // Only `--webcheck-endpoint` is used here; the other endpoint flags
+    // are accepted for uniformity across commands.
+    #[command(flatten)]
+    pub endpoints: EndpointArgs,
 }
 
 /// Non-zero exit without an "error:" chain from `main` -- the findings
@@ -200,7 +207,9 @@ fn ask_webcheck(
             None => c,
         }
     });
-    let report = WebCheck::new().submit(&filename, bytes, credentials.as_ref())?;
+    let endpoints = args.endpoints.resolve()?;
+    let report =
+        WebCheck::with_endpoints(&endpoints).submit(&filename, bytes, credentials.as_ref())?;
     let d = diff(ours, &report);
     Ok((report, d))
 }

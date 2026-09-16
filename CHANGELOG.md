@@ -1,5 +1,73 @@
 # Changelog
 
+## 3.2.0 — 2026-09-16
+
+- **Every FEC address is configurable, from one place.** New
+  `hardmoney::fec::Endpoints` holds the six bases the crate requests
+  (`www.fec.gov`, openFEC, `docquery.fec.gov`, `efilingapps.fec.gov`, the
+  e-file RSS URL, WebCheck), each defaulting to production and overridable
+  by environment variable (`HARDMONEY_FEC_WWW_BASE`,
+  `HARDMONEY_OPENFEC_BASE`, `HARDMONEY_DOCQUERY_BASE`,
+  `HARDMONEY_EFILINGAPPS_BASE`, `HARDMONEY_EFILE_RSS_URL`,
+  `HARDMONEY_WEBCHECK_ENDPOINT`), by builder (`with_*`), or by CLI flag
+  (`--fec-www-base`, `--openfec-base`, `--docquery-base`,
+  `--efile-rss-url`, `--webcheck-endpoint` on `filings`, `lag`, `efile
+  watch`/`backfill`, `bulk-load`, `bulk-load-all`, `bulk-restore-dump`,
+  `bulk-dump-info`, `bulk-load-filing`, `dumps check`/`import`/`status`/
+  `update`, `validate`, and `serve`). A malformed override fails before
+  any request with a message naming the variable; nothing falls back to
+  production silently. Links the FEC hands out for `docquery.fec.gov` (RSS
+  items, openFEC `fec_url`) are rebased onto the configured document
+  store, so a mirror works for feed- and API-driven downloads; `serve`
+  builds the `fec_url` in `/filings` responses from `--docquery-base` as
+  a bound SQL parameter and `/tools/fetch` downloads from it. Library
+  additions: `Endpoints`, `Url`, `EndpointError`, `fetch_filing_bytes_with`,
+  `resolve_fec_url_with`, `download_filing_bytes`, `daily_zip_filings_with`,
+  `parse_feed_with`, `EfileFeed::with_endpoints`, `OpenFec::with_endpoints`,
+  `WebCheck::from_env`/`with_endpoints`, `bulk::source::download_url_with`,
+  `BulkSource::doc_url`, `DumpSource::url`, `dump::remote_info_with`,
+  `dump::download_with`, `RestoreOptions::endpoints`, `ApiConfig::endpoints`,
+  and `FecApiError::Endpoint`/`DumpError::Endpoint`. `OpenFec::from_env`,
+  `fec::fetch_filing_bytes`, `resolve_fec_url`, `daily_zip_filings`,
+  `dump::remote_info`, `dump::download`, and `Filing::fetch` now read the
+  variables. Changed: `BulkSource.doc_url` is now the path field
+  `doc_path` plus a `doc_url(&Endpoints)` method, and `DumpSource.url` is
+  now `file_name` plus a `url(&Endpoints)` method; `Filing::fetch_bytes`
+  requests `https://docquery.fec.gov` directly instead of `http://` and
+  following the redirect. The `bulk` feature now implies `fetch`. Python:
+  `hardmoney.fetch` honours `HARDMONEY_DOCQUERY_BASE`. Book: the security
+  chapter's network table gains an override column and a section on
+  mirrors and proxies, with what `ureq` 3 does with the `*_PROXY`
+  variables.
+- **`hardmoney review`: the RAD-style checks that lead to an RFAI,
+  measured against the FEC's letters.** New `hardmoney::parser::review`
+  with `Filing::review()` / `review_with(&ReviewOptions)` and
+  `ReportChain::review()`, producing a `Review` of `Observation`s
+  (`concern`, `line_no`, `transaction_id`, `amount`, `detail`,
+  `rfai_request_type`) with a per-concern summary; thirteen `Concern`s,
+  each documented with its basis in 11 CFR or the form instructions:
+  employer/occupation blank over $200 (best-efforts language reported
+  separately), contributions over the limit for the recipient and cycle
+  (`CONTRIBUTION_LIMITS`, 2019-2026, per election for candidates with
+  redesignation memos netted, per year for PACs and parties), receipts
+  dated after the period, missing treasurer signature, earmarks counted
+  twice, memo entries without a parent, cover lines `reconcile` flags,
+  unexplained negative entries, unitemized totals inconsistent with
+  itemization, duplicate transaction ids and same-contributor repeats,
+  and, across a `ReportChain`, cash carry-forward, Column B, aggregates
+  crossing $200, and contributions repeated from earlier reports. CLI:
+  `hardmoney review <file|id>... [--recipient] [--with-prior] [--json]`,
+  exit 0 always, and `--eval --cycle YYYY [--sample N] [--rescore FILE]`,
+  which joins openFEC's `FRQ` letters to the reports they name by
+  committee and coverage period, reviews lettered and clean reports, and
+  prints precision, recall, F1, and per-concern lift. Measured on 2024
+  (98 lettered, 96 clean; 257 requests): precision 51% and recall 37% at
+  report level, precision 80% against committees with no letter; two
+  rules were narrowed by the result (pre-period dates, negative children
+  of counted parents). Python: `Filing.review(recipient=None)`,
+  `hardmoney.Review`, `hardmoney.Observation`. Book: "Reviewing a
+  filing", with the concern table, limits, method, and numbers.
+
 ## 3.1.1 — 2026-09-15 (Python package only)
 
 - `hardmoney.compat.fecfile_validate.validate_file` and `load_filing`

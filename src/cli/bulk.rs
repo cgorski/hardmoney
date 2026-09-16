@@ -7,7 +7,7 @@ use hardmoney::Cycle;
 use hardmoney::bulk::{self, Input, LoadMode, LoadOptions, LoadReport, dump};
 
 use super::db_args::DbArgs;
-use super::shared::{columns, default_dump_cache_dir};
+use super::shared::{EndpointArgs, columns, default_dump_cache_dir};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum ModeArg {
@@ -71,15 +71,22 @@ pub struct BulkLoadArgs {
     /// Load from a local zip instead of downloading from fec.gov.
     #[arg(long)]
     pub file: Option<PathBuf>,
+    #[command(flatten)]
+    pub endpoints: EndpointArgs,
 }
 
 pub async fn load(args: BulkLoadArgs) -> super::CliResult {
+    let endpoints = args.endpoints.resolve()?;
     let pool = args.db.connect_current().await?;
     let src = bulk::find_source(&args.source)
         .ok_or_else(|| bulk::BulkError::UnknownSource(args.source.clone()))?;
     let input = match args.file {
         Some(path) => Input::LocalFile(path),
-        None => Input::Url(bulk::source::download_url(src, args.flags.cycle)),
+        None => Input::Url(bulk::source::download_url_with(
+            src,
+            args.flags.cycle,
+            &endpoints,
+        )),
     };
     let report = bulk::load(&pool, src, input, args.flags.options()).await?;
     print_report(&report);
@@ -96,13 +103,16 @@ pub struct BulkLoadAllArgs {
     /// non-zero at the end if any failed).
     #[arg(long)]
     pub fail_fast: bool,
+    #[command(flatten)]
+    pub endpoints: EndpointArgs,
 }
 
 pub async fn load_all(args: BulkLoadAllArgs) -> super::CliResult {
+    let endpoints = args.endpoints.resolve()?;
     let pool = args.db.connect_current().await?;
     let mut failures: Vec<(&str, String)> = Vec::new();
     for src in bulk::source::ALL {
-        let url = bulk::source::download_url(src, args.flags.cycle);
+        let url = bulk::source::download_url_with(src, args.flags.cycle, &endpoints);
         eprintln!("loading {} from {url} ...", src.name);
         match bulk::load(&pool, src, Input::Url(url), args.flags.options()).await {
             Ok(report) => print_report(&report),
@@ -185,9 +195,12 @@ pub struct BulkRestoreDumpArgs {
     /// download resumes from its .partial file).
     #[arg(long, env = "HARDMONEY_CACHE_DIR", default_value_os_t = default_dump_cache_dir())]
     pub cache_dir: PathBuf,
+    #[command(flatten)]
+    pub endpoints: EndpointArgs,
 }
 
 pub async fn restore_dump(args: BulkRestoreDumpArgs) -> super::CliResult {
+    let endpoints = args.endpoints.resolve()?;
     let src = bulk::dump::find(&args.name)
         .ok_or_else(|| bulk::BulkError::UnknownDump(args.name.clone()))?;
     let pool = args.db.connect_current().await?;
@@ -196,7 +209,8 @@ pub async fn restore_dump(args: BulkRestoreDumpArgs) -> super::CliResult {
         .data_only(args.no_indexes)
         .allow_large(args.allow_large)
         .dump_file(args.dump_file.clone())
-        .jobs(args.jobs);
+        .jobs(args.jobs)
+        .endpoints(endpoints);
     let report =
         dump::restore_with(&pool, &args.db.database_url, src, &args.cache_dir, &options).await?;
 
@@ -278,12 +292,15 @@ pub struct BulkDumpInfoArgs {
     /// Where downloaded dumps are kept.
     #[arg(long, env = "HARDMONEY_CACHE_DIR", default_value_os_t = default_dump_cache_dir())]
     pub cache_dir: PathBuf,
+    #[command(flatten)]
+    pub endpoints: EndpointArgs,
 }
 
 /// `bulk-dump-info`: the four dumps, what the FEC is serving now, what is
 /// cached, what is in the database, and the restores this namespace has
 /// recorded.
 pub async fn dump_info(args: BulkDumpInfoArgs) -> super::CliResult {
+    let endpoints = args.endpoints.resolve()?;
     let pool = args.db.connect_current().await?;
 
     let header = [
@@ -299,7 +316,10 @@ pub async fn dump_info(args: BulkDumpInfoArgs) -> super::CliResult {
         let remote = if args.offline {
             None
         } else {
-            match tokio::task::spawn_blocking(move || dump::remote_info(src)).await? {
+            let endpoints = endpoints.clone();
+            match tokio::task::spawn_blocking(move || dump::remote_info_with(src, &endpoints))
+                .await?
+            {
                 Ok(r) => Some(r),
                 Err(e) => {
                     eprintln!("{}: {e}", src.name);
@@ -581,9 +601,12 @@ pub struct BulkLoadFilingArgs {
     /// ingest every file with this flag, then resolve the whole table once.
     #[arg(long)]
     pub no_resolve: bool,
+    #[command(flatten)]
+    pub endpoints: EndpointArgs,
 }
 
 pub async fn load_filing(args: BulkLoadFilingArgs) -> super::CliResult {
+    let endpoints = args.endpoints.resolve()?;
     let pool = args.db.connect_current().await?;
     let options = if args.strict {
         hardmoney::ParseOptions::STRICT
@@ -593,10 +616,13 @@ pub async fn load_filing(args: BulkLoadFilingArgs) -> super::CliResult {
 
     let (filing_id, bytes) = if let Ok(id) = args.filing.parse::<u64>() {
         let id_i64 = i64::try_from(id).map_err(|_| format!("filing id {id} out of range"))?;
-        eprintln!("fetching filing {id} from docquery.fec.gov ...");
+        eprintln!(
+            "fetching filing {id} from {} ...",
+            endpoints.docquery_filing(id)
+        );
         (
             args.filing_id.unwrap_or(id_i64),
-            hardmoney::Filing::fetch_bytes(id)?,
+            hardmoney::fec::download_filing_bytes(id, &endpoints)?,
         )
     } else {
         let path = std::path::Path::new(&args.filing);

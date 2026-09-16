@@ -3,12 +3,17 @@
 //! Column lists here were read directly from the FEC's own data
 //! dictionaries at `https://www.fec.gov/files/bulk-downloads/data_dictionaries/{name}_header_file.csv`
 //! (`weball`/`webk`/`webl` don't have a published dictionary CSV, so those
-//! three come from their file-description pages instead -- see the URL on
+//! three come from their file-description pages instead -- see the path on
 //! each [`BulkSource`]) and cross-checked against real downloaded files for
 //! the current cycle. See the crate README "Sources and provenance" for the
 //! full citation list.
+//!
+//! Download and documentation URLs are built from
+//! [`Endpoints::www_base`] ([`download_url_with`], [`BulkSource::doc_url`]),
+//! so a mirror set with `HARDMONEY_FEC_WWW_BASE` serves every file.
 
 use crate::Cycle;
+use crate::fec::Endpoints;
 
 /// One pipe-delimited FEC bulk file: where to download it, which table it
 /// loads into, and the column order of its un-headered rows.
@@ -21,12 +26,14 @@ pub struct BulkSource {
     /// Column names in the exact order fields appear in each source row
     /// (NOT including the `cycle` column, which the loader appends).
     pub columns: &'static [&'static str],
-    /// `https://www.fec.gov/files/bulk-downloads/{{cycle}}/{{stem}}{{yy}}.zip`
-    /// stem, e.g. `"cn"` for `cn26.zip`. The loader fills in the 4-digit
+    /// `{www_base}/files/bulk-downloads/{cycle}/{stem}{yy}.zip` stem, e.g.
+    /// `"cn"` for `cn26.zip`. [`download_url_with`] fills in the 4-digit
     /// cycle for the URL path and the 2-digit year for the filename.
     pub url_stem: &'static str,
-    /// The FEC page documenting this file's columns, cited in the README.
-    pub doc_url: &'static str,
+    /// The FEC page documenting this file's columns, as a path under
+    /// [`Endpoints::www_base`] (`files/bulk-downloads/data_dictionaries/cn_header_file.csv`);
+    /// [`BulkSource::doc_url`] makes it a URL. Cited in the README.
+    pub doc_path: &'static str,
     /// If the real data has strictly more pipe-delimited fields per row
     /// than `columns.len()` (a known upstream quirk, currently only true
     /// for `oppexp` -- fecgov/FEC#11052), extra trailing fields are
@@ -39,6 +46,15 @@ pub struct BulkSource {
     /// -- and the loader accepts both; anything unparseable becomes NULL
     /// and is counted in `LoadReport::dates_nulled`.
     pub date_columns: &'static [DateColumn],
+}
+
+impl BulkSource {
+    /// The FEC page documenting this file's columns, under
+    /// `endpoints.www_base`.
+    #[must_use]
+    pub fn doc_url(&self, endpoints: &Endpoints) -> String {
+        endpoints.bulk_doc(self.doc_path)
+    }
 }
 
 /// A raw text date column and the parsed `DATE` column derived from it.
@@ -79,7 +95,7 @@ pub const CANDIDATES: BulkSource = BulkSource {
         "cand_zip",
     ],
     url_stem: "cn",
-    doc_url: "https://www.fec.gov/files/bulk-downloads/data_dictionaries/cn_header_file.csv",
+    doc_path: "files/bulk-downloads/data_dictionaries/cn_header_file.csv",
     allow_extra_trailing_fields: false,
     date_columns: NO_DATES,
 };
@@ -105,7 +121,7 @@ pub const COMMITTEES: BulkSource = BulkSource {
         "cand_id",
     ],
     url_stem: "cm",
-    doc_url: "https://www.fec.gov/files/bulk-downloads/data_dictionaries/cm_header_file.csv",
+    doc_path: "files/bulk-downloads/data_dictionaries/cm_header_file.csv",
     allow_extra_trailing_fields: false,
     date_columns: NO_DATES,
 };
@@ -123,7 +139,7 @@ pub const CANDIDATE_COMMITTEE_LINKS: BulkSource = BulkSource {
         "linkage_id",
     ],
     url_stem: "ccl",
-    doc_url: "https://www.fec.gov/files/bulk-downloads/data_dictionaries/ccl_header_file.csv",
+    doc_path: "files/bulk-downloads/data_dictionaries/ccl_header_file.csv",
     allow_extra_trailing_fields: false,
     date_columns: NO_DATES,
 };
@@ -155,7 +171,7 @@ pub const SCHEDULE_A: BulkSource = BulkSource {
         "sub_id",
     ],
     url_stem: "indiv",
-    doc_url: "https://www.fec.gov/files/bulk-downloads/data_dictionaries/indiv_header_file.csv",
+    doc_path: "files/bulk-downloads/data_dictionaries/indiv_header_file.csv",
     allow_extra_trailing_fields: false,
     date_columns: TRANSACTION_DT,
 };
@@ -165,7 +181,7 @@ pub const COMMITTEE_TO_COMMITTEE_TRANSACTIONS: BulkSource = BulkSource {
     table: "committee_to_committee_transactions",
     columns: SCHEDULE_A.columns,
     url_stem: "oth",
-    doc_url: "https://www.fec.gov/files/bulk-downloads/data_dictionaries/oth_header_file.csv",
+    doc_path: "files/bulk-downloads/data_dictionaries/oth_header_file.csv",
     allow_extra_trailing_fields: false,
     date_columns: TRANSACTION_DT,
 };
@@ -198,7 +214,7 @@ pub const COMMITTEE_TO_CANDIDATE_TRANSACTIONS: BulkSource = BulkSource {
         "sub_id",
     ],
     url_stem: "pas2",
-    doc_url: "https://www.fec.gov/files/bulk-downloads/data_dictionaries/pas2_header_file.csv",
+    doc_path: "files/bulk-downloads/data_dictionaries/pas2_header_file.csv",
     allow_extra_trailing_fields: false,
     date_columns: TRANSACTION_DT,
 };
@@ -234,7 +250,7 @@ pub const DISBURSEMENTS: BulkSource = BulkSource {
         "back_ref_tran_id",
     ],
     url_stem: "oppexp",
-    doc_url: "https://www.fec.gov/files/bulk-downloads/data_dictionaries/oppexp_header_file.csv",
+    doc_path: "files/bulk-downloads/data_dictionaries/oppexp_header_file.csv",
     // Real oppexp.txt rows carry one extra trailing empty field beyond the
     // FEC's own 25-column header file (https://github.com/fecgov/FEC/issues/11052).
     allow_extra_trailing_fields: true,
@@ -247,7 +263,7 @@ pub const CANDIDATE_SUMMARY: BulkSource = BulkSource {
     table: "candidate_summary",
     columns: WEBALL_COLUMNS,
     url_stem: "weball",
-    doc_url: "https://www.fec.gov/campaign-finance-data/all-candidates-file-description/",
+    doc_path: "campaign-finance-data/all-candidates-file-description/",
     allow_extra_trailing_fields: false,
     date_columns: CVG_END_DT,
 };
@@ -257,7 +273,7 @@ pub const HOUSE_SENATE_SUMMARY: BulkSource = BulkSource {
     table: "house_senate_summary",
     columns: WEBALL_COLUMNS,
     url_stem: "webl",
-    doc_url: "https://www.fec.gov/campaign-finance-data/current-campaigns-house-and-senate-file-description/",
+    doc_path: "campaign-finance-data/current-campaigns-house-and-senate-file-description/",
     allow_extra_trailing_fields: false,
     date_columns: CVG_END_DT,
 };
@@ -328,7 +344,7 @@ pub const PAC_PARTY_SUMMARY: BulkSource = BulkSource {
         "cvg_end_dt",
     ],
     url_stem: "webk",
-    doc_url: "https://www.fec.gov/campaign-finance-data/pac-and-party-summary-file-description/",
+    doc_path: "campaign-finance-data/pac-and-party-summary-file-description/",
     allow_extra_trailing_fields: false,
     date_columns: CVG_END_DT,
 };
@@ -353,15 +369,22 @@ pub fn find(name: &str) -> Option<&'static BulkSource> {
     ALL.iter().copied().find(|s| s.name == name)
 }
 
-/// Builds the bulk-download URL for `source` at `cycle`, matching the FEC's
-/// own directory layout:
+/// The production bulk-download URL for `source` at `cycle`:
 /// `https://www.fec.gov/files/bulk-downloads/{cycle}/{stem}{yy}.zip`.
+/// [`download_url_with`] at the default [`Endpoints`]; use that to honour
+/// a `HARDMONEY_FEC_WWW_BASE` override.
+#[must_use]
 pub fn download_url(source: &BulkSource, cycle: Cycle) -> String {
-    format!(
-        "https://www.fec.gov/files/bulk-downloads/{cycle}/{stem}{yy:02}.zip",
-        stem = source.url_stem,
-        yy = cycle.two_digit(),
-    )
+    download_url_with(source, cycle, &Endpoints::default())
+}
+
+/// Builds the bulk-download URL for `source` at `cycle` under
+/// `endpoints.www_base`, matching the FEC's own directory layout:
+/// `{www_base}/files/bulk-downloads/{cycle}/{stem}{yy}.zip`
+/// ([`Endpoints::bulk_zip`]).
+#[must_use]
+pub fn download_url_with(source: &BulkSource, cycle: Cycle, endpoints: &Endpoints) -> String {
+    endpoints.bulk_zip(cycle, source.url_stem)
 }
 
 #[cfg(test)]
@@ -409,6 +432,31 @@ mod tests {
             download_url(&DISBURSEMENTS, Cycle::new(2026).unwrap()),
             "https://www.fec.gov/files/bulk-downloads/2026/oppexp26.zip"
         );
+    }
+
+    #[test]
+    fn urls_follow_a_configured_www_base() {
+        let mirror = Endpoints::default()
+            .with_www_base(crate::fec::Url::parse("https://mirror.example.gov/fec/").unwrap());
+        assert_eq!(
+            download_url_with(&CANDIDATES, Cycle::new(2026).unwrap(), &mirror),
+            "https://mirror.example.gov/fec/files/bulk-downloads/2026/cn26.zip"
+        );
+        assert_eq!(
+            CANDIDATES.doc_url(&mirror),
+            "https://mirror.example.gov/fec/files/bulk-downloads/data_dictionaries/cn_header_file.csv"
+        );
+        assert_eq!(
+            CANDIDATE_SUMMARY.doc_url(&Endpoints::default()),
+            "https://www.fec.gov/campaign-finance-data/all-candidates-file-description/"
+        );
+        for source in ALL {
+            assert!(
+                !source.doc_path.starts_with('/') && !source.doc_path.contains("://"),
+                "{}: doc_path must be relative to www_base",
+                source.name
+            );
+        }
     }
 
     #[test]

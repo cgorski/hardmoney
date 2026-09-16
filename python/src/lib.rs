@@ -18,6 +18,7 @@
 mod error;
 mod filing;
 mod reconcile;
+mod review;
 mod spec;
 mod validate;
 
@@ -37,6 +38,8 @@ mod _hardmoney {
     use crate::filing::{Filing, Line, fetch, parse, parse_file};
     #[pymodule_export]
     use crate::reconcile::{LineCheck, Reconciliation};
+    #[pymodule_export]
+    use crate::review::{Observation, Review};
     #[pymodule_export]
     use crate::spec::{field_spec, layout, tables};
     #[pymodule_export]

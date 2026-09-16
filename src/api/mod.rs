@@ -42,6 +42,16 @@
 //! key); set an allow-list and a key before exposing the server publicly.
 //! Database errors are never echoed to clients (see [`error::ApiError`]),
 //! and the request log records `?api_key=` as `api_key=REDACTED`.
+//!
+//! # FEC hosts
+//!
+//! [`ApiConfig::endpoints`] says where the FEC's document store is: the
+//! `fec_url` on every `/filings` response is built from its
+//! `docquery_base`, and `GET /tools/fetch/{id}` downloads from there. The
+//! default is production; `hardmoney serve --docquery-base` (or
+//! `HARDMONEY_DOCQUERY_BASE`) points a deployment at a mirror.
+//! `/filings/{id}/processing` reads its openFEC host from the environment
+//! at request time ([`crate::fec::openfec::OpenFec::from_env`]).
 
 pub mod error;
 pub mod pagination;
@@ -51,7 +61,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::Request;
+use axum::extract::{Extension, Request};
 use axum::http::{HeaderValue, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -61,6 +71,8 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
+
+use crate::fec::Endpoints;
 
 pub use error::ApiError;
 
@@ -85,6 +97,12 @@ pub struct ApiConfig {
     /// Serve the browser UI at `/ui` and the filing tools at `/tools/*`.
     /// Off by default.
     pub ui: bool,
+    /// Where the FEC's hosts are. `docquery_base` is what the `fec_url` of
+    /// every `/filings` row is built from and where `GET /tools/fetch/{id}`
+    /// downloads. Production by default; [`ApiConfig::new`] does not read
+    /// the environment, so pass [`Endpoints::from_env`] to honour
+    /// `HARDMONEY_DOCQUERY_BASE`.
+    pub endpoints: Endpoints,
 }
 
 impl ApiConfig {
@@ -103,7 +121,15 @@ impl ApiConfig {
             api_key: None,
             max_body_bytes: Self::DEFAULT_MAX_BODY_BYTES,
             ui: false,
+            endpoints: Endpoints::default(),
         }
+    }
+
+    /// Sets [`ApiConfig::endpoints`].
+    #[must_use]
+    pub fn endpoints(mut self, endpoints: Endpoints) -> Self {
+        self.endpoints = endpoints;
+        self
     }
 
     pub fn request_timeout(mut self, d: Duration) -> Self {
@@ -181,10 +207,13 @@ pub fn router(pool: PgPool, config: &ApiConfig) -> Router {
             max_body_bytes: config.max_body_bytes,
         }));
     }
-    let protected = protected.layer(middleware::from_fn_with_state(
-        config.api_key.clone(),
-        require_api_key,
-    ));
+    let protected = protected
+        .layer(middleware::from_fn_with_state(
+            config.api_key.clone(),
+            require_api_key,
+        ))
+        // The routes that build or fetch a document-store URL read this.
+        .layer(Extension(config.endpoints.clone()));
 
     let mut app = Router::new()
         .route("/health", get(routes::status::health))
@@ -353,6 +382,20 @@ mod tests {
     fn api_key_empty_string_means_none() {
         let c = ApiConfig::new("127.0.0.1:0".parse().unwrap()).api_key(Some(String::new()));
         assert!(c.api_key.is_none());
+    }
+
+    #[test]
+    fn endpoints_default_to_production_and_can_be_set() {
+        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        assert!(ApiConfig::new(bind).endpoints.is_default());
+        let mirror = Endpoints::default()
+            .with_docquery_base(crate::fec::Url::parse("https://mirror.example.gov/dq").unwrap());
+        let c = ApiConfig::new(bind).endpoints(mirror.clone());
+        assert_eq!(c.endpoints, mirror);
+        assert_eq!(
+            c.endpoints.docquery_filing_prefix(),
+            "https://mirror.example.gov/dq/dcdev/posted/"
+        );
     }
 
     #[test]

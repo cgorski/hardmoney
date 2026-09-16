@@ -164,7 +164,13 @@ rather than failing.
 
 Four flags act on each filing the query returns. All of them download the
 raw `.fec` first (from `fec_url`, falling back to
-`https://docquery.fec.gov/dcdev/posted/<id>.fec`), through the cache:
+`https://docquery.fec.gov/dcdev/posted/<id>.fec`), through the cache.
+Every host on this page is a default: `--openfec-base`,
+`--docquery-base`, `--efile-rss-url`, and `--fec-www-base` (or the
+`HARDMONEY_*` variables they read) point these commands at a mirror or
+the FEC's test environment, and a `docquery.fec.gov` link in a feed item
+or a `fec_url` is rebased onto `--docquery-base` before the download
+([Security and provenance](./security-and-provenance.md#pointing-hardmoney-at-a-mirror-or-proxy)):
 
 * `--fetch DIR` copies it to `DIR/<id>.fec`;
 * `--validate` runs the FEC's acceptance rules (the same check as

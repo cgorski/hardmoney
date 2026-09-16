@@ -127,6 +127,7 @@ Facts below were checked against each project's source in September 2026.
 | Writes `.fec` files | yes, round-trip exact | no | no | no | no | yes (5 form types) |
 | Validates against FEC rules | yes, 41 rules implementing the FEC's published failing and warning messages; checked against the FEC's WebCheck | no | field-count warnings | no | no | no (users are told to run WebCheck separately) |
 | Cover page vs. schedules | F3X, F3, F3P, incl. allocation schedules H3–H6; Column B and cash-on-hand carry-forward across a committee's chain of reports | no | no | no | no | F3X only, five lines stubbed to zero; F3 computed as all zeros |
+| RAD-style review checks (RFAI predictors), measured against FEC letters | yes (`review`) | no | no | no | no | no |
 | Compile-time-checked field access | yes (`Field<T>`) | – | – | no | no | – |
 | Machine-readable spec, version diff | yes (`spec export` as JSON, JSON Schema, or CSV; `spec diff`; weekly drift check against the FEC's sources) | no | no | no | no | no (its spreadsheet-vs-schema checker is unmaintained) |
 | Streaming large filings | yes (9.8 MB RSS on a 135 MB file) | yes | yes | yes | yes | – |
@@ -181,6 +182,22 @@ carry unitemized amounts are checked as floors. On the FEC's own test data
 it agrees with FECfile+ on every line FECfile+ computes, and it computes
 the allocation lines FECfile+ leaves at zero. Of 109 real reports, 95
 balance exactly; the rest have genuine discrepancies.
+
+**Review.** `hardmoney review` runs the checks a Reports Analysis Division
+analyst makes before sending a Request for Additional Information: donors
+over the $200 aggregate with no employer or occupation, aggregates over
+the contribution limit, dates outside the coverage period, missing
+treasurer signature, memo double counting, cover lines unsupported by
+their schedules, and cash-on-hand mismatches across a committee's chain of
+reports. Each check cites its regulation. Measured against the FEC's public
+RFAI letters for the 2024 cycle (98 lettered reports vs 96 clean ones):
+51% precision, 37% recall for "any observation"; the chapter explains why
+recall is bounded (letters cite things a file cannot show).
+
+**Configurable endpoints.** Every FEC address (fec.gov downloads, openFEC,
+docquery, the e-file feed, WebCheck) has the production default and can be
+overridden with an environment variable or CLI flag for a mirror, proxy, or
+test environment; an invalid override fails at startup.
 
 **Discovery and feed.** `hardmoney filings --committee C… --most-recent`
 lists a committee's filings through openFEC and can fetch, validate,
@@ -243,6 +260,7 @@ One filing, no database:
 hardmoney parse filing.fec --lenient        # JSON summary, with any skipped lines and why
 hardmoney validate filing.fec               # the FEC's acceptance rules
 hardmoney reconcile filing.fec              # cover page vs. schedules
+hardmoney review filing.fec                 # the checks behind an RFAI
 hardmoney write --check filing.fec          # does it round-trip?
 hardmoney export filing.fec --format parquet --out out/
 hardmoney spec fields SchA --version 6.4    # where each Schedule A field was in spec 6.4

@@ -11,15 +11,15 @@ use std::path::{Path, PathBuf};
 use clap::Args;
 use hardmoney::Cycle;
 use hardmoney::db::Namespace;
-use hardmoney::fec::openfec::{FilingRecord, FilingsQuery, OpenFec};
-use hardmoney::fec::{Cache, fetch_filing_bytes};
+use hardmoney::fec::openfec::{ApiKey, FilingRecord, FilingsQuery, OpenFec};
+use hardmoney::fec::{Cache, Endpoints, fetch_filing_bytes_with};
 use hardmoney::parser::reconcile::{Coverage, ReportChain, coverage};
 use hardmoney::{Filing, ParseOptions};
 use serde::Serialize;
 
 use super::CliResult;
 use super::db_args::DbArgs;
-use super::shared::columns;
+use super::shared::{EndpointArgs, columns};
 
 /// `--cache-dir`, shared by every command that downloads raw filings.
 #[derive(Args, Debug, Clone)]
@@ -396,8 +396,12 @@ pub struct FilingsArgs {
 
     #[command(flatten)]
     pub cache: CacheArgs,
+
+    #[command(flatten)]
+    pub endpoints: EndpointArgs,
 }
 
+/// One report's place in the chain
 /// One report's place in a chain, for `--reconcile-chain`. Serialised as
 /// the `chain` object of `--json` output.
 #[derive(Debug, Default, Serialize)]
@@ -424,7 +428,11 @@ pub struct ChainSummary {
 /// Downloads (cache-first) and parses every e-filed record, orders the
 /// reports by coverage, and reconciles each against the ones before it on
 /// the same form. Returns one summary per filing id, in coverage order.
-fn reconcile_chain(records: &[FilingRecord], cache: &Cache) -> Vec<(u64, ChainSummary)> {
+fn reconcile_chain(
+    records: &[FilingRecord],
+    cache: &Cache,
+    endpoints: &Endpoints,
+) -> Vec<(u64, ChainSummary)> {
     let mut loaded: Vec<(u64, Filing, Coverage)> = Vec::new();
     let mut out: Vec<(u64, ChainSummary)> = Vec::new();
     for record in records {
@@ -441,7 +449,8 @@ fn reconcile_chain(records: &[FilingRecord], cache: &Cache) -> Vec<(u64, ChainSu
                 },
             )
         };
-        let bytes = match fetch_filing_bytes(id, cache, record.raw_url().as_deref()) {
+        let bytes = match fetch_filing_bytes_with(id, cache, record.raw_url().as_deref(), endpoints)
+        {
             Ok(b) => b,
             Err(e) => {
                 out.push(failed(format!("download failed: {e}")));
@@ -587,8 +596,10 @@ pub async fn run(args: FilingsArgs) -> CliResult {
         );
     }
 
-    // Fail on a missing key or database before any request is made.
-    let api = OpenFec::from_env()?;
+    // Fail on a bad endpoint, a missing key, or a missing database before
+    // any request is made.
+    let endpoints = args.endpoints.resolve()?;
+    let api = OpenFec::new(ApiKey::from_env()?).with_endpoints(&endpoints);
     let pool = args.db.pool_if(args.ingest).await?;
     let mut query = FilingsQuery::new();
     if let Some(c) = &args.committee {
@@ -648,7 +659,12 @@ pub async fn run(args: FilingsArgs) -> CliResult {
         let mut outcome = None;
         if actions.any() {
             outcome = Some(match record.filing_id() {
-                Some(id) => match fetch_filing_bytes(id, &cache, record.raw_url().as_deref()) {
+                Some(id) => match fetch_filing_bytes_with(
+                    id,
+                    &cache,
+                    record.raw_url().as_deref(),
+                    &endpoints,
+                ) {
                     Ok(bytes) => apply(&actions, id, &bytes, Some(&cache.filing_path(id))).await,
                     Err(e) => Outcome {
                         errors: vec![format!("download failed: {e}")],
@@ -683,7 +699,7 @@ pub async fn run(args: FilingsArgs) -> CliResult {
     }
 
     if args.reconcile_chain {
-        let rows = reconcile_chain(&records, &cache);
+        let rows = reconcile_chain(&records, &cache, &endpoints);
         if args.json {
             let by_id: HashMap<u64, &ChainSummary> = rows.iter().map(|(id, s)| (*id, s)).collect();
             for row in &mut json_rows {

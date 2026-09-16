@@ -164,7 +164,10 @@ The files live under
 redirects to an S3 bucket in `us-gov-west-1`. The FEC's own
 [`README.txt`](https://www.fec.gov/files/bulk-downloads/data-dump/schedules/README.txt)
 in that directory is the only documentation; the figures below that are
-not from hardmoney's own inspection are from it.
+not from hardmoney's own inspection are from it. A mirror that keeps
+the same paths under another host is selected with `--fec-www-base` (or
+`HARDMONEY_FEC_WWW_BASE`) on every `dumps` and `bulk-*` command
+([Security and provenance](./security-and-provenance.md#pointing-hardmoney-at-a-mirror-or-proxy)).
 
 | hardmoney name | file | table (schema `disclosure`) | size, 13 Sept 2026 | rows (FEC README, Aug 2020) |
 |---|---|---|---|---|

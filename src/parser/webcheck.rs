@@ -91,6 +91,7 @@ use std::time::Duration;
 
 use regex::Regex;
 
+use crate::fec::{EndpointError, Endpoints};
 use crate::parser::form::table_for_form_type;
 use crate::parser::tables::Table;
 use crate::parser::validate::{Finding, Rule, Severity, Validation};
@@ -99,8 +100,9 @@ use crate::parser::validate::{Finding, Rule, Severity, Validation};
 // Endpoints and client
 // ---------------------------------------------------------------------------
 
-/// The WebCheck application's base URL.
-pub const DEFAULT_ENDPOINT: &str = "https://efoservices.fec.gov/webcheck";
+/// The WebCheck application's production base URL: the default of
+/// [`Endpoints::webcheck_endpoint`].
+pub const DEFAULT_ENDPOINT: &str = Endpoints::DEFAULT_WEBCHECK_ENDPOINT;
 
 /// Path (under the endpoint) of the credential-free multipart upload the
 /// WebCheck web page uses.
@@ -172,7 +174,11 @@ impl Default for WebCheck {
 }
 
 impl WebCheck {
-    /// A client for the live service at [`DEFAULT_ENDPOINT`].
+    /// A client for the live service at [`DEFAULT_ENDPOINT`]. Does not
+    /// read the environment: an infallible constructor cannot report a
+    /// malformed override, so the `HARDMONEY_WEBCHECK_ENDPOINT` variable
+    /// is honoured by [`WebCheck::from_env`] (and by the CLI's
+    /// `--webcheck-endpoint`), not here.
     ///
     /// Generous timeouts: WebCheck warns of delays during heavy filing
     /// periods, and a large filing's report can run to tens of megabytes.
@@ -181,7 +187,23 @@ impl WebCheck {
         Self::with_endpoint(DEFAULT_ENDPOINT)
     }
 
-    /// A client for another base URL (a mirror, or a test server).
+    /// A client for [`Endpoints::webcheck_endpoint`] as read from the
+    /// environment ([`Endpoints::from_env`]): the live service unless
+    /// `HARDMONEY_WEBCHECK_ENDPOINT` is set. Fails, naming the variable,
+    /// if an override is not a usable URL; never falls back silently.
+    pub fn from_env() -> Result<Self, EndpointError> {
+        Ok(Self::with_endpoints(&Endpoints::from_env()?))
+    }
+
+    /// A client for [`Endpoints::webcheck_endpoint`].
+    #[must_use]
+    pub fn with_endpoints(endpoints: &Endpoints) -> Self {
+        Self::with_endpoint(endpoints.webcheck_endpoint.as_str())
+    }
+
+    /// A client for another base URL (a mirror, or a test server). Sets
+    /// the same value as [`WebCheck::with_endpoints`], without the URL
+    /// check.
     #[must_use]
     pub fn with_endpoint(endpoint: impl Into<String>) -> Self {
         let agent = ureq::Agent::config_builder()
@@ -197,16 +219,17 @@ impl WebCheck {
         }
     }
 
-    /// The URL of the public upload channel.
+    /// The URL of the public upload channel: [`UPLOAD_PATH`] under the
+    /// endpoint.
     #[must_use]
     pub fn upload_url(&self) -> String {
-        format!("{}{UPLOAD_PATH}", self.endpoint)
+        format!("{}{UPLOAD_PATH}", self.endpoint.trim_end_matches('/'))
     }
 
-    /// The URL of the SOAP service.
+    /// The URL of the SOAP service: [`SOAP_PATH`] under the endpoint.
     #[must_use]
     pub fn soap_url(&self) -> String {
-        format!("{}{SOAP_PATH}", self.endpoint)
+        format!("{}{SOAP_PATH}", self.endpoint.trim_end_matches('/'))
     }
 
     /// Submits `bytes` (named `filename`; WebCheck's page accepts only

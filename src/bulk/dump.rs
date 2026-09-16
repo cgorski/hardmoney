@@ -47,6 +47,15 @@
 //! not by the exit code, and drops the tables it is about to restore
 //! first so a re-restore is a clean refresh rather than a pile of ignored
 //! errors.
+//!
+//! # Where the files come from
+//!
+//! Each dump's URL is [`DumpSource::url`] under [`Endpoints::www_base`]
+//! (`HARDMONEY_FEC_WWW_BASE`). [`remote_info_with`], [`download_with`],
+//! and [`RestoreOptions::endpoints`] take the endpoints explicitly;
+//! [`remote_info`], [`download`], and a `RestoreOptions` without them
+//! read [`Endpoints::from_env`] and fail with [`DumpError::Endpoint`] on
+//! a malformed override.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -57,8 +66,10 @@ use sqlx::PgPool;
 
 use super::error::BulkError;
 use crate::Cycle;
+use crate::fec::{EndpointError, Endpoints};
 
-/// Directory listing of the FEC's dump files.
+/// Directory listing of the FEC's dump files, on the production host:
+/// [`Endpoints::dump_readme`] at the default base.
 pub const INDEX_URL: &str =
     "https://www.fec.gov/files/bulk-downloads/data-dump/schedules/README.txt";
 
@@ -71,7 +82,9 @@ pub const LOAD_SOURCE_PREFIX: &str = "dump:";
 #[non_exhaustive]
 pub struct DumpSource {
     pub name: &'static str,
-    pub url: &'static str,
+    /// The archive's file name in the FEC's dump directory
+    /// (`fec_fitem_sched_e.dump`); [`DumpSource::url`] makes it a URL.
+    pub file_name: &'static str,
     /// Size observed in September 2026; the two large dumps grow every
     /// week (the FEC says they double every 2.5 years).
     pub approx_size_bytes: u64,
@@ -85,6 +98,15 @@ pub struct DumpSource {
     pub partitioned_by_cycle: bool,
     /// The indexes [`create_indexes`] builds on each restored table.
     pub indexes: &'static [IndexSpec],
+}
+
+impl DumpSource {
+    /// Where to download the archive: [`DumpSource::file_name`] in the
+    /// dump directory under `endpoints.www_base` ([`Endpoints::dump`]).
+    #[must_use]
+    pub fn url(&self, endpoints: &Endpoints) -> String {
+        endpoints.dump(self.file_name)
+    }
 }
 
 /// An index [`create_indexes`] creates on a restored dump table.
@@ -200,7 +222,7 @@ const COMMITTEE_HISTORY_INDEXES: [IndexSpec; 3] = [
 
 pub const SCHEDULE_E: DumpSource = DumpSource {
     name: "schedule_e",
-    url: "https://www.fec.gov/files/bulk-downloads/data-dump/schedules/fec_fitem_sched_e.dump",
+    file_name: "fec_fitem_sched_e.dump",
     approx_size_bytes: 43_440_933,
     is_large: false,
     disclosure_table: "fec_fitem_sched_e",
@@ -210,7 +232,7 @@ pub const SCHEDULE_E: DumpSource = DumpSource {
 
 pub const COMMITTEE_HISTORY: DumpSource = DumpSource {
     name: "committee_history",
-    url: "https://www.fec.gov/files/bulk-downloads/data-dump/schedules/ofec_committee_history.dump",
+    file_name: "ofec_committee_history.dump",
     approx_size_bytes: 14_190_177,
     is_large: false,
     disclosure_table: "ofec_committee_history",
@@ -220,7 +242,7 @@ pub const COMMITTEE_HISTORY: DumpSource = DumpSource {
 
 pub const SCHEDULE_A: DumpSource = DumpSource {
     name: "schedule_a_full",
-    url: "https://www.fec.gov/files/bulk-downloads/data-dump/schedules/fec_fitem_sched_a.dump",
+    file_name: "fec_fitem_sched_a.dump",
     approx_size_bytes: 90_181_919_946,
     is_large: true,
     disclosure_table: "fec_fitem_sched_a",
@@ -230,7 +252,7 @@ pub const SCHEDULE_A: DumpSource = DumpSource {
 
 pub const SCHEDULE_B: DumpSource = DumpSource {
     name: "schedule_b_full",
-    url: "https://www.fec.gov/files/bulk-downloads/data-dump/schedules/fec_fitem_sched_b.dump",
+    file_name: "fec_fitem_sched_b.dump",
     approx_size_bytes: 39_313_945_474,
     is_large: true,
     disclosure_table: "fec_fitem_sched_b",
@@ -325,6 +347,11 @@ pub enum DumpError {
     /// A blocking task panicked or was cancelled.
     #[error("background task failed: {0}")]
     Task(#[from] tokio::task::JoinError),
+
+    /// A `HARDMONEY_*` endpoint override is not a usable URL (see
+    /// [`Endpoints::from_env`]). Raised before any request is made.
+    #[error("{0}")]
+    Endpoint(#[from] EndpointError),
 }
 
 impl From<DumpError> for BulkError {
@@ -334,6 +361,11 @@ impl From<DumpError> for BulkError {
             DumpError::Database(e) => BulkError::Database(e),
             DumpError::Task(e) => BulkError::Task(e),
             DumpError::Http { url, detail } => BulkError::Http { url, detail },
+            // The nearest variant: the download could not even be addressed.
+            DumpError::Endpoint(e) => BulkError::Http {
+                url: e.value().to_string(),
+                detail: e.to_string(),
+            },
             DumpError::ExternalTool { tool, detail } => BulkError::ExternalTool { tool, detail },
             other => BulkError::ExternalTool {
                 tool: "pg_restore",
@@ -717,10 +749,18 @@ fn meta_path(dest: &Path) -> PathBuf {
     dest.with_extension("dump.meta")
 }
 
-/// `HEAD`s the dump's URL (following fec.gov's redirect to S3). Blocking.
+/// [`remote_info_with`] at [`Endpoints::from_env`]. Fails with
+/// [`DumpError::Endpoint`] if a `HARDMONEY_*` override is malformed.
 pub fn remote_info(source: &DumpSource) -> Result<RemoteDump> {
-    let resp = ureq::head(source.url).call().map_err(|e| DumpError::Http {
-        url: source.url.to_string(),
+    remote_info_with(source, &Endpoints::from_env()?)
+}
+
+/// `HEAD`s the dump's URL under `endpoints.www_base` (following fec.gov's
+/// redirect to S3). Blocking.
+pub fn remote_info_with(source: &DumpSource, endpoints: &Endpoints) -> Result<RemoteDump> {
+    let url = source.url(endpoints);
+    let resp = ureq::head(&url).call().map_err(|e| DumpError::Http {
+        url: url.clone(),
         detail: e.to_string(),
     })?;
     let header = |name: &str| {
@@ -993,9 +1033,16 @@ fn download_style() -> indicatif::ProgressStyle {
     .progress_chars("#>-")
 }
 
-/// Downloads `source` into `cache_dir` unless a complete copy is already
-/// there, resuming a partial one if present. Blocking; shows a progress
-/// bar on stderr. Returns the cache state afterwards.
+/// [`download_with`] at [`Endpoints::from_env`]. Fails with
+/// [`DumpError::Endpoint`] if a `HARDMONEY_*` override is malformed.
+pub fn download(source: &DumpSource, cache_dir: &Path) -> Result<CachedDump> {
+    download_with(source, cache_dir, &Endpoints::from_env()?)
+}
+
+/// Downloads `source` from `endpoints.www_base` into `cache_dir` unless a
+/// complete copy is already there, resuming a partial one if present.
+/// Blocking; shows a progress bar on stderr. Returns the cache state
+/// afterwards.
 ///
 /// Bytes accumulate in `<name>.dump.partial`; the first response's
 /// `ETag`/`Last-Modified`/`Content-Length` go in `<name>.dump.meta` and
@@ -1004,12 +1051,17 @@ fn download_style() -> indicatif::ProgressStyle {
 /// weeks together. On success the partial is renamed to `<name>.dump`;
 /// on a short read it is kept and [`DumpError::Incomplete`] says how
 /// far it got.
-pub fn download(source: &DumpSource, cache_dir: &Path) -> Result<CachedDump> {
+pub fn download_with(
+    source: &DumpSource,
+    cache_dir: &Path,
+    endpoints: &Endpoints,
+) -> Result<CachedDump> {
     std::fs::create_dir_all(cache_dir)?;
     let dest = cache_path(source, cache_dir);
     if !dest.exists() {
-        let mut http = HttpRange { url: source.url };
-        download_resumable(&mut http, source.url, &dest, true)?;
+        let url = source.url(endpoints);
+        let mut http = HttpRange { url: &url };
+        download_resumable(&mut http, &url, &dest, true)?;
     }
     Ok(cached(source, cache_dir))
 }
@@ -1039,12 +1091,24 @@ pub struct RestoreOptions {
     /// `pg_restore --jobs`: parallel workers, useful when several child
     /// tables are being restored. `0` or `1` means single-threaded.
     pub jobs: u8,
+    /// Where to download from. `None` (the default) reads
+    /// [`Endpoints::from_env`] when a download is needed and fails with
+    /// [`DumpError::Endpoint`] on a malformed override; not consulted at
+    /// all when [`RestoreOptions::dump_file`] is set.
+    pub endpoints: Option<Endpoints>,
 }
 
 impl RestoreOptions {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Downloads from these endpoints instead of reading the environment.
+    #[must_use]
+    pub fn endpoints(mut self, endpoints: Endpoints) -> Self {
+        self.endpoints = Some(endpoints);
+        self
     }
 
     #[must_use]
@@ -1258,9 +1322,16 @@ pub async fn restore_with(
             (path.clone(), None, RemoteDump::default())
         }
         None => {
+            let endpoints = match &options.endpoints {
+                Some(e) => e.clone(),
+                None => Endpoints::from_env()?,
+            };
             let dir = cache_dir.to_path_buf();
-            let cached = tokio::task::spawn_blocking(move || download(source, &dir)).await??;
-            (cached.path, Some(source.url.to_string()), cached.meta)
+            let url = source.url(&endpoints);
+            let cached =
+                tokio::task::spawn_blocking(move || download_with(source, &dir, &endpoints))
+                    .await??;
+            (cached.path, Some(url), cached.meta)
         }
     };
 
@@ -2762,9 +2833,28 @@ mod tests {
 
     #[test]
     fn sources_are_consistent() {
+        let production = Endpoints::default();
+        let mirror = production
+            .clone()
+            .with_www_base(crate::fec::Url::parse("https://mirror.example.gov/fec").unwrap());
         for s in ALL {
             assert_eq!(find(s.name).map(|f| f.name), Some(s.name));
-            assert!(s.url.ends_with(".dump"));
+            assert!(s.file_name.ends_with(".dump"));
+            assert!(!s.file_name.contains('/'));
+            assert_eq!(
+                s.url(&production),
+                format!(
+                    "https://www.fec.gov/files/bulk-downloads/data-dump/schedules/{}",
+                    s.file_name
+                )
+            );
+            assert_eq!(
+                s.url(&mirror),
+                format!(
+                    "https://mirror.example.gov/fec/files/bulk-downloads/data-dump/schedules/{}",
+                    s.file_name
+                )
+            );
             assert!(!s.indexes.is_empty());
             assert!(check_ident(s.disclosure_table).is_ok());
             for spec in s.indexes {
@@ -2777,6 +2867,7 @@ mod tests {
             }
         }
         assert!(find("nope").is_none());
+        assert_eq!(INDEX_URL, production.dump_readme());
         let large: Vec<&str> = ALL.iter().filter(|s| s.is_large).map(|s| s.name).collect();
         assert_eq!(large, vec!["schedule_a_full", "schedule_b_full"]);
         let split: Vec<&str> = ALL

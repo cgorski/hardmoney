@@ -8,6 +8,7 @@ use hardmoney::api::ApiConfig;
 use hardmoney::db::{self, DbConfig};
 
 use super::db_args::DbArgs;
+use super::shared::EndpointArgs;
 
 #[derive(Args, Debug)]
 pub struct ServeArgs {
@@ -34,9 +35,15 @@ pub struct ServeArgs {
     /// from 64 KiB to 32 MiB so a filing can be uploaded.
     #[arg(long)]
     pub ui: bool,
+    // `--docquery-base` sets the `fec_url` on `/filings` responses and
+    // where `/tools/fetch` downloads; `--openfec-base` where
+    // `/filings/{id}/processing` asks.
+    #[command(flatten)]
+    pub endpoints: EndpointArgs,
 }
 
 pub async fn run(args: ServeArgs) -> super::CliResult {
+    let endpoints = args.endpoints.resolve()?;
     let timeout = Duration::from_secs(args.timeout_secs.max(1));
     let config: DbConfig = args
         .db
@@ -65,7 +72,8 @@ pub async fn run(args: ServeArgs) -> super::CliResult {
         .request_timeout(timeout)
         .cors_origins(args.cors_origins)
         .api_key(args.api_key)
-        .ui(args.ui);
+        .ui(args.ui)
+        .endpoints(endpoints);
     hardmoney::api::serve(pool, api).await?;
     Ok(())
 }

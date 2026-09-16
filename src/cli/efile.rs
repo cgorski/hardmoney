@@ -7,11 +7,12 @@ use std::time::Duration;
 
 use chrono::NaiveDate;
 use clap::{Args, Subcommand};
-use hardmoney::fec::efile::{EfileFeed, FeedItem, base_form_type, daily_zip_filings};
-use hardmoney::fec::{Cache, FecApiError, fetch_filing_bytes};
+use hardmoney::fec::efile::{EfileFeed, FeedItem, base_form_type, daily_zip_filings_with};
+use hardmoney::fec::{Cache, Endpoints, FecApiError, fetch_filing_bytes_with};
 
 use super::CliResult;
 use super::filings::{Actions, CacheArgs, OptionalDbArgs, Outcome, apply, print_outcome};
+use super::shared::EndpointArgs;
 
 #[derive(Args, Debug)]
 pub struct EfileArgs {
@@ -124,14 +125,18 @@ pub struct WatchArgs {
 
     #[command(flatten)]
     pub cache: CacheArgs,
+
+    #[command(flatten)]
+    pub endpoints: EndpointArgs,
 }
 
 pub async fn watch(args: WatchArgs) -> CliResult {
     if args.interval == 0 {
         return Err("--interval must be at least 1 second".into());
     }
+    let endpoints = args.endpoints.resolve()?;
     let cache = args.cache.cache();
-    let feed = EfileFeed::new();
+    let feed = EfileFeed::with_endpoints(&endpoints);
     let actions = args.actions.actions(args.exec.clone()).await?;
     let committees: Vec<String> = args
         .committee
@@ -195,7 +200,16 @@ pub async fn watch(args: WatchArgs) -> CliResult {
                 print_item_line(item);
             }
             let outcome = if actions.any() {
-                Some(fetch_and_apply(&actions, &cache, item.filing_id, Some(&item.url)).await)
+                Some(
+                    fetch_and_apply(
+                        &actions,
+                        &cache,
+                        &endpoints,
+                        item.filing_id,
+                        Some(&item.url),
+                    )
+                    .await,
+                )
             } else {
                 None
             };
@@ -239,10 +253,11 @@ pub async fn watch(args: WatchArgs) -> CliResult {
 async fn fetch_and_apply(
     actions: &Actions,
     cache: &Cache,
+    endpoints: &Endpoints,
     id: u64,
     url_hint: Option<&str>,
 ) -> Outcome {
-    match fetch_filing_bytes(id, cache, url_hint) {
+    match fetch_filing_bytes_with(id, cache, url_hint, endpoints) {
         Ok(bytes) => apply(actions, id, &bytes, Some(&cache.filing_path(id))).await,
         Err(e) => Outcome {
             errors: vec![format!("download failed: {e}")],
@@ -305,6 +320,9 @@ pub struct BackfillArgs {
 
     #[command(flatten)]
     pub cache: CacheArgs,
+
+    #[command(flatten)]
+    pub endpoints: EndpointArgs,
 }
 
 pub async fn backfill(args: BackfillArgs) -> CliResult {
@@ -312,6 +330,7 @@ pub async fn backfill(args: BackfillArgs) -> CliResult {
     if to < args.from {
         return Err(format!("--to ({to}) is before --from ({})", args.from).into());
     }
+    let endpoints = args.endpoints.resolve()?;
     let cache = args.cache.cache();
     let actions = args.actions.actions(None).await?;
 
@@ -321,7 +340,7 @@ pub async fn backfill(args: BackfillArgs) -> CliResult {
     let mut days_failed = 0usize;
     let mut day = args.from;
     loop {
-        match daily_zip_filings(day, &cache) {
+        match daily_zip_filings_with(day, &cache, &endpoints) {
             Ok(filings) => {
                 let mut day_total = 0usize;
                 let mut day_matched = 0usize;

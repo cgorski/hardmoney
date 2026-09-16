@@ -26,10 +26,11 @@ use hardmoney::bulk::preflight::{
     fmt_elapsed, fmt_rough_count, redact_url,
 };
 use hardmoney::db::{self, Namespace};
+use hardmoney::fec::Endpoints;
 use sqlx::PgPool;
 
 use super::CliResult;
-use super::shared::{columns, default_dump_cache_dir};
+use super::shared::{EndpointArgs, columns, default_dump_cache_dir};
 
 // ---------------------------------------------------------------------------
 // Arguments
@@ -116,6 +117,8 @@ pub struct CheckArgs {
     /// asking.
     #[arg(long, short = 'y')]
     pub yes: bool,
+    #[command(flatten)]
+    pub endpoints: EndpointArgs,
 }
 
 #[derive(Args, Debug)]
@@ -143,6 +146,8 @@ pub struct ImportArgs {
     /// pg_restore parallel workers (helps when loading several cycles).
     #[arg(long, default_value_t = 1, value_name = "N")]
     pub jobs: u8,
+    #[command(flatten)]
+    pub endpoints: EndpointArgs,
 }
 
 #[derive(Args, Debug)]
@@ -150,6 +155,8 @@ pub struct StatusArgs {
     /// Do not contact fec.gov (skip the "newer file available" check).
     #[arg(long)]
     pub offline: bool,
+    #[command(flatten)]
+    pub endpoints: EndpointArgs,
 }
 
 #[derive(Args, Debug)]
@@ -160,6 +167,8 @@ pub struct UpdateArgs {
     /// pg_restore parallel workers.
     #[arg(long, default_value_t = 1, value_name = "N")]
     pub jobs: u8,
+    #[command(flatten)]
+    pub endpoints: EndpointArgs,
 }
 
 #[derive(Args, Debug)]
@@ -176,7 +185,9 @@ pub struct RemoveArgs {
 
 pub async fn run(args: DumpsArgs) -> CliResult {
     match args.command {
-        None => overview(&args.common).await,
+        // The overview has no flags of its own; the endpoint variables
+        // still apply.
+        None => overview(&args.common, &EndpointArgs::default().resolve()?).await,
         Some(DumpsCommand::Check(a)) => check(&args.common, a).await,
         Some(DumpsCommand::Import(a)) => import(&args.common, a).await,
         Some(DumpsCommand::Status(a)) => status(&args.common, a).await,
@@ -806,7 +817,7 @@ impl Snapshot {
     }
 }
 
-async fn snapshot(common: &Common, offline: bool) -> CliResult<Snapshot> {
+async fn snapshot(common: &Common, endpoints: &Endpoints, offline: bool) -> CliResult<Snapshot> {
     let database = match &common.database_url {
         None => Database::NotConfigured,
         Some(url) => match preflight::check_connection(url, &common.schema, 4).await {
@@ -840,7 +851,10 @@ async fn snapshot(common: &Common, offline: bool) -> CliResult<Snapshot> {
         let (remote, remote_error) = if offline {
             (None, None)
         } else {
-            match tokio::task::spawn_blocking(move || dump::remote_info(source)).await? {
+            let endpoints = endpoints.clone();
+            match tokio::task::spawn_blocking(move || dump::remote_info_with(source, &endpoints))
+                .await?
+            {
                 Ok(r) => (Some(r), None),
                 Err(e) => (None, Some(e.to_string())),
             }
@@ -912,9 +926,9 @@ fn database_cell(view: &DumpView) -> String {
 // `hardmoney dumps` (no subcommand): where am I?
 // ---------------------------------------------------------------------------
 
-async fn overview(common: &Common) -> CliResult {
+async fn overview(common: &Common, endpoints: &Endpoints) -> CliResult {
     let out = Out { json: common.json };
-    let snap = snapshot(common, false).await?;
+    let snap = snapshot(common, endpoints, false).await?;
     if common.json {
         return out.emit(&snap.json(common));
     }
@@ -1038,6 +1052,13 @@ fn indent(text: &str, by: &str) -> String {
         .join("\n")
 }
 
+/// The host of `url` (`www.fec.gov` for the default endpoints), for
+/// progress lines that say where a download is coming from.
+fn host_of(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    rest.split(['/', '?', '#']).next().unwrap_or(rest)
+}
+
 // ---------------------------------------------------------------------------
 // `hardmoney dumps check`
 // ---------------------------------------------------------------------------
@@ -1048,6 +1069,7 @@ async fn needs_for(
     what: What,
     requested: &[Cycle],
     cache_dir: &Path,
+    endpoints: &Endpoints,
     offline: bool,
     today: NaiveDate,
 ) -> CliResult<ImportNeeds> {
@@ -1067,7 +1089,8 @@ async fn needs_for(
                 let size = if offline {
                     None
                 } else {
-                    tokio::task::spawn_blocking(move || dump::remote_info(source))
+                    let endpoints = endpoints.clone();
+                    tokio::task::spawn_blocking(move || dump::remote_info_with(source, &endpoints))
                         .await?
                         .ok()
                         .and_then(|r| r.size)
@@ -1093,9 +1116,18 @@ async fn needs_for(
 
 async fn check(common: &Common, args: CheckArgs) -> CliResult {
     let out = Out { json: common.json };
+    let endpoints = args.endpoints.resolve()?;
     let what = args.target.unwrap_or(What::AllSmall);
     let today = chrono::Utc::now().date_naive();
-    let needs = needs_for(what, &args.cycles, &common.cache_dir, args.offline, today).await?;
+    let needs = needs_for(
+        what,
+        &args.cycles,
+        &common.cache_dir,
+        &endpoints,
+        args.offline,
+        today,
+    )
+    .await?;
     out.say(format!(
         "Checking whether this computer can import {what} (needs about {} of disk: {}, about {} inside Postgres) ...\n",
         dump::fmt_bytes(needs.total_bytes()),
@@ -1395,6 +1427,8 @@ struct Planning<'a> {
     /// `--dump-file`, for a single-dump import.
     dump_file: Option<&'a Path>,
     cache_dir: &'a Path,
+    /// Where the FEC's files are.
+    endpoints: &'a Endpoints,
     /// For asking whether the parent table already exists.
     pool: Option<&'a PgPool>,
     /// Ignore a cached file: `update` deletes it before importing so the
@@ -1432,9 +1466,11 @@ async fn plan_step(
         }
         (None, Some(n)) => (Location::Cached(cache.path.clone()), n, true),
         (None, None) => {
-            let remote = tokio::task::spawn_blocking(move || dump::remote_info(source))
-                .await?
-                .ok();
+            let endpoints = ctx.endpoints.clone();
+            let remote =
+                tokio::task::spawn_blocking(move || dump::remote_info_with(source, &endpoints))
+                    .await?
+                    .ok();
             let size = remote.and_then(|r| r.size);
             (
                 Location::Download {
@@ -1547,6 +1583,7 @@ async fn execute_step(
     url: &str,
     step: &Step,
     cache_dir: &Path,
+    endpoints: &Endpoints,
     jobs: u8,
     out: &Out,
 ) -> CliResult<StepResult> {
@@ -1560,16 +1597,20 @@ async fn execute_step(
         }
         Location::Download { resume_from } => {
             out.say(format!(
-                "{name}: downloading {} from fec.gov{} ...",
+                "{name}: downloading {} from {}{} ...",
                 dump::fmt_bytes(step.archive_bytes),
+                host_of(&source.url(endpoints)),
                 resume_from
                     .map(|n| format!(" (resuming after {})", dump::fmt_bytes(n)))
                     .unwrap_or_default()
             ));
             let dir = cache_dir.to_path_buf();
-            let cached = tokio::task::spawn_blocking(move || dump::download(source, &dir))
-                .await?
-                .map_err(|e| friendly_dump_error(e, source, &step.cycles))?;
+            let download_endpoints = endpoints.clone();
+            let cached = tokio::task::spawn_blocking(move || {
+                dump::download_with(source, &dir, &download_endpoints)
+            })
+            .await?
+            .map_err(|e| friendly_dump_error(e, source, &step.cycles))?;
             out.say(format!(
                 "{name}: downloaded to {} ({})",
                 cached.path.display(),
@@ -1588,7 +1629,14 @@ async fn execute_step(
     ));
     let report = {
         let _beat = Heartbeat::start(format!("{name}: still loading"));
-        dump::restore_with(pool, url, source, cache_dir, &step.options(jobs)).await
+        dump::restore_with(
+            pool,
+            url,
+            source,
+            cache_dir,
+            &step.options(jobs).endpoints(endpoints.clone()),
+        )
+        .await
     }
     .map_err(|e| friendly_dump_error(e, source, &step.cycles))?;
     out.say(format!(
@@ -1707,6 +1755,7 @@ fn next_steps(source: &DumpSource, url: &str, ns: &Namespace) -> Vec<String> {
 async fn import(common: &Common, args: ImportArgs) -> CliResult {
     let out = Out { json: common.json };
     let ask = interactive(common.json);
+    let endpoints = args.endpoints.resolve()?;
     let sources = args.what.sources();
     if args.dump_file.is_some() && sources.len() > 1 {
         return Err(Friendly::new(
@@ -1739,6 +1788,7 @@ async fn import(common: &Common, args: ImportArgs) -> CliResult {
         let ctx = Planning {
             dump_file: args.dump_file.as_deref(),
             cache_dir: &common.cache_dir,
+            endpoints: &endpoints,
             pool: planning_pool.as_ref(),
             fresh_download: false,
             today,
@@ -1832,7 +1882,18 @@ async fn import(common: &Common, args: ImportArgs) -> CliResult {
         if i > 0 {
             out.say("");
         }
-        results.push(execute_step(&pool, &url, step, &common.cache_dir, args.jobs, &out).await?);
+        results.push(
+            execute_step(
+                &pool,
+                &url,
+                step,
+                &common.cache_dir,
+                &endpoints,
+                args.jobs,
+                &out,
+            )
+            .await?,
+        );
     }
     let elapsed = started.elapsed();
 
@@ -1936,7 +1997,8 @@ async fn import(common: &Common, args: ImportArgs) -> CliResult {
 
 async fn status(common: &Common, args: StatusArgs) -> CliResult {
     let out = Out { json: common.json };
-    let snap = snapshot(common, args.offline).await?;
+    let endpoints = args.endpoints.resolve()?;
+    let snap = snapshot(common, &endpoints, args.offline).await?;
     if common.json {
         let mut v = snap.json(common);
         if let Some(obj) = v.as_object_mut() {
@@ -2090,7 +2152,8 @@ fn cron_line(url: &str) -> String {
 async fn update(common: &Common, args: UpdateArgs) -> CliResult {
     let out = Out { json: common.json };
     let ask = interactive(common.json);
-    let snap = snapshot(common, false).await?;
+    let endpoints = args.endpoints.resolve()?;
+    let snap = snapshot(common, &endpoints, false).await?;
     let (url, pool) = match &snap.database {
         Database::Connected { url, pool, .. } => (url.clone(), pool.clone()),
         Database::NotConfigured => return Err(no_database_error().into()),
@@ -2180,6 +2243,7 @@ async fn update(common: &Common, args: UpdateArgs) -> CliResult {
         let ctx = Planning {
             dump_file: None,
             cache_dir: &common.cache_dir,
+            endpoints: &endpoints,
             pool: Some(&pool),
             fresh_download: true,
             today,
@@ -2216,7 +2280,18 @@ async fn update(common: &Common, args: UpdateArgs) -> CliResult {
             )
             .detail(e.to_string())
         })?;
-        results.push(execute_step(&pool, &url, step, &common.cache_dir, args.jobs, &out).await?);
+        results.push(
+            execute_step(
+                &pool,
+                &url,
+                step,
+                &common.cache_dir,
+                &endpoints,
+                args.jobs,
+                &out,
+            )
+            .await?,
+        );
     }
     out.say(format!(
         "\nDone in {}. To do this automatically every Monday morning, add this line with `crontab -e`:\n  {}",

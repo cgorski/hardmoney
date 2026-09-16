@@ -20,6 +20,7 @@ use hardmoney::bulk::dump::{self, DumpError, RestoreOptions, TocKind};
 use hardmoney::bulk::preflight::{self, PreflightInput, Status};
 use hardmoney::bulk::{self, Input, LoadMode, LoadOptions};
 use hardmoney::db::{self, DbConfig, Namespace};
+use hardmoney::fec::{Endpoints, Url};
 use sqlx::PgPool;
 use tower::ServiceExt as _;
 
@@ -656,6 +657,39 @@ async fn amendment_chain_matches_openfec_and_is_served_by_the_api() {
     let (s, body) = get_json(&app, "/filings/1/schedule-e?api_key=k").await;
     assert_eq!(s, StatusCode::NOT_FOUND, "{body}");
     assert_eq!(body["error"], "no filing with filing_id 1");
+
+    // A server configured for a document-store mirror hands out `fec_url`s
+    // on the mirror, on both the get and the list route; the prefix is a
+    // bound parameter, so one with SQL metacharacters is still just text.
+    let mirror = Endpoints::default()
+        .with_docquery_base(Url::parse("https://mirror.example.gov/dq'--").unwrap());
+    let config = ApiConfig::new("127.0.0.1:0".parse().unwrap())
+        .api_key(Some("k".into()))
+        .endpoints(mirror);
+    let mirrored = hardmoney::api::router(t.pool.clone(), &config);
+    let (s, body) = get_json(&mirrored, "/filings/1151343?api_key=k").await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["fec_url"],
+        "https://mirror.example.gov/dq'--/dcdev/posted/1151343.fec"
+    );
+    let (s, body) = get_json(&mirrored, "/filings?committee_id=C00554709&api_key=k").await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    for f in body.as_array().unwrap() {
+        assert_eq!(
+            f["fec_url"],
+            format!(
+                "https://mirror.example.gov/dq'--/dcdev/posted/{}.fec",
+                f["filing_id"]
+            )
+        );
+    }
+    // And the default configuration is still production.
+    let (_, body) = get_json(&app, "/filings/1118027?api_key=k").await;
+    assert_eq!(
+        body["fec_url"],
+        "https://docquery.fec.gov/dcdev/posted/1118027.fec"
+    );
 
     t.drop().await;
 }

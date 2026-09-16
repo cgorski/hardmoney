@@ -58,6 +58,7 @@ pub mod header;
 #[cfg(feature = "serde")]
 pub mod jsonschema;
 pub mod reconcile;
+pub mod review;
 pub mod schema;
 pub mod stream;
 pub mod tables;
@@ -77,6 +78,7 @@ pub use reconcile::{
     Column, LineCheck, LineRule, ReconcileError, Reconciliation, Relation, ScheduleSum, Source,
     Term,
 };
+pub use review::{Concern, Observation, Recipient, Review, ReviewOptions, ReviewSummary};
 pub use schema::{
     Field, FieldDef, FieldKind, FieldSpec, InvalidSpecVersion, Layout, Requirement, SpecVersion,
     TableMarker, Typed,

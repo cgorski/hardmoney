@@ -267,7 +267,7 @@ dependencies = [
 
 [[package]]
 name = "hardmoney"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "chrono",
  "compact_str",
@@ -285,7 +285,7 @@ dependencies = [
 
 [[package]]
 name = "hardmoney-py"
-version = "3.1.1"
+version = "3.2.0"
 dependencies = [
  "chrono",
  "hardmoney",

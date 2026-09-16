@@ -583,19 +583,32 @@ impl Filing {
 
     /// Downloads and parses a filing directly from the FEC's document
     /// store, given its numeric filing id (the same id used in FEC.gov
-    /// filing URLs). Requires the `fetch` feature.
+    /// filing URLs). Requires the `fetch` feature. See
+    /// [`Filing::fetch_bytes`] for where the request goes and what fails.
     #[cfg(feature = "fetch")]
     pub fn fetch(filing_id: u64) -> Result<Filing> {
         Self::parse_bytes(&Self::fetch_bytes(filing_id)?)
     }
 
-    /// Downloads a filing's raw bytes from the FEC's document store.
+    /// Downloads a filing's raw bytes from the FEC's document store:
+    /// `https://docquery.fec.gov/dcdev/posted/<id>.fec`, or the same path
+    /// under `HARDMONEY_DOCQUERY_BASE` when that variable is set
+    /// ([`crate::fec::Endpoints::from_env`]).
     ///
-    /// Note the FEC serves this endpoint over plain HTTP but 301-redirects
-    /// to HTTPS; `ureq`'s default agent follows redirects automatically.
+    /// Fails with [`FecError::Fetch`] if an endpoint override is not a
+    /// usable URL (the message names the variable) or on a transport
+    /// error, and [`FecError::Io`] if the body cannot be read. Redirects
+    /// are followed. A non-2xx status is a `Fetch` error too (`ureq`'s
+    /// default). No cache is involved; [`crate::fec::fetch_filing_bytes`]
+    /// is the cached, openFEC-aware download.
     #[cfg(feature = "fetch")]
     pub fn fetch_bytes(filing_id: u64) -> Result<Vec<u8>> {
-        let url = format!("http://docquery.fec.gov/dcdev/posted/{filing_id}.fec");
+        // A malformed override is a configuration error, not a network
+        // one, but `Fetch` is the variant that fits it without widening
+        // the error type; ureq's `BadUri` carries the explanation.
+        let endpoints = crate::fec::Endpoints::from_env()
+            .map_err(|e| FecError::Fetch(ureq::Error::BadUri(e.to_string())))?;
+        let url = endpoints.docquery_filing(filing_id);
         let response = ureq::get(&url).call()?;
         let mut bytes = Vec::new();
         std::io::Read::read_to_end(&mut response.into_body().into_reader(), &mut bytes)?;

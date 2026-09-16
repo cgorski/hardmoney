@@ -1,7 +1,89 @@
-//! Helpers more than one subcommand module needs: the default dump cache
-//! directory and a fixed-width column renderer.
+//! Helpers more than one subcommand module needs: the FEC endpoint flags,
+//! the default dump cache directory, and a fixed-width column renderer.
 
 use std::path::PathBuf;
+
+use clap::Args;
+use hardmoney::fec::Endpoints;
+
+/// The flags that move a command off the FEC's production hosts, one per
+/// base in [`Endpoints`]. Each reads the matching `HARDMONEY_*` variable
+/// when the flag is absent, so a deployment can set them once in the
+/// environment (or a `.env` file). `HARDMONEY_EFILINGAPPS_BASE` has no
+/// flag; [`EndpointArgs::resolve`] reads it from the environment.
+///
+/// A value that is not an `http://` or `https://` URL with a host is an
+/// error that names the flag and the variable; nothing falls back to
+/// production silently.
+#[derive(Args, Debug, Clone, Default)]
+#[command(next_help_heading = "FEC endpoints")]
+pub struct EndpointArgs {
+    /// Base URL of www.fec.gov: bulk zips, pg_dump archives, daily e-file
+    /// zips, data dictionaries. Default: https://www.fec.gov
+    #[arg(long, env = Endpoints::WWW_BASE_VAR, value_name = "URL")]
+    pub fec_www_base: Option<String>,
+
+    /// Root of the openFEC API. Default: https://api.open.fec.gov/v1/
+    #[arg(long, env = Endpoints::OPENFEC_BASE_VAR, value_name = "URL")]
+    pub openfec_base: Option<String>,
+
+    /// Base URL of the FEC's raw-filing document store
+    /// (/dcdev/posted/<id>.fec is appended). Default:
+    /// https://docquery.fec.gov
+    #[arg(long, env = Endpoints::DOCQUERY_BASE_VAR, value_name = "URL")]
+    pub docquery_base: Option<String>,
+
+    /// Complete URL of the e-file RSS feed. Default:
+    /// https://efilingapps.fec.gov/rss/generate?preDefinedFilingType=ALL
+    #[arg(long, env = Endpoints::EFILE_RSS_URL_VAR, value_name = "URL")]
+    pub efile_rss_url: Option<String>,
+
+    /// Base URL of the FEC's WebCheck validator (/services/upload is
+    /// appended). Default: https://efoservices.fec.gov/webcheck
+    #[arg(long, env = Endpoints::WEBCHECK_ENDPOINT_VAR, value_name = "URL")]
+    pub webcheck_endpoint: Option<String>,
+}
+
+impl EndpointArgs {
+    /// The flag that stands in for `var`, for error messages.
+    fn flag_for(var: &str) -> Option<&'static str> {
+        match var {
+            Endpoints::WWW_BASE_VAR => Some("--fec-www-base"),
+            Endpoints::OPENFEC_BASE_VAR => Some("--openfec-base"),
+            Endpoints::DOCQUERY_BASE_VAR => Some("--docquery-base"),
+            Endpoints::EFILE_RSS_URL_VAR => Some("--efile-rss-url"),
+            Endpoints::WEBCHECK_ENDPOINT_VAR => Some("--webcheck-endpoint"),
+            _ => None,
+        }
+    }
+
+    /// The endpoints these flags select: production, then each flag (or
+    /// its variable) applied, then `HARDMONEY_EFILINGAPPS_BASE` from the
+    /// environment. Fails, naming the flag and the variable, if a value is
+    /// not a usable URL.
+    pub fn resolve(&self) -> super::CliResult<Endpoints> {
+        Endpoints::from_lookup(|var| match var {
+            Endpoints::WWW_BASE_VAR => self.fec_www_base.clone(),
+            Endpoints::OPENFEC_BASE_VAR => self.openfec_base.clone(),
+            Endpoints::DOCQUERY_BASE_VAR => self.docquery_base.clone(),
+            Endpoints::EFILE_RSS_URL_VAR => self.efile_rss_url.clone(),
+            Endpoints::WEBCHECK_ENDPOINT_VAR => self.webcheck_endpoint.clone(),
+            other => std::env::var(other).ok(),
+        })
+        .map_err(|e| {
+            let var = e.var().unwrap_or("an endpoint override");
+            let flag = Self::flag_for(var)
+                .map(|f| format!("{f} / "))
+                .unwrap_or_default();
+            format!(
+                "{flag}{var}: {:?} is not a usable URL: {}",
+                e.value(),
+                e.reason()
+            )
+            .into()
+        })
+    }
+}
 
 /// Where `bulk-restore-dump`, `bulk-dump-info`, and `dumps` keep the
 /// FEC's archives unless `--cache-dir` / `HARDMONEY_CACHE_DIR` says
@@ -75,5 +157,36 @@ mod tests {
     fn default_dump_cache_dir_ends_in_hardmoney_dumps() {
         let dir = default_dump_cache_dir();
         assert!(dir.ends_with("hardmoney/dumps"), "{}", dir.display());
+    }
+
+    #[test]
+    fn endpoint_flags_resolve_and_name_themselves_on_error() {
+        let production = EndpointArgs::default().resolve().unwrap();
+        // Flags win over whatever the environment says for the same base,
+        // and the untouched bases stay at production.
+        let args = EndpointArgs {
+            docquery_base: Some("https://mirror.example.gov/dq/".to_string()),
+            openfec_base: Some("http://localhost:9999/v1".to_string()),
+            ..EndpointArgs::default()
+        };
+        let e = args.resolve().unwrap();
+        assert_eq!(
+            e.docquery_filing(7),
+            "https://mirror.example.gov/dq/dcdev/posted/7.fec"
+        );
+        assert_eq!(e.openfec_base.as_str(), "http://localhost:9999/v1");
+        assert_eq!(e.www_base, production.www_base);
+        assert_eq!(e.webcheck_endpoint, production.webcheck_endpoint);
+
+        let bad = EndpointArgs {
+            fec_www_base: Some("www.mirror.gov".to_string()),
+            ..EndpointArgs::default()
+        };
+        let msg = bad.resolve().unwrap_err().to_string();
+        assert!(
+            msg.starts_with("--fec-www-base / HARDMONEY_FEC_WWW_BASE:"),
+            "{msg}"
+        );
+        assert!(msg.contains("must start with http:// or https://"), "{msg}");
     }
 }

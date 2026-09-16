@@ -5,7 +5,7 @@
 //! | Route | Body | Response |
 //! |---|---|---|
 //! | `POST /tools/parse` | raw `.fec` bytes | [`ParsedDocument`] |
-//! | `GET /tools/fetch/{filing_id}` | none | [`ParsedDocument`] for the filing downloaded from the FEC (needs the `fetch` feature; 501 otherwise) |
+//! | `GET /tools/fetch/{filing_id}` | none | [`ParsedDocument`] for the filing downloaded from the FEC's document store (needs the `fetch` feature; 501 otherwise) |
 //! | `POST /tools/validate` | a [`Document`] | [`Validation`] |
 //! | `POST /tools/reconcile` | a [`Document`] | [`Reconciliation`], or 400 for a form without rules |
 //! | `POST /tools/write` | a [`Document`] | the `.fec` bytes, `Content-Disposition: attachment`, `X-Hardmoney-Validation-Errors: N` |
@@ -22,7 +22,12 @@
 //!
 //! The router is state-free ([`router`] returns a `Router<S>` for any `S`)
 //! so it can be mounted without a database, which is how `tests/ui_routes.rs`
-//! exercises it.
+//! exercises it. Mounted by [`crate::api::router`], `fetch` downloads from
+//! the [`Endpoints`](crate::fec::Endpoints) in
+//! [`ApiConfig::endpoints`](crate::api::ApiConfig::endpoints), which that
+//! router supplies as a request extension; mounted on its own it falls
+//! back to [`Filing::fetch_bytes`], which reads `HARDMONEY_DOCQUERY_BASE`
+//! from the environment.
 
 use std::collections::BTreeMap;
 
@@ -228,22 +233,32 @@ pub async fn parse(
     parse_document(&bytes).map(Json)
 }
 
-/// `GET /tools/fetch/{filing_id}`: downloads the filing from the FEC's
+/// `GET /tools/fetch/{filing_id}`: downloads the filing from the
 /// document store and returns the same document `POST /tools/parse` would.
-/// A filing larger than the body cap is refused with 413.
+/// The store is the [`Endpoints`](crate::fec::Endpoints) extension the API
+/// router installs (`docquery_base`); without one, the environment's
+/// ([`Filing::fetch_bytes`]). A filing larger than the body cap is refused
+/// with 413; a download failure, including a malformed endpoint override,
+/// is 502.
 #[cfg(feature = "fetch")]
 pub async fn fetch(
     Extension(limits): Extension<Limits>,
+    endpoints: Option<Extension<crate::fec::Endpoints>>,
     Path(filing_id): Path<u64>,
 ) -> Result<Json<ParsedDocument>, ToolsError> {
-    let bytes = tokio::task::spawn_blocking(move || Filing::fetch_bytes(filing_id))
-        .await
-        .map_err(|e| ToolsError::UpstreamFailed(format!("download task failed: {e}")))?
-        .map_err(|e| {
-            ToolsError::UpstreamFailed(format!(
-                "could not download filing {filing_id} from the FEC: {e}"
-            ))
-        })?;
+    let bytes = tokio::task::spawn_blocking(move || match endpoints {
+        Some(Extension(endpoints)) => {
+            crate::fec::download_filing_bytes(filing_id, &endpoints).map_err(|e| e.to_string())
+        }
+        None => Filing::fetch_bytes(filing_id).map_err(|e| e.to_string()),
+    })
+    .await
+    .map_err(|e| ToolsError::UpstreamFailed(format!("download task failed: {e}")))?
+    .map_err(|e| {
+        ToolsError::UpstreamFailed(format!(
+            "could not download filing {filing_id} from the FEC: {e}"
+        ))
+    })?;
     if bytes.len() > limits.max_body_bytes {
         return Err(ToolsError::PayloadTooLarge(format!(
             "filing {filing_id} is {} bytes, larger than this server's {} byte limit; use `hardmoney parse {filing_id}` instead",
