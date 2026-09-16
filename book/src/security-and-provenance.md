@@ -356,8 +356,14 @@ CI (until then the `publish` job is skipped and shows as such):
 | Setting | Where | Value |
 |---|---|---|
 | `PYPI_PUBLISH` | repository variable (Settings, Secrets and variables, Actions, Variables) | `true` |
-| `PYPI_API_TOKEN` | secret in the `pypi` GitHub environment (created automatically on first use; add a required reviewer there) | a PyPI API token scoped to the `hardmoney` project |
-| `CRATES_IO` | secret in the `crates-io` environment | a crates.io token scoped to publishing `hardmoney` |
+| `PYPI_API_TOKEN` | secret in the `pypi` GitHub environment (exists, with the maintainer as required reviewer) | a PyPI API token scoped to the `hardmoney` project |
+| `CRATES_IO` | secret in the `crates-io` environment (exists, with the maintainer as required reviewer, so a dispatched publish waits for an approval click) | a crates.io token scoped to publishing `hardmoney` |
+
+The repository itself: the default branch has a ruleset forbidding
+force-pushes, deletion, and merge commits; secret scanning with push
+protection, Dependabot security updates, and private vulnerability
+reporting are on; merged branches are deleted automatically; the wiki
+and project boards are off.
 
 If `PYPI_PUBLISH` is `true` but the token is missing, the job fails on
 its first step with a message saying so, before anything is downloaded

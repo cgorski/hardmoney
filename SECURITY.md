@@ -25,8 +25,8 @@ Do not open a public issue for a security problem.
 Email **cgorski@cgorski.org** with the subject `hardmoney security`. Include
 the version, how it was installed, what the problem is, and, if you have
 one, a filing or input that demonstrates it (a `.fec` file that makes the
-parser misbehave is the most likely shape of a report). If GitHub's
-private vulnerability reporting is enabled for this repository, the
+parser misbehave is the most likely shape of a report). GitHub's private
+vulnerability reporting is enabled for this repository, so the
 "Report a vulnerability" button on the
 [Security tab](https://github.com/cgorski/hardmoney/security) is an
 equivalent channel.
