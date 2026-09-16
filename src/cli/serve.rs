@@ -20,7 +20,8 @@ pub struct ServeArgs {
     /// by a Postgres statement_timeout slightly below this.
     #[arg(long, default_value_t = 30)]
     pub timeout_secs: u64,
-    /// Allowed CORS origin (repeatable). Default: any origin.
+    /// Allowed CORS origin, as a browser sends it: scheme://host[:port],
+    /// e.g. https://example.org (repeatable). Default: any origin.
     #[arg(long = "cors-origin")]
     pub cors_origins: Vec<String>,
     /// Require this key in `X-Api-Key` (or `?api_key=`) on every route
@@ -45,6 +46,15 @@ pub struct ServeArgs {
 pub async fn run(args: ServeArgs) -> super::CliResult {
     let endpoints = args.endpoints.resolve()?;
     let timeout = Duration::from_secs(args.timeout_secs.max(1));
+    let api = ApiConfig::new(args.bind)
+        .request_timeout(timeout)
+        .cors_origins(args.cors_origins)
+        .api_key(args.api_key)
+        .ui(args.ui)
+        .endpoints(endpoints);
+    // A mistyped --cors-origin is a configuration error; say so before
+    // connecting to Postgres rather than as a browser's silent failure.
+    api.validate().map_err(|e| format!("--cors-origin: {e}"))?;
     let config: DbConfig = args
         .db
         .config()
@@ -68,12 +78,6 @@ pub async fn run(args: ServeArgs) -> super::CliResult {
     }
     db::ensure_views(&pool).await?;
 
-    let api = ApiConfig::new(args.bind)
-        .request_timeout(timeout)
-        .cors_origins(args.cors_origins)
-        .api_key(args.api_key)
-        .ui(args.ui)
-        .endpoints(endpoints);
     hardmoney::api::serve(pool, api).await?;
     Ok(())
 }

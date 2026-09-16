@@ -1491,18 +1491,26 @@ pub async fn restore_with(
 /// Runs `pg_restore`, returning its stderr lines as warnings. Only a
 /// failure to *launch* the tool is an error here; whether the restore
 /// worked is judged by the caller against the database.
+///
+/// The URL's password, if any, goes to the child in `PGPASSWORD` rather
+/// than in `-d <url>`: the argument list of a running process is readable
+/// by every user on the machine (`ps`), for the hours a restore takes.
 fn run_pg_restore(database_url: &str, dump_path: &Path, plan: &RestorePlan) -> Result<Vec<String>> {
-    let output = std::process::Command::new("pg_restore")
+    let (url, password) = crate::bulk::preflight::strip_password(database_url);
+    let mut command = std::process::Command::new("pg_restore");
+    command
         // No `--exit-on-error`: keep going past the expected ignorable
         // errors (missing trigger function) and report them as warnings.
         .args(plan.pg_restore_args())
-        .args(["-d", database_url])
-        .arg(dump_path)
-        .output()
-        .map_err(|e| DumpError::ExternalTool {
-            tool: "pg_restore",
-            detail: format!("could not run pg_restore (is it on PATH?): {e}"),
-        })?;
+        .args(["-d", &url])
+        .arg(dump_path);
+    if let Some(password) = password {
+        command.env("PGPASSWORD", password);
+    }
+    let output = command.output().map_err(|e| DumpError::ExternalTool {
+        tool: "pg_restore",
+        detail: format!("could not run pg_restore (is it on PATH?): {e}"),
+    })?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     Ok(stderr
         .lines()
@@ -2208,15 +2216,17 @@ pub fn plan_restore_offline(
 
 /// The complete command line [`restore_with`] runs for `plan`, as one
 /// string per argument: `pg_restore`, the plan's arguments, `-d`, the
-/// database URL, and the archive path. Exactly what
+/// database URL with any password removed (the process receives it in
+/// `PGPASSWORD` instead), and the archive path. Exactly what
 /// `hardmoney dumps import --explain` prints.
 #[must_use]
 pub fn pg_restore_command(plan: &RestorePlan, database_url: &str, dump_path: &Path) -> Vec<String> {
+    let (url, _password) = crate::bulk::preflight::strip_password(database_url);
     let mut argv = Vec::with_capacity(plan.tables.len().saturating_add(6));
     argv.push("pg_restore".to_string());
     argv.extend(plan.pg_restore_args());
     argv.push("-d".to_string());
-    argv.push(database_url.to_string());
+    argv.push(url);
     argv.push(dump_path.display().to_string());
     argv
 }
@@ -3089,6 +3099,30 @@ mod guided_helper_tests {
                 "postgres://u@localhost/fec",
                 "e.dump",
             ]
+        );
+    }
+
+    /// The password never reaches the argument list; `run_pg_restore`
+    /// hands it to the child in `PGPASSWORD`.
+    #[test]
+    fn command_line_carries_no_password() {
+        let whole =
+            plan_restore_offline(&SCHEDULE_E, &RestoreOptions::new().data_only(true), false)
+                .unwrap();
+        let argv = pg_restore_command(
+            &whole,
+            "postgres://alice:s3cret%21@db.example.org:5433/fec?sslmode=require",
+            Path::new("e.dump"),
+        );
+        assert_eq!(
+            argv.iter()
+                .position(|a| a == "-d")
+                .map(|i| argv[i + 1].as_str()),
+            Some("postgres://alice@db.example.org:5433/fec?sslmode=require")
+        );
+        assert!(
+            !argv.iter().any(|a| a.contains("s3cret")),
+            "password leaked: {argv:?}"
         );
     }
 }

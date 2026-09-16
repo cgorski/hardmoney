@@ -40,6 +40,10 @@
 //! static API key (`X-Api-Key` header or `?api_key=`), and a request body
 //! cap. Defaults are suitable for local development (permissive CORS, no
 //! key); set an allow-list and a key before exposing the server publicly.
+//! In allow-list mode a browser may send `X-Api-Key` and `Content-Type`
+//! and may read `Content-Disposition` and `X-Hardmoney-Validation-Errors`
+//! (the headers the routes use); [`ApiConfig::validate`] rejects an
+//! origin a browser could never match, and [`serve`] runs it first.
 //! Database errors are never echoed to clients (see [`error::ApiError`]),
 //! and the request log records `?api_key=` as `api_key=REDACTED`.
 //!
@@ -62,7 +66,8 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::{Extension, Request};
-use axum::http::{HeaderValue, StatusCode, Uri};
+use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
+use axum::http::{HeaderName, HeaderValue, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -83,7 +88,10 @@ pub struct ApiConfig {
     pub bind: SocketAddr,
     /// Wall-clock cap per request; a slow query returns 408.
     pub request_timeout: Duration,
-    /// Allowed CORS origins. Empty means permissive (any origin).
+    /// Allowed CORS origins, each as a browser sends it in `Origin`:
+    /// `https://example.org`, `http://localhost:5173` -- scheme, host,
+    /// optional port, nothing else. Empty means permissive (any origin).
+    /// [`ApiConfig::validate`] checks the entries.
     pub cors_origins: Vec<String>,
     /// If set, every request must carry this value in `X-Api-Key` or
     /// `?api_key=`. `/health` is always open.
@@ -159,6 +167,75 @@ impl ApiConfig {
         }
         self
     }
+
+    /// Checks the configuration for mistakes that would otherwise show up
+    /// only as a browser's opaque CORS failure at request time.
+    ///
+    /// Every entry in [`ApiConfig::cors_origins`] must be an origin as a
+    /// browser serialises it in the `Origin` header: `http://` or
+    /// `https://`, a lowercase host, an optional port, and nothing after
+    /// that -- no path (not even a trailing slash), query, fragment, or
+    /// whitespace. `*` is refused too: leave the list empty to allow any
+    /// origin. [`serve`] calls this before binding; [`router`] does not,
+    /// so a caller assembling its own server should.
+    pub fn validate(&self) -> Result<(), ApiConfigError> {
+        for origin in &self.cors_origins {
+            if let Some(reason) = cors_origin_problem(origin) {
+                return Err(ApiConfigError::InvalidCorsOrigin {
+                    origin: origin.clone(),
+                    reason,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Why an [`ApiConfig`] cannot be served. See [`ApiConfig::validate`].
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ApiConfigError {
+    /// A CORS origin no browser would ever send, so it could never match.
+    #[error("CORS origin {origin:?} {reason}")]
+    InvalidCorsOrigin {
+        origin: String,
+        reason: &'static str,
+    },
+}
+
+/// `None` if `origin` is a serialised origin a browser could send;
+/// otherwise what is wrong with it, for the error message.
+fn cors_origin_problem(origin: &str) -> Option<&'static str> {
+    if origin.is_empty() {
+        return Some("is empty");
+    }
+    if origin == "*" {
+        return Some("is a wildcard; leave the allow-list empty to allow any origin");
+    }
+    if origin.chars().any(char::is_whitespace) {
+        return Some("contains whitespace");
+    }
+    if HeaderValue::from_str(origin).is_err() {
+        return Some("is not a valid header value");
+    }
+    let Some(rest) = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+    else {
+        return Some("must start with http:// or https://");
+    };
+    if rest.is_empty() {
+        return Some("has no host");
+    }
+    if rest.contains(['/', '?', '#']) {
+        return Some(
+            "must be scheme://host[:port] with no path, trailing slash, query, or fragment (that is what a browser sends in the Origin header)",
+        );
+    }
+    if origin.chars().any(char::is_uppercase) {
+        return Some("must be lowercase, which is how browsers serialise an origin");
+    }
+    None
 }
 
 /// Builds the full [`Router`], with `pool` as shared state.
@@ -166,18 +243,35 @@ pub fn router(pool: PgPool, config: &ApiConfig) -> Router {
     let cors = if config.cors_origins.is_empty() {
         CorsLayer::permissive()
     } else {
+        // `ApiConfig::validate` reports these as errors; here they are only
+        // skipped, with a warning, so that `router` itself cannot fail or
+        // panic (`AllowOrigin::list` panics on `*`).
         let origins: Vec<HeaderValue> = config
             .cors_origins
             .iter()
-            .filter_map(|o| HeaderValue::from_str(o).ok())
+            .filter_map(|o| match cors_origin_problem(o) {
+                None => HeaderValue::from_str(o).ok(),
+                Some(reason) => {
+                    tracing::warn!(origin = %o, "ignoring CORS origin: it {reason}");
+                    None
+                }
+            })
             .collect();
         let mut methods = vec![axum::http::Method::GET, axum::http::Method::HEAD];
         if config.ui {
             methods.push(axum::http::Method::POST);
         }
+        // Without these a browser at an allowed origin fails the preflight
+        // for any request carrying the API key or a JSON body, and cannot
+        // read the two headers `POST /tools/write` sets.
         CorsLayer::new()
             .allow_origin(AllowOrigin::list(origins))
             .allow_methods(methods)
+            .allow_headers([CONTENT_TYPE, HeaderName::from_static("x-api-key")])
+            .expose_headers([
+                CONTENT_DISPOSITION,
+                HeaderName::from_static("x-hardmoney-validation-errors"),
+            ])
     };
 
     let mut protected = Router::new()
@@ -313,7 +407,13 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 }
 
 /// Runs the API until the process receives SIGINT/SIGTERM.
+///
+/// Fails with [`std::io::ErrorKind::InvalidInput`] if
+/// [`ApiConfig::validate`] rejects the configuration, before binding.
 pub async fn serve(pool: PgPool, config: ApiConfig) -> std::io::Result<()> {
+    config
+        .validate()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     let app = router(pool, &config);
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
     tracing::info!(
@@ -376,6 +476,51 @@ mod tests {
         assert_eq!(redact_api_key(&uri), "/candidates?x_api_key=keep&limit=2");
         let uri: Uri = "/health".parse().unwrap();
         assert_eq!(redact_api_key(&uri), "/health");
+    }
+
+    #[test]
+    fn cors_origins_are_checked_for_what_a_browser_would_send() {
+        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let ok = |o: &str| {
+            ApiConfig::new(bind)
+                .cors_origins(vec![o.to_string()])
+                .validate()
+        };
+        assert!(ok("https://example.org").is_ok());
+        assert!(ok("https://example.org:8443").is_ok());
+        assert!(ok("http://localhost:5173").is_ok());
+        assert!(ok("http://127.0.0.1:3000").is_ok());
+        assert!(
+            ApiConfig::new(bind).validate().is_ok(),
+            "empty list is permissive"
+        );
+
+        let reason = |o: &str| match ok(o).unwrap_err() {
+            ApiConfigError::InvalidCorsOrigin { origin, reason } => {
+                assert_eq!(origin, o);
+                reason
+            }
+        };
+        assert!(reason("https://example.org/").contains("trailing slash"));
+        assert!(reason("https://example.org/app").contains("no path"));
+        assert!(reason("https://example.org?x=1").contains("query"));
+        assert!(reason("example.org").contains("http://"));
+        assert!(reason("ftp://example.org").contains("http://"));
+        assert!(reason("*").contains("wildcard"));
+        assert!(reason("").contains("empty"));
+        assert!(reason("https://").contains("no host"));
+        assert!(reason("https://Example.org").contains("lowercase"));
+        assert!(reason("https://example .org").contains("whitespace"));
+        assert!(reason("https://exa\u{7f}mple.org").contains("header value"));
+
+        let err = ApiConfig::new(bind)
+            .cors_origins(vec!["https://ok.example".into(), "nope".into()])
+            .validate()
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "CORS origin \"nope\" must start with http:// or https://"
+        );
     }
 
     #[test]

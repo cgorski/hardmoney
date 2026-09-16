@@ -381,6 +381,56 @@ mod openfec {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// `download_filing_bytes_capped` refuses an announced size over the cap
+    /// from the headers alone, serves a body exactly at the cap, and the
+    /// uncapped `download_filing_bytes` still reads past 10 MB (ureq's
+    /// `read_to_vec` default, which must not creep back in).
+    #[test]
+    fn capped_download_stops_at_the_cap_and_uncapped_reads_large_filings() {
+        use hardmoney::fec::{
+            Endpoints, FecApiError, Url, download_filing_bytes, download_filing_bytes_capped,
+        };
+
+        const FEC: &str = "HDR\u{1c}FEC\u{1c}8.5\u{1c}test\r\n";
+        let large = format!("{FEC}{}", "x".repeat(11 * 1024 * 1024));
+        let (addr, handle) = serve_fixtures(
+            vec![
+                ("/dq/dcdev/posted/1.fec", FEC.to_string()),
+                ("/dq/dcdev/posted/2.fec", large.clone()),
+            ],
+            3,
+        );
+        let mirror = Endpoints::default()
+            .with_docquery_base(Url::parse(&format!("http://{addr}/dq/")).unwrap());
+        let cap = u64::try_from(FEC.len()).unwrap();
+
+        assert_eq!(
+            download_filing_bytes_capped(1, &mirror, cap).unwrap(),
+            FEC.as_bytes(),
+            "exactly at the cap is fine"
+        );
+        match download_filing_bytes_capped(1, &mirror, cap - 1) {
+            Err(FecApiError::TooLarge {
+                url,
+                max_bytes,
+                content_length,
+            }) => {
+                assert!(url.ends_with("/dq/dcdev/posted/1.fec"), "{url}");
+                assert_eq!(max_bytes, cap - 1);
+                assert_eq!(content_length, Some(cap));
+            }
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
+        assert_eq!(
+            download_filing_bytes(2, &mirror).unwrap().len(),
+            large.len(),
+            "the uncapped download has no size limit"
+        );
+
+        let seen = handle.join().unwrap();
+        assert_eq!(seen.len(), 3, "{seen:?}");
+    }
+
     #[test]
     fn decodes_an_amendment_chain_page() {
         let page: Page<FilingRecord> =

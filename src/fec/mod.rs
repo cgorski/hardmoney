@@ -170,6 +170,23 @@ pub enum FecApiError {
     /// [`Endpoints::from_env`]). Raised before any request is made.
     #[error("{0}")]
     Endpoint(#[from] EndpointError),
+
+    /// The body was larger than the cap the caller set
+    /// ([`download_filing_bytes_capped`]). `content_length` is the size
+    /// the server announced, when it announced one; the download stopped
+    /// at the cap otherwise.
+    #[error(
+        "{url} is larger than the {max_bytes} byte limit{}",
+        match content_length {
+            Some(n) => format!(" ({n} bytes)"),
+            None => String::new(),
+        }
+    )]
+    TooLarge {
+        url: String,
+        max_bytes: u64,
+        content_length: Option<u64>,
+    },
 }
 
 fn body_hint(snippet: &str) -> String {
@@ -355,6 +372,36 @@ pub(crate) fn read_all(response: http::Response<ureq::Body>) -> Result<Vec<u8>> 
     Ok(bytes)
 }
 
+/// Reads a whole response body of at most `max_bytes` bytes. Refuses up
+/// front, without reading, when the server's `Content-Length` is over the
+/// cap; otherwise reads at most one byte past it, so a body of unknown
+/// length can cost the caller `max_bytes + 1` bytes and no more.
+fn read_capped(response: http::Response<ureq::Body>, url: &str, max_bytes: u64) -> Result<Vec<u8>> {
+    let content_length = response.body().content_length();
+    if content_length.is_some_and(|n| n > max_bytes) {
+        return Err(FecApiError::TooLarge {
+            url: redact_url(url),
+            max_bytes,
+            content_length,
+        });
+    }
+    let mut bytes = Vec::new();
+    response
+        .into_body()
+        .into_reader()
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).is_ok_and(|n| n <= max_bytes) {
+        Ok(bytes)
+    } else {
+        Err(FecApiError::TooLarge {
+            url: redact_url(url),
+            max_bytes,
+            content_length,
+        })
+    }
+}
+
 pub(crate) fn collapse_whitespace(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -407,11 +454,11 @@ pub fn fetch_filing_bytes_with(
         None => resolve_fec_url_with(id, endpoints).unwrap_or_else(|_| fallback.clone()),
     };
     let bytes = if url == fallback {
-        download_filing(&fallback)?
+        download_filing(&fallback, None)?
     } else {
-        match download_filing(&url) {
+        match download_filing(&url, None) {
             Ok(bytes) => bytes,
-            Err(FecApiError::Http { .. }) => download_filing(&fallback)?,
+            Err(FecApiError::Http { .. }) => download_filing(&fallback, None)?,
             Err(e) => return Err(e),
         }
     };
@@ -427,13 +474,31 @@ pub fn fetch_filing_bytes_with(
 /// network failure. This is [`crate::Filing::fetch_bytes`] with explicit
 /// endpoints and typed errors.
 pub fn download_filing_bytes(filing_id: u64, endpoints: &Endpoints) -> Result<Vec<u8>> {
-    download_filing(&endpoints.docquery_filing(filing_id))
+    download_filing(&endpoints.docquery_filing(filing_id), None)
 }
 
-fn download_filing(url: &str) -> Result<Vec<u8>> {
+/// [`download_filing_bytes`] with a size cap: a filing larger than
+/// `max_bytes` fails with [`FecApiError::TooLarge`] -- before any body
+/// is read when the server announces a `Content-Length`, and after at
+/// most `max_bytes + 1` bytes otherwise. For servers that accept a filing
+/// id from a client (`GET /tools/fetch/{id}`), where an unbounded read of
+/// a 135 MB presidential filing would be the client's choice, not the
+/// server's.
+pub fn download_filing_bytes_capped(
+    filing_id: u64,
+    endpoints: &Endpoints,
+    max_bytes: u64,
+) -> Result<Vec<u8>> {
+    download_filing(&endpoints.docquery_filing(filing_id), Some(max_bytes))
+}
+
+fn download_filing(url: &str, max_bytes: Option<u64>) -> Result<Vec<u8>> {
     let response = get_ok(agent(), url)?;
     let status = response.status().as_u16();
-    let bytes = read_all(response)?;
+    let bytes = match max_bytes {
+        Some(max) => read_capped(response, url, max)?,
+        None => read_all(response)?,
+    };
     if looks_like_html(&bytes) {
         return Err(FecApiError::Http {
             status,

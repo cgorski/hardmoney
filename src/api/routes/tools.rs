@@ -5,7 +5,7 @@
 //! | Route | Body | Response |
 //! |---|---|---|
 //! | `POST /tools/parse` | raw `.fec` bytes | [`ParsedDocument`] |
-//! | `GET /tools/fetch/{filing_id}` | none | [`ParsedDocument`] for the filing downloaded from the FEC's document store (needs the `fetch` feature; 501 otherwise) |
+//! | `GET /tools/fetch/{filing_id}` | none | [`ParsedDocument`] for the filing downloaded from the FEC's document store, if it fits the body cap (413 otherwise, and the download stops there; needs the `fetch` feature, 501 otherwise) |
 //! | `POST /tools/validate` | a [`Document`] | [`Validation`] |
 //! | `POST /tools/reconcile` | a [`Document`] | [`Reconciliation`], or 400 for a form without rules |
 //! | `POST /tools/write` | a [`Document`] | the `.fec` bytes, `Content-Disposition: attachment`, `X-Hardmoney-Validation-Errors: N` |
@@ -26,10 +26,13 @@
 //! the [`Endpoints`](crate::fec::Endpoints) in
 //! [`ApiConfig::endpoints`](crate::api::ApiConfig::endpoints), which that
 //! router supplies as a request extension; mounted on its own it falls
-//! back to [`Filing::fetch_bytes`], which reads `HARDMONEY_DOCQUERY_BASE`
-//! from the environment.
+//! back to [`Endpoints::from_env`](crate::fec::Endpoints::from_env), which
+//! reads `HARDMONEY_DOCQUERY_BASE`. At most [`MAX_CONCURRENT_FETCHES`]
+//! downloads run at once; further ones wait (and time out with the
+//! request) rather than each holding a filing-sized buffer and a thread.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use axum::Json;
 use axum::Router;
@@ -41,6 +44,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::sync::Semaphore;
 use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::parser::form::table_for_form_type;
@@ -56,6 +60,11 @@ pub struct Limits {
     /// Largest request body (and largest fetched filing) in bytes.
     pub max_body_bytes: usize,
 }
+
+/// How many `GET /tools/fetch/{id}` downloads one server runs at a time.
+/// Each holds up to [`Limits::max_body_bytes`] and a blocking-pool thread
+/// for the length of the download; a burst beyond this waits its turn.
+pub const MAX_CONCURRENT_FETCHES: usize = 4;
 
 /// Builds the `/tools/*` routes. State-free: mount it into any router.
 /// The body cap in `limits` is enforced here as well as by the API's outer
@@ -73,7 +82,16 @@ pub fn router<S: Clone + Send + Sync + 'static>(limits: Limits) -> Router<S> {
         .layer(DefaultBodyLimit::max(limits.max_body_bytes))
         .layer(RequestBodyLimitLayer::new(limits.max_body_bytes))
         .layer(Extension(limits))
+        .layer(Extension(FetchSlots(Arc::new(Semaphore::new(
+            MAX_CONCURRENT_FETCHES,
+        )))))
 }
+
+/// The semaphore behind [`MAX_CONCURRENT_FETCHES`], installed by
+/// [`router`] as a request extension so that the router stays state-free.
+/// Opaque; nothing outside this module constructs one.
+#[derive(Clone, Debug)]
+pub struct FetchSlots(Arc<Semaphore>);
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -237,35 +255,48 @@ pub async fn parse(
 /// document store and returns the same document `POST /tools/parse` would.
 /// The store is the [`Endpoints`](crate::fec::Endpoints) extension the API
 /// router installs (`docquery_base`); without one, the environment's
-/// ([`Filing::fetch_bytes`]). A filing larger than the body cap is refused
-/// with 413; a download failure, including a malformed endpoint override,
-/// is 502.
+/// ([`Endpoints::from_env`](crate::fec::Endpoints::from_env)). A filing
+/// larger than the body cap is refused with 413 -- from its
+/// `Content-Length` before any of it is read when the store sends one,
+/// and otherwise as soon as the cap is passed, so the server never holds
+/// more than the cap for a client's choice of id. A download failure,
+/// including a malformed endpoint override, is 502.
 #[cfg(feature = "fetch")]
 pub async fn fetch(
     Extension(limits): Extension<Limits>,
+    Extension(slots): Extension<FetchSlots>,
     endpoints: Option<Extension<crate::fec::Endpoints>>,
     Path(filing_id): Path<u64>,
 ) -> Result<Json<ParsedDocument>, ToolsError> {
-    let bytes = tokio::task::spawn_blocking(move || match endpoints {
-        Some(Extension(endpoints)) => {
-            crate::fec::download_filing_bytes(filing_id, &endpoints).map_err(|e| e.to_string())
-        }
-        None => Filing::fetch_bytes(filing_id).map_err(|e| e.to_string()),
+    use crate::fec::{Endpoints, FecApiError, download_filing_bytes_capped};
+
+    // Waiting here is cancelled with the request if the timeout fires,
+    // which a running `spawn_blocking` download would not be.
+    let _slot = slots
+        .0
+        .acquire()
+        .await
+        .map_err(|e| ToolsError::UpstreamFailed(format!("download slot unavailable: {e}")))?;
+    let max_bytes = u64::try_from(limits.max_body_bytes).unwrap_or(u64::MAX);
+    let bytes = tokio::task::spawn_blocking(move || {
+        let endpoints = match endpoints {
+            Some(Extension(endpoints)) => endpoints,
+            None => Endpoints::from_env()?,
+        };
+        download_filing_bytes_capped(filing_id, &endpoints, max_bytes)
     })
     .await
     .map_err(|e| ToolsError::UpstreamFailed(format!("download task failed: {e}")))?
-    .map_err(|e| {
-        ToolsError::UpstreamFailed(format!(
-            "could not download filing {filing_id} from the FEC: {e}"
-        ))
-    })?;
-    if bytes.len() > limits.max_body_bytes {
-        return Err(ToolsError::PayloadTooLarge(format!(
-            "filing {filing_id} is {} bytes, larger than this server's {} byte limit; use `hardmoney parse {filing_id}` instead",
-            bytes.len(),
+    .map_err(|e| match e {
+        FecApiError::TooLarge { content_length, .. } => ToolsError::PayloadTooLarge(format!(
+            "filing {filing_id} is{} larger than this server's {} byte limit; use `hardmoney parse {filing_id}` instead",
+            content_length.map_or(String::new(), |n| format!(" {n} bytes,")),
             limits.max_body_bytes
-        )));
-    }
+        )),
+        other => ToolsError::UpstreamFailed(format!(
+            "could not download filing {filing_id} from the FEC: {other}"
+        )),
+    })?;
     parse_document(&bytes).map(Json)
 }
 

@@ -704,6 +704,121 @@ async fn full_router_mounts_ui_and_tools_only_when_enabled() {
     assert_eq!(status, StatusCode::OK);
 }
 
+/// In allow-list mode a browser at an allowed origin must be able to send
+/// the API key and a JSON body (both need a preflight) and to read the two
+/// headers `POST /tools/write` sets. The `CorsLayer` is outermost, so a
+/// preflight is answered before the key check and never reaches a handler
+/// or the database.
+#[tokio::test]
+async fn cors_allow_list_admits_the_api_key_and_json_and_exposes_the_write_headers() {
+    use hardmoney::api::ApiConfig;
+
+    let pool = sqlx::PgPool::connect_lazy("postgres://nobody@127.0.0.1:1/none").unwrap();
+    let bind = "127.0.0.1:0".parse().unwrap();
+    let config = ApiConfig::new(bind)
+        .cors_origins(vec!["https://example.org".into()])
+        .api_key(Some("k".into()))
+        .ui(true);
+    config.validate().unwrap();
+    let app = hardmoney::api::router(pool.clone(), &config);
+
+    let preflight = |origin: &'static str| {
+        Request::builder()
+            .method("OPTIONS")
+            .uri("/tools/validate")
+            .header(header::ORIGIN, origin)
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+            .header(
+                header::ACCESS_CONTROL_REQUEST_HEADERS,
+                "x-api-key, content-type",
+            )
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let (status, headers, _) = send(&app, preflight("https://example.org")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        header_str(&headers, "access-control-allow-origin"),
+        "https://example.org"
+    );
+    let allowed_headers = header_str(&headers, "access-control-allow-headers").to_ascii_lowercase();
+    assert!(allowed_headers.contains("x-api-key"), "{allowed_headers}");
+    assert!(
+        allowed_headers.contains("content-type"),
+        "{allowed_headers}"
+    );
+    let methods = header_str(&headers, "access-control-allow-methods");
+    assert!(methods.contains("POST"), "{methods}");
+    assert!(methods.contains("GET"), "{methods}");
+
+    // An origin off the list gets no `Access-Control-Allow-Origin`, which
+    // is the header a browser blocks on (tower-http still lists the
+    // allowed headers and methods; without a matching origin they are
+    // inert).
+    let (_, headers, _) = send(&app, preflight("https://evil.example")).await;
+    assert!(headers.get("access-control-allow-origin").is_none());
+
+    // A real response carries the exposed headers (here from /health,
+    // which needs neither a key nor a database).
+    let (status, headers, _) = send(
+        &app,
+        Request::builder()
+            .uri("/health")
+            .header(header::ORIGIN, "https://example.org")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let exposed = header_str(&headers, "access-control-expose-headers").to_ascii_lowercase();
+    assert!(exposed.contains("content-disposition"), "{exposed}");
+    assert!(
+        exposed.contains("x-hardmoney-validation-errors"),
+        "{exposed}"
+    );
+
+    // Without --ui the API is read-only and POST is not offered.
+    let read_only = hardmoney::api::router(
+        pool,
+        &ApiConfig::new(bind).cors_origins(vec!["https://example.org".into()]),
+    );
+    let (_, headers, _) = send(&read_only, preflight("https://example.org")).await;
+    let methods = header_str(&headers, "access-control-allow-methods");
+    assert!(!methods.contains("POST"), "{methods}");
+}
+
+/// `router` must not panic on an origin `validate` would reject (the
+/// CLI validates first; a library caller might not): the entry is dropped
+/// and the rest of the list still works.
+#[tokio::test]
+async fn cors_router_skips_an_invalid_origin_instead_of_panicking() {
+    use hardmoney::api::ApiConfig;
+
+    let pool = sqlx::PgPool::connect_lazy("postgres://nobody@127.0.0.1:1/none").unwrap();
+    let config = ApiConfig::new("127.0.0.1:0".parse().unwrap()).cors_origins(vec![
+        "*".into(),
+        "https://example.org/".into(),
+        "https://example.org".into(),
+    ]);
+    assert!(config.validate().is_err());
+    let app = hardmoney::api::router(pool, &config);
+    let (status, headers, _) = send(
+        &app,
+        Request::builder()
+            .uri("/health")
+            .header(header::ORIGIN, "https://example.org")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        header_str(&headers, "access-control-allow-origin"),
+        "https://example.org"
+    );
+}
+
 /// A one-shot local HTTP server answering `connections` requests with
 /// `body`, returning the request lines it saw.
 fn serve_bytes(
@@ -759,6 +874,145 @@ async fn tools_fetch_downloads_from_the_configured_docquery_base() {
     assert_eq!(doc["form_type"], "F3XA");
     let seen = handle.join().unwrap();
     assert_eq!(seen, ["GET /mirror/dcdev/posted/2011827.fec HTTP/1.1"]);
+}
+
+/// The tools router pointed at a local document store with `max_body_bytes`
+/// as its cap.
+fn fetch_app(addr: std::net::SocketAddr, max_body_bytes: usize) -> Router {
+    use axum::extract::Extension;
+    use hardmoney::fec::{Endpoints, Url};
+    let mirror = Endpoints::default()
+        .with_docquery_base(Url::parse(&format!("http://{addr}/mirror")).unwrap());
+    Router::new()
+        .merge(tools::router(Limits { max_body_bytes }))
+        .layer(Extension(mirror))
+}
+
+/// A filing exactly at the cap is served; one byte over is 413.
+#[tokio::test]
+async fn tools_fetch_accepts_a_filing_exactly_at_the_cap() {
+    let (addr, handle) = serve_bytes(FIXTURE, 1);
+    let (status, _, body) = get(&fetch_app(addr, FIXTURE.len()), "/tools/fetch/2011827").await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(json(&body)["line_count"], FIXTURE_LINES);
+    handle.join().unwrap();
+
+    let (addr, handle) = serve_bytes(FIXTURE, 1);
+    let (status, _, body) = get(&fetch_app(addr, FIXTURE.len() - 1), "/tools/fetch/2011827").await;
+    assert_eq!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let message = json(&body)["error"].as_str().unwrap().to_string();
+    assert!(message.contains("2011827"), "{message}");
+    assert!(
+        message.contains(&(FIXTURE.len() - 1).to_string()),
+        "{message}"
+    );
+    assert!(message.contains("hardmoney parse 2011827"), "{message}");
+    handle.join().unwrap();
+}
+
+/// A server that announces a body far over the cap is refused from its
+/// `Content-Length` alone: the handler never reads the body.
+#[tokio::test]
+async fn tools_fetch_refuses_an_oversized_content_length_without_reading_the_body() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = vec![0u8; 16384];
+        let _ = stream.read(&mut buf).unwrap();
+        // Announces 100 MB, sends a few bytes, then holds the connection
+        // open: a client that waits for the body would hang here.
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 100000000\r\nConnection: close\r\n\r\nHDR",
+            )
+            .unwrap();
+        // Ends when the client closes (read returns 0 or an error).
+        let mut sink = [0u8; 64];
+        while matches!(stream.read(&mut sink), Ok(n) if n > 0) {}
+    });
+
+    let app = fetch_app(addr, 1024 * 1024);
+    let (status, _, body) = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        get(&app, "/tools/fetch/2010101"),
+    )
+    .await
+    .expect("the handler must answer without waiting for the body");
+    assert_eq!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let message = json(&body)["error"].as_str().unwrap().to_string();
+    assert!(message.contains("100000000 bytes"), "{message}");
+    handle.join().unwrap();
+}
+
+/// A chunked body of unknown length is cut off one byte past the cap, so
+/// a client's choice of filing id can never make the server buffer more
+/// than its own limit.
+#[tokio::test]
+async fn tools_fetch_stops_reading_an_unbounded_body_at_the_cap() {
+    use std::io::{Read, Write};
+    const CAP: usize = 256 * 1024;
+    // The server gives up on its own well past the cap, so a regression
+    // fails an assertion instead of hanging the test.
+    const SERVER_GIVES_UP_AT: usize = 64 * 1024 * 1024;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = vec![0u8; 16384];
+        let _ = stream.read(&mut buf).unwrap();
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        let chunk = vec![b'x'; 64 * 1024];
+        let header = format!("{:x}\r\n", chunk.len());
+        let mut written = 0usize;
+        while written < SERVER_GIVES_UP_AT {
+            if stream.write_all(header.as_bytes()).is_err()
+                || stream.write_all(&chunk).is_err()
+                || stream.write_all(b"\r\n").is_err()
+            {
+                break;
+            }
+            written += chunk.len();
+        }
+        written
+    });
+
+    let app = fetch_app(addr, CAP);
+    let (status, _, body) = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        get(&app, "/tools/fetch/2010101"),
+    )
+    .await
+    .expect("the handler must give up at the cap");
+    assert_eq!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let written = handle.join().unwrap();
+    // Socket buffers absorb some chunks after the client stops reading;
+    // what must not happen is the server streaming on towards its limit.
+    assert!(
+        written < SERVER_GIVES_UP_AT / 4,
+        "the client kept reading: server wrote {written} bytes against a {CAP} byte cap"
+    );
 }
 
 // ---------------------------------------------------------------------------

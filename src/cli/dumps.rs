@@ -1365,9 +1365,12 @@ impl Step {
         for t in &dropped {
             lines.push(format!("DROP TABLE IF EXISTS disclosure.{t} CASCADE;"));
         }
+        // `pg_restore_command` leaves the URL's password out, as the real
+        // invocation does (it travels in PGPASSWORD), so nothing here needs
+        // redacting.
         lines.push(shell_join(&dump::pg_restore_command(
             &plan,
-            &redact_url(url),
+            url,
             &self.archive_path(cache_dir),
         )));
         if plan.data_only {
@@ -1835,6 +1838,11 @@ async fn import(common: &Common, args: ImportArgs) -> CliResult {
             for line in step.explain(&url, &common.cache_dir, args.jobs)? {
                 out.say(format!("    {line}"));
                 commands.push(line);
+            }
+            if preflight::strip_password(&url).1.is_some() {
+                out.say(
+                    "    (the URL's password is not on that command line; pg_restore receives it in the PGPASSWORD environment variable)",
+                );
             }
             out.say(format!(
                 "    (then hardmoney recreates the {} in namespace '{}' and records the import in its loads table)",
@@ -2671,9 +2679,11 @@ mod tests {
             lines[1],
             "DROP TABLE IF EXISTS disclosure.fec_fitem_sched_a_2025_2026 CASCADE;"
         );
+        // The password is not on the command line at all: the real
+        // invocation passes it in PGPASSWORD.
         assert_eq!(
             lines[2],
-            "pg_restore --no-owner --no-acl --jobs=2 --table=fec_fitem_sched_a --table=fec_fitem_sched_a_2025_2026 -d postgres://alice:***@localhost/fec /cache/schedule_a_full.dump"
+            "pg_restore --no-owner --no-acl --jobs=2 --table=fec_fitem_sched_a --table=fec_fitem_sched_a_2025_2026 -d postgres://alice@localhost/fec /cache/schedule_a_full.dump"
         );
         assert!(lines.iter().any(|l| l == "CREATE UNIQUE INDEX hm_fec_fitem_sched_a_2025_2026_sub_id_uidx ON disclosure.fec_fitem_sched_a_2025_2026 (sub_id);"), "{lines:?}");
         assert!(

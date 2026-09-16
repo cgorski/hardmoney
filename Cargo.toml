@@ -66,7 +66,8 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 # lookup. Remove once sqlx ships the fix.
 whoami = { version = "2", default-features = false, features = ["std"], optional = true }
 zip = { version = "8", default-features = false, features = ["deflate"], optional = true }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "net", "signal"], optional = true }
+# `sync`: the semaphore bounding concurrent `GET /tools/fetch` downloads.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "net", "signal", "sync"], optional = true }
 indicatif = { version = "0.18", optional = true }
 
 # api (optional)

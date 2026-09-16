@@ -383,6 +383,70 @@ pub fn redact_url(url: &str) -> String {
     format!("{scheme}://{user}:***{tail}")
 }
 
+/// `url` with its password removed, and the password itself,
+/// percent-decoded (`p%40ss` is `p@ss`), which is the form libpq reads
+/// from `PGPASSWORD`. A URL without a password (or with an empty one)
+/// comes back unchanged with `None`.
+///
+/// For handing a connection to a child process such as `pg_restore`: a
+/// password in the argument list is visible to every user on the machine
+/// through `ps`, while one in the environment is not, and libpq falls back
+/// to `PGPASSWORD` when the URL carries none.
+#[must_use]
+pub fn strip_password(url: &str) -> (String, Option<String>) {
+    let unchanged = || (url.to_string(), None);
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return unchanged();
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let Some(authority) = rest.get(..authority_end) else {
+        return unchanged();
+    };
+    let Some(at) = authority.rfind('@') else {
+        return unchanged();
+    };
+    let Some(userinfo) = authority.get(..at) else {
+        return unchanged();
+    };
+    let Some((user, password)) = userinfo.split_once(':') else {
+        return unchanged();
+    };
+    let Some(tail) = rest.get(at..) else {
+        return unchanged();
+    };
+    let password = percent_decode(password);
+    (
+        format!("{scheme}://{user}{tail}"),
+        Some(password).filter(|p| !p.is_empty()),
+    )
+}
+
+/// `%XX` escapes decoded to bytes; everything else passes through. Bytes
+/// that do not form UTF-8 afterwards are replaced.
+fn percent_decode(s: &str) -> String {
+    fn hex(b: u8) -> Option<u8> {
+        char::from(b)
+            .to_digit(16)
+            .and_then(|d| u8::try_from(d).ok())
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while let Some(&b) = bytes.get(i) {
+        if b == b'%'
+            && let Some(hi) = bytes.get(i.saturating_add(1)).copied().and_then(hex)
+            && let Some(lo) = bytes.get(i.saturating_add(2)).copied().and_then(hex)
+        {
+            out.push(hi << 4 | lo);
+            i = i.saturating_add(3);
+        } else {
+            out.push(b);
+            i = i.saturating_add(1);
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// The login name of the person running this, for suggested commands
 /// (`USER`, then `USERNAME`, else `you`).
 #[must_use]
@@ -1609,6 +1673,54 @@ mod tests {
             "postgres://a:***@h/d"
         );
         assert_eq!(redact_url("nonsense"), "nonsense");
+    }
+
+    #[test]
+    fn strip_password_moves_the_password_out_of_the_url_decoded() {
+        assert_eq!(
+            strip_password("postgres://alice:secret@host:5432/db?sslmode=require"),
+            (
+                "postgres://alice@host:5432/db?sslmode=require".to_string(),
+                Some("secret".to_string())
+            )
+        );
+        // Percent-escapes are decoded to what libpq wants in PGPASSWORD.
+        assert_eq!(
+            strip_password("postgres://a:p%40ss%3Aw%2Frd@h/d"),
+            (
+                "postgres://a@h/d".to_string(),
+                Some("p@ss:w/rd".to_string())
+            )
+        );
+        // A lone or truncated `%` is kept as is.
+        assert_eq!(
+            strip_password("postgres://a:100%@h/d"),
+            ("postgres://a@h/d".to_string(), Some("100%".to_string()))
+        );
+        assert_eq!(
+            strip_password("postgres://a:%4@h/d"),
+            ("postgres://a@h/d".to_string(), Some("%4".to_string()))
+        );
+        // No password: unchanged.
+        assert_eq!(
+            strip_password("postgres://alice@host/db"),
+            ("postgres://alice@host/db".to_string(), None)
+        );
+        assert_eq!(
+            strip_password("postgres://host/db"),
+            ("postgres://host/db".to_string(), None)
+        );
+        // An empty password is dropped from the URL and not reported.
+        assert_eq!(
+            strip_password("postgres://alice:@host/db"),
+            ("postgres://alice@host/db".to_string(), None)
+        );
+        // `@` in the path or query is not the userinfo separator.
+        assert_eq!(
+            strip_password("postgres://host/db?application_name=a@b"),
+            ("postgres://host/db?application_name=a@b".to_string(), None)
+        );
+        assert_eq!(strip_password("nonsense"), ("nonsense".to_string(), None));
     }
 
     #[test]

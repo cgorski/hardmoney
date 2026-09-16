@@ -1,5 +1,49 @@
 # Changelog
 
+## Unreleased
+
+- **CORS allow-list mode now works for browser clients.** With
+  `--cors-origin`, the server answers a preflight with
+  `Access-Control-Allow-Headers: content-type, x-api-key` and exposes
+  `Content-Disposition` and `X-Hardmoney-Validation-Errors`, so a page at
+  an allowed origin can send the API key and a JSON body and read what
+  `POST /tools/write` returns; before, every such request failed the
+  browser's preflight. New `ApiConfig::validate` (and `ApiConfigError`)
+  rejects an origin a browser could never match -- a trailing slash, a
+  path, uppercase, a missing scheme, `*` -- and `serve` (the library
+  function and the CLI) runs it before binding, so a mistyped
+  `--cors-origin` is a startup error naming the entry instead of a silent
+  browser failure. `api::router` no longer panics on `*`; it skips and
+  logs an entry `validate` would reject.
+- **`GET /tools/fetch/{id}` never downloads more than the body cap.** The
+  filing is refused with 413 from the document store's `Content-Length`
+  before any of it is read, or as soon as the cap is passed for a body of
+  unknown length; before, the whole filing (up to 135 MB) was read into
+  memory and only then compared with the cap. At most four fetches run at
+  once per server (`tools::MAX_CONCURRENT_FETCHES`); further ones wait
+  their turn within the request timeout. Library: new
+  `fec::download_filing_bytes_capped` and `FecApiError::TooLarge`;
+  `download_filing_bytes`, `fetch_filing_bytes*`, and `Filing::fetch_bytes`
+  are unchanged and still unbounded.
+- **`dumps import` keeps the database password off `pg_restore`'s command
+  line.** The URL's password is passed to the child in `PGPASSWORD`
+  (percent-decoded) and `-d` receives the URL without it, so it is no
+  longer readable by every user on the machine through `ps` for the
+  hours a restore runs. `dump::pg_restore_command` and `--explain` show
+  the command exactly as it runs, with no password; new
+  `preflight::strip_password`.
+- **The CLI reads `.env` from the current directory only.** It used to
+  search every parent directory as well, so a `.env` in the home
+  directory or a checkout above the working folder could repoint
+  `DATABASE_URL` or the `HARDMONEY_*` FEC endpoints without notice. The
+  documentation always said "the current directory"; the code now does.
+- Tests: the Postgres integration tests fail, rather than silently pass,
+  when `HARDMONEY_TEST_DATABASE_URL` is unset under GitHub Actions, and
+  the crates.io publish workflow now runs them against a Postgres service
+  (it ran the suite without a database before). CI workflows pin every
+  action to a commit, grant `contents: read` by default, build with
+  `--locked`, and cancel superseded pull-request runs.
+
 ## 3.2.0 — 2026-09-16
 
 - **Every FEC address is configurable, from one place.** New

@@ -11,7 +11,7 @@ whether you ask for them or not.
 | Flag | Default | Effect |
 |---|---|---|
 | `--api-key <key>` (or `HARDMONEY_API_KEY`) | none | Every route except `/health` requires the key, in an `X-Api-Key` header or `?api_key=`. Missing or wrong: 401. |
-| `--cors-origin <origin>` (repeatable) | any origin | Switches CORS from permissive to an allow-list of exactly these origins, and restricts methods to `GET` and `HEAD`. |
+| `--cors-origin <origin>` (repeatable) | any origin | Switches CORS from permissive to an allow-list of exactly these origins (`scheme://host[:port]`, as a browser sends `Origin`; anything else is refused at startup), restricts methods to `GET` and `HEAD` (plus `POST` with `--ui`), allows the `X-Api-Key` and `Content-Type` request headers, and exposes the `Content-Disposition` and `X-Hardmoney-Validation-Errors` response headers. |
 | `--timeout-secs <n>` | 30 | Wall-clock cap per request; a request that exceeds it gets a 408. Also sets a Postgres `statement_timeout` two seconds shorter on every pooled connection, so a slow query is cancelled server-side rather than left running after the client has given up. |
 | `--max-connections <n>` | 10 | Size of the database connection pool. |
 
@@ -103,7 +103,36 @@ $ curl -s -i -H 'Origin: https://evil.example' http://127.0.0.1:18090/health | g
 
 (No output: no header, so the browser refuses to hand the response to
 the page.) The API is read-only, so the allow-list mode also restricts
-methods to `GET` and `HEAD`.
+methods to `GET` and `HEAD`; with `--ui`, `POST` is added for the
+`/tools/*` routes.
+
+A browser sends a preflight (`OPTIONS`) before any request that carries
+the API key or a JSON body, and it goes ahead only if the answer lists
+those headers. The allow-list mode lists them, along with the two
+response headers `POST /tools/write` sets, so a page at an allowed
+origin can use every route:
+
+```bash
+$ curl -s -i -X OPTIONS -H 'Origin: https://example.org' \
+    -H 'Access-Control-Request-Method: POST' \
+    -H 'Access-Control-Request-Headers: x-api-key, content-type' \
+    http://127.0.0.1:18090/tools/validate | grep -i 'access-control'
+```
+
+```text
+access-control-allow-origin: https://example.org
+access-control-allow-methods: GET,HEAD,POST
+access-control-allow-headers: content-type,x-api-key
+```
+
+An origin is matched exactly against what the browser sends, which is
+`scheme://host[:port]` in lowercase and nothing more. `serve` refuses to
+start on an entry a browser could never match -- a trailing slash
+(`https://example.org/`), a path, uppercase, a missing scheme, or `*`
+(leave the flag off to allow any origin) -- and says which entry and
+why. The embedded UI (`--ui`) is served from the same origin as the API
+and never needs any of this; the allow-list is for a page hosted
+elsewhere.
 
 ## Errors that tell the client the right amount
 

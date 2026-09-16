@@ -141,7 +141,7 @@ errors are `{"error": "..."}`.
 | Route | Body | Response |
 |---|---|---|
 | `POST /tools/parse` | raw `.fec` bytes (`application/octet-stream` or `text/plain`) | the parsed document (below) |
-| `GET /tools/fetch/{filing_id}` | none | the same, for a filing downloaded from the FEC (501 in a build without the `fetch` feature) |
+| `GET /tools/fetch/{filing_id}` | none | the same, for a filing downloaded from the FEC; 413 if it is larger than the server's body cap, decided from the store's `Content-Length` before anything is read, or as soon as the cap is passed (501 in a build without the `fetch` feature) |
 | `POST /tools/validate` | a document (JSON) | a `Validation`: `{"findings": [{severity, rule, line_no, form_type, field, message}]}` |
 | `POST /tools/reconcile` | a document (JSON) | a `Reconciliation`: `{"form", "checks": [{line, field, column, rule, reported, expected, delta, relation, lines_summed, reported_unparseable}]}`; 400 for a form without rules |
 | `POST /tools/write` | a document (JSON) | the `.fec` bytes, `Content-Disposition: attachment; filename="<form>-<committee>.fec"`, `X-Hardmoney-Validation-Errors: N` |

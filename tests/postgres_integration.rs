@@ -3,7 +3,10 @@
 //!
 //! Gated on `HARDMONEY_TEST_DATABASE_URL`. When unset every test here is a
 //! no-op that prints a skip notice, so `cargo test` stays green on a
-//! machine without Postgres. CI sets it (see `.github/workflows/ci.yml`).
+//! machine without Postgres -- except under GitHub Actions
+//! (`GITHUB_ACTIONS` set), where a missing URL is a failure: a workflow
+//! that forgot the Postgres service must not report these tests as
+//! passed. CI sets it (see `.github/workflows/ci.yml`).
 //!
 //! Each test works in its own randomly-named namespace and drops it at the
 //! end, so tests can run in parallel against one database.
@@ -32,6 +35,11 @@ macro_rules! require_db {
     () => {
         match database_url() {
             Some(url) => url,
+            None if std::env::var_os("GITHUB_ACTIONS").is_some() => panic!(
+                "HARDMONEY_TEST_DATABASE_URL is not set, but this is a GitHub Actions run: \
+                 the Postgres integration tests must not be skipped in CI (add the Postgres \
+                 service and the variable to the workflow as .github/workflows/ci.yml does)"
+            ),
             None => {
                 eprintln!("skipping: HARDMONEY_TEST_DATABASE_URL not set");
                 return;
