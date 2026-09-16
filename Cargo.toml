@@ -44,9 +44,9 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 # Most FEC field values (dates, amounts, codes, IDs, ZIPs) are <= 24 bytes;
 # CompactString stores those inline with no heap allocation, which roughly
 # halves the memory of a parsed 700k-line presidential filing.
-compact_str = "0.9"
+compact_str = "0.10"
 # Display/FromStr/iteration derives for the crate's closed-set enums.
-strum = { version = "0.27", features = ["derive"] }
+strum = { version = "0.28", features = ["derive"] }
 # Exact base-10 decimal money type, used everywhere hardmoney represents a
 # dollar amount (parsing, typed views, bulk ETL, REST API). Never round-trips
 # money through `f64`: FEC amounts are decimal currency values, and binary
