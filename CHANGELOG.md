@@ -43,6 +43,17 @@
   (it ran the suite without a database before). CI workflows pin every
   action to a commit, grant `contents: read` by default, build with
   `--locked`, and cancel superseded pull-request runs.
+- **Validator: 3x faster on large filings, same findings.** The
+  per-field classifiers that decide what a column is (state, ZIP, date,
+  district, office, election code, check-box, year, phone) and what a
+  blank one is judged by read the FEC workbook's prose for every field of
+  every line; that prose is constant, so it is now read once per column
+  (`FieldProfile`), and the current-format decision once per filing.
+  Validating the 135 MB presidential filing drops from 5.7 s to 1.9 s
+  (parse 0.7 s). `validate --json` output is byte-identical on all 61
+  fixtures and on that filing. New `benches/validate.rs` times
+  `validate`, `reconcile`, and `review` on parsed fixtures
+  (`HARDMONEY_BENCH_FILING` adds one of your own).
 - **Writer: three round-trip gaps closed, found by fuzzing.** (1) A
   `[BEGINTEXT]` block after a body line: the parser splices it into that
   line's `text` with its line breaks (and any ASCII-28, since block lines

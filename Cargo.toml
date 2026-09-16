@@ -123,5 +123,10 @@ criterion = { version = "0.8", features = ["html_reports"] }
 name = "parse"
 harness = false
 
+# benches/validate.rs: the validator, reconciler, and reviewer on parsed fixtures.
+[[bench]]
+name = "validate"
+harness = false
+
 [profile.release]
 opt-level = 3

@@ -603,6 +603,7 @@ impl Filing {
         let mut checker = Checker {
             filing: self,
             findings: Vec::new(),
+            current_format: bundled_version().is_some_and(|v| v == self.version),
         };
         checker.check_header();
         checker.check_cover();
@@ -1060,12 +1061,128 @@ fn parse_condition(text: Option<&str>, default: Condition) -> Condition {
 }
 
 // ---------------------------------------------------------------------------
+// Field profiles: the classifiers' answers, once per FieldSpec
+// ---------------------------------------------------------------------------
+
+/// What the workbook says about one column, decided once per process.
+///
+/// The classifiers above read a [`FieldSpec`]'s prose (`description`,
+/// `rule`, `value_reference`), which never changes while the program
+/// runs. Before this cache they ran again for every field of every line
+/// -- about a dozen string scans, several of them allocating -- and were
+/// most of what `validate` cost on a large filing (5.7 s of 6.4 s on a
+/// 135 MB presidential report, against 0.7 s to parse it). The fields
+/// here are exactly the classifiers' results, so nothing about which
+/// checks fire can change; only when the prose is read.
+#[derive(Debug, Clone)]
+struct FieldProfile {
+    is_date: bool,
+    is_year: bool,
+    is_phone: bool,
+    is_district: bool,
+    is_zip: bool,
+    is_office: bool,
+    is_election_code: bool,
+    is_checkbox: bool,
+    is_state: bool,
+    wrong_code_is_error: bool,
+    /// The rule and the line-independent part of the condition that a
+    /// blank value is judged by (`check_required`); `None` when the
+    /// column is not required at all.
+    required: Option<(Rule, Condition)>,
+    /// The `..._street_1` sibling of a `..._street_2` column.
+    street_1_sibling: Option<String>,
+    /// Schedule H3's `event_type` codes, from the value reference; empty
+    /// for every other column.
+    event_codes: Vec<&'static str>,
+}
+
+impl FieldProfile {
+    fn of(table: Table, spec: &'static FieldSpec) -> Self {
+        let required = match spec.required {
+            Requirement::None => None,
+            Requirement::Error => Some((
+                Rule::RequiredFieldEmpty,
+                parse_condition(spec.rule, Condition::Always),
+            )),
+            Requirement::Warning => Some((
+                Rule::RecommendedFieldEmpty,
+                parse_condition(spec.rule, Condition::Always),
+            )),
+            Requirement::Conditional(text) => {
+                // The condition is usually in the REQUIRED cell ("X (warn if
+                // REPORT CODE=[12?|30?])"); when that cell says only
+                // "Conditional Warning", the RULE cell carries it ("Used if
+                // CCM, PAC or PTY" on Schedule A's donor committee columns),
+                // and WebCheck enforces it from there.
+                let mut condition = parse_condition(Some(text), Condition::Unknown);
+                if condition == Condition::Unknown {
+                    condition = parse_condition(spec.rule, Condition::Unknown);
+                }
+                Some((Rule::ConditionallyRequiredFieldEmpty, condition))
+            }
+        };
+        let event_codes = if table == Table::H3 && spec.canonical == Some("event_type") {
+            spec.value_reference
+                .map(enumerated_codes)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        Self {
+            is_date: is_date_field(spec),
+            is_year: is_year_field(spec),
+            is_phone: is_phone_field(spec),
+            is_district: is_district_field(spec),
+            is_zip: is_zip_field(spec),
+            is_office: is_office_field(spec),
+            is_election_code: is_election_code_field(spec),
+            is_checkbox: is_checkbox_field(spec),
+            is_state: is_state_field(spec),
+            wrong_code_is_error: wrong_code_is_error(spec),
+            required,
+            street_1_sibling: spec.canonical.and_then(street_1_sibling),
+            event_codes,
+        }
+    }
+}
+
+/// One profile per `FieldSpec`, in `Table::specs()` order, indexed by the
+/// table's discriminant.
+static PROFILES: LazyLock<Vec<Vec<FieldProfile>>> = LazyLock::new(|| {
+    let slots = Table::ALL
+        .iter()
+        .map(|t| *t as usize)
+        .max()
+        .map_or(0, |m| m.saturating_add(1));
+    let mut all = vec![Vec::new(); slots];
+    for table in Table::ALL {
+        if let Some(slot) = all.get_mut(*table as usize) {
+            *slot = table
+                .specs()
+                .iter()
+                .map(|spec| FieldProfile::of(*table, spec))
+                .collect();
+        }
+    }
+    all
+});
+
+/// The profiles for `table`'s specs, parallel to `table.specs()`.
+fn profiles(table: Table) -> &'static [FieldProfile] {
+    PROFILES.get(table as usize).map_or(&[], Vec::as_slice)
+}
+
+// ---------------------------------------------------------------------------
 // The checker
 // ---------------------------------------------------------------------------
 
 struct Checker<'f> {
     filing: &'f Filing,
     findings: Vec<Finding>,
+    /// Whether the filing is in the bundled (current) spec version, for
+    /// [`Checker::demote_if_superseded`]; decided once, not per finding.
+    current_format: bool,
 }
 
 impl Checker<'_> {
@@ -1270,16 +1387,28 @@ impl Checker<'_> {
     /// no specs and are skipped; fields a spec names but this version's
     /// layout lacks are skipped too.
     fn check_fields(&mut self, line: &ParsedLine) {
-        for spec in line.table().specs() {
+        let table = line.table();
+        let profiles = profiles(table);
+        for (i, spec) in table.specs().iter().enumerate() {
             let Some(name) = spec.canonical else {
                 continue;
             };
             let Some(raw) = line.get(name) else {
                 continue;
             };
+            // The cache is built from the same slice, so the profile is
+            // always there; the fallback only keeps this panic-free.
+            let computed;
+            let p: &FieldProfile = match profiles.get(i) {
+                Some(p) => p,
+                None => {
+                    computed = FieldProfile::of(table, spec);
+                    &computed
+                }
+            };
             let value = effective_value(raw);
             if value.is_empty() {
-                self.check_required(line, spec, name);
+                self.check_required(line, spec, name, p);
                 continue;
             }
 
@@ -1302,7 +1431,7 @@ impl Checker<'_> {
             } else {
                 (value.chars().count(), "characters")
             };
-            if !is_date_field(spec)
+            if !p.is_date
                 && let Some(max) = spec.max_len
                 && len > usize::from(max)
             {
@@ -1321,10 +1450,10 @@ impl Checker<'_> {
 
             let all_digits = value.bytes().all(|b| b.is_ascii_digit());
             match spec.kind {
-                FieldKind::Numeric if is_date_field(spec) => self.check_date(line, name, value),
+                FieldKind::Numeric if p.is_date => self.check_date(line, name, value),
                 // A wrong-length year or phone number is reported once,
                 // under its own rule.
-                FieldKind::Numeric if is_year_field(spec) => {
+                FieldKind::Numeric if p.is_year => {
                     if !(all_digits && len == 4) {
                         self.push_line(
                             Rule::InvalidYear,
@@ -1337,7 +1466,7 @@ impl Checker<'_> {
                         );
                     }
                 }
-                FieldKind::Numeric if is_phone_field(spec) => {
+                FieldKind::Numeric if p.is_phone => {
                     if !(all_digits && len == 10) {
                         self.push_line(
                             Rule::InvalidPhoneNumber,
@@ -1350,7 +1479,7 @@ impl Checker<'_> {
                         );
                     }
                 }
-                FieldKind::Numeric if is_district_field(spec) => {}
+                FieldKind::Numeric if p.is_district => {}
                 FieldKind::Numeric => {
                     if !is_numeric_value(value) {
                         self.push_line(
@@ -1384,7 +1513,7 @@ impl Checker<'_> {
             // FEC's message is the same, so the check is by marker, not
             // type, and stands in for the generic numeric and pattern
             // checks on these columns.
-            if is_district_field(spec) && !(all_digits && len == 2) {
+            if p.is_district && !(all_digits && len == 2) {
                 let mut finding = Finding::new(
                     Rule::InvalidDistrict,
                     line.line_no,
@@ -1399,7 +1528,7 @@ impl Checker<'_> {
                 self.findings.push(finding);
             }
 
-            if is_zip_field(spec) && !(all_digits && (len == 5 || len == 9)) {
+            if p.is_zip && !(all_digits && (len == 5 || len == 9)) {
                 self.push_line(
                     Rule::InvalidZipCode,
                     line,
@@ -1411,7 +1540,7 @@ impl Checker<'_> {
                 );
             }
 
-            if is_office_field(spec)
+            if p.is_office
                 && !(value.eq_ignore_ascii_case("H")
                     || value.eq_ignore_ascii_case("S")
                     || value.eq_ignore_ascii_case("P"))
@@ -1424,7 +1553,7 @@ impl Checker<'_> {
                 );
             }
 
-            if is_election_code_field(spec) && !is_election_code(value) {
+            if p.is_election_code && !is_election_code(value) {
                 self.push_line(
                     Rule::InvalidElectionCode,
                     line,
@@ -1436,7 +1565,7 @@ impl Checker<'_> {
                 );
             }
 
-            if is_checkbox_field(spec) && !value.eq_ignore_ascii_case("X") {
+            if p.is_checkbox && !value.eq_ignore_ascii_case("X") {
                 self.push_line(
                     Rule::InvalidCheckbox,
                     line,
@@ -1448,9 +1577,9 @@ impl Checker<'_> {
                 );
             }
 
-            if let Some(sibling) = street_1_sibling(name)
+            if let Some(sibling) = p.street_1_sibling.as_deref()
                 && line
-                    .get(&sibling)
+                    .get(sibling)
                     .is_some_and(|s| effective_value(s).is_empty())
             {
                 self.push_line(
@@ -1466,11 +1595,8 @@ impl Checker<'_> {
             }
 
             match name {
-                "event_type" if line.table() == Table::H3 => {
-                    let codes = spec
-                        .value_reference
-                        .map(enumerated_codes)
-                        .unwrap_or_default();
+                "event_type" if table == Table::H3 => {
+                    let codes = &p.event_codes;
                     if !codes.is_empty() && !codes.iter().any(|c| c.eq_ignore_ascii_case(value)) {
                         let mut finding = Finding::new(
                             Rule::InvalidEventType,
@@ -1530,7 +1656,7 @@ impl Checker<'_> {
                         // "Warning if Code is missing; Error if Coded
                         // incorrectly": the workbook's severity for a wrong
                         // report code (FEC failing #22).
-                        if wrong_code_is_error(spec) {
+                        if p.wrong_code_is_error {
                             finding.severity = Severity::Error;
                         }
                         self.findings.push(finding);
@@ -1543,8 +1669,8 @@ impl Checker<'_> {
             // InvalidDistrict's and a year's InvalidYear's. Do not report
             // any of them twice.
             if name != "filer_committee_id_number"
-                && !is_district_field(spec)
-                && !is_year_field(spec)
+                && !p.is_district
+                && !p.is_year
                 && let Some(pattern) = spec.pattern
                 && let Some(re) = PATTERNS.get(pattern)
                 && !re.is_match(value)
@@ -1560,7 +1686,7 @@ impl Checker<'_> {
                 );
             }
 
-            if is_state_field(spec) && !STATE_CODES.iter().any(|s| s.eq_ignore_ascii_case(value)) {
+            if p.is_state && !STATE_CODES.iter().any(|s| s.eq_ignore_ascii_case(value)) {
                 self.push_line(
                     Rule::InvalidStateCode,
                     line,
@@ -1571,36 +1697,24 @@ impl Checker<'_> {
         }
     }
 
-    fn check_required(&mut self, line: &ParsedLine, spec: &FieldSpec, name: &'static str) {
-        let (rule, mut condition) = match spec.required {
-            Requirement::None => return,
-            Requirement::Error => (
-                Rule::RequiredFieldEmpty,
-                parse_condition(spec.rule, Condition::Always),
-            ),
-            Requirement::Warning => (
-                Rule::RecommendedFieldEmpty,
-                parse_condition(spec.rule, Condition::Always),
-            ),
-            Requirement::Conditional(text) => {
-                // The condition is usually in the REQUIRED cell ("X (warn if
-                // REPORT CODE=[12?|30?])"); when that cell says only
-                // "Conditional Warning", the RULE cell carries it ("Used if
-                // CCM, PAC or PTY" on Schedule A's donor committee columns),
-                // and WebCheck enforces it from there.
-                let mut condition = parse_condition(Some(text), Condition::Unknown);
-                if condition == Condition::Unknown {
-                    condition = parse_condition(spec.rule, Condition::Unknown);
-                }
-                (Rule::ConditionallyRequiredFieldEmpty, condition)
-            }
+    fn check_required(
+        &mut self,
+        line: &ParsedLine,
+        spec: &FieldSpec,
+        name: &'static str,
+        profile: &FieldProfile,
+    ) {
+        let Some((rule, condition)) = &profile.required else {
+            return;
         };
-        if condition == Condition::Always
-            && let Some(implied) = implied_condition(line, name)
-        {
-            condition = implied;
-        }
-        if self.condition_holds(line, &condition) != Some(true) {
+        let rule = *rule;
+        // `implied_condition` depends on the line, so it is applied here,
+        // not in the profile.
+        let implied = (*condition == Condition::Always)
+            .then(|| implied_condition(line, name))
+            .flatten();
+        let condition = implied.as_ref().unwrap_or(condition);
+        if self.condition_holds(line, condition) != Some(true) {
             return;
         }
         let message = match rule {
@@ -1623,17 +1737,12 @@ impl Checker<'_> {
         self.findings.push(finding);
     }
 
-    /// Whether the filing is in the bundled (current) spec version.
-    fn current_format(&self) -> bool {
-        bundled_version().is_some_and(|v| v == self.filing.version)
-    }
-
     /// The workbook describes the current format; earlier formats
     /// demonstrably differed (spec 3.x-5.x filings with blank entity types
     /// and one-digit districts were accepted). For the rules that say so
     /// ([`Rule::demoted_on_superseded_format`]), report but do not reject.
     fn demote_if_superseded(&self, finding: &mut Finding) {
-        if finding.rule.demoted_on_superseded_format() && !self.current_format() {
+        if finding.rule.demoted_on_superseded_format() && !self.current_format {
             finding.severity = Severity::Warning;
         }
     }
@@ -1642,17 +1751,16 @@ impl Checker<'_> {
     /// it does not, `None` if it cannot be evaluated (unknown prose, or the
     /// line's layout lacks the field the condition refers to).
     fn condition_holds(&self, line: &ParsedLine, condition: &Condition) -> Option<bool> {
-        let code = |field: &str| {
-            line.get(field)
-                .map(effective_value)
-                .map(str::to_ascii_uppercase)
-        };
+        // Codes are compared case-insensitively without allocating (the
+        // sets and prefixes are upper-case ASCII).
+        let code = |field: &str| line.get(field).map(effective_value);
+        let in_set = |value: &str, set: &[&str]| set.iter().any(|s| s.eq_ignore_ascii_case(value));
         match condition {
             Condition::Always => Some(true),
             Condition::Unknown => None,
             Condition::EntityIn(set) => {
                 let entity = code("entity_type")?;
-                Some(set.contains(&entity.as_str()))
+                Some(in_set(entity, set))
             }
             Condition::EntityNotIn(set) => {
                 let entity = code("entity_type")?;
@@ -1660,12 +1768,16 @@ impl Checker<'_> {
                     // A blank entity type is its own finding; do not guess.
                     return None;
                 }
-                Some(!set.contains(&entity.as_str()))
+                Some(!in_set(entity, set))
             }
             Condition::FormTypeIs(token) => Some(self.filing.raw_form_type == *token),
             Condition::ReportCodeStartsWith(prefixes) => {
-                let report_code = code("report_code")?;
-                Some(prefixes.iter().any(|p| report_code.starts_with(p)))
+                let report_code = code("report_code")?.as_bytes();
+                Some(prefixes.iter().any(|p| {
+                    report_code
+                        .get(..p.len())
+                        .is_some_and(|head| head.eq_ignore_ascii_case(p.as_bytes()))
+                }))
             }
         }
     }
