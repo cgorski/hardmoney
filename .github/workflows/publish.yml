@@ -7,8 +7,11 @@ name: Publish to crates.io
 #   4. approval in the `crates-io` environment (configure a required
 #      reviewer on that environment in the repo settings; the CRATES_IO
 #      secret should live there, not at repo level),
-#   5. the full test suite passing.
-# Nothing here runs on push or tag events.
+#   5. the full test suite passing -- against a Postgres service, so the
+#      integration tests in tests/postgres_integration.rs run rather than
+#      skip (under GitHub Actions they fail if the database is missing).
+# Nothing here runs on push or tag events. Dispatch with `dry_run` to
+# rehearse everything up to, but not including, the upload.
 
 on:
   workflow_dispatch:
@@ -17,47 +20,78 @@ on:
         description: "Version to publish (must equal Cargo.toml `version` and tag v<version> at HEAD)"
         required: true
         type: string
+      dry_run:
+        description: "Run every check and `cargo publish --dry-run`, but do not publish"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   publish:
-    name: cargo publish ${{ inputs.version }}
+    name: cargo publish ${{ inputs.version }}${{ inputs.dry_run && ' (dry run)' || '' }}
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     environment: crates-io
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: hardmoney
+          POSTGRES_PASSWORD: hardmoney
+          POSTGRES_DB: hardmoney_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U hardmoney"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CARGO_TERM_COLOR: always
+      HARDMONEY_TEST_DATABASE_URL: postgres://hardmoney:hardmoney@localhost:5432/hardmoney_test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+          # The tag check below fetches over the public HTTPS remote; no
+          # token needs to be left in the checkout's git config.
+          persist-credentials: false
 
       - name: Verify Cargo.toml version matches the requested version
+        env:
+          REQUESTED: ${{ inputs.version }}
         run: |
           set -euo pipefail
           declared="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')"
-          echo "Cargo.toml: $declared  requested: ${{ inputs.version }}"
-          test "$declared" = "${{ inputs.version }}"
+          echo "Cargo.toml: $declared  requested: $REQUESTED"
+          test "$declared" = "$REQUESTED"
 
       - name: Verify tag v${{ inputs.version }} points at HEAD
+        env:
+          REQUESTED: ${{ inputs.version }}
         run: |
           set -euo pipefail
           git fetch --tags --force
-          tagged="$(git rev-parse -q --verify "refs/tags/v${{ inputs.version }}^{commit}" || true)"
+          tagged="$(git rev-parse -q --verify "refs/tags/v${REQUESTED}^{commit}" || true)"
           head="$(git rev-parse HEAD)"
           echo "tag: ${tagged:-<missing>}  head: $head"
           test -n "$tagged" && test "$tagged" = "$head"
 
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      - name: Test
-        run: cargo test --all-features
+      - name: Test (all features, parser + Postgres integration)
+        run: cargo test --locked --all-features
 
       - name: Verify package (dry run)
-        run: cargo publish --dry-run --all-features
+        run: cargo publish --locked --dry-run --all-features
 
       - name: Publish to crates.io
+        if: ${{ !inputs.dry_run }}
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO }}
-        run: cargo publish --all-features
+        run: cargo publish --locked --all-features

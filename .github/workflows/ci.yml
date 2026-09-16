@@ -1,11 +1,26 @@
 name: CI
 
+# Every third-party action is pinned to a commit (the version it
+# corresponds to is in the trailing comment; Dependabot bumps both). Cargo
+# runs with --locked so a Cargo.lock that has fallen behind Cargo.toml
+# fails here instead of being re-resolved on the runner, which would make
+# the SBOM in supply-chain.yml describe different bytes than were tested.
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to a pull request supersedes its running checks; pushes to
+# main all run to completion.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,9 +30,12 @@ jobs:
     name: cargo fmt --check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
           components: rustfmt
       - run: cargo fmt --all --check
 
@@ -25,12 +43,15 @@ jobs:
     name: cargo clippy --all-features
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
           components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-features --all-targets -- -D warnings
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo clippy --locked --all-features --all-targets -- -D warnings
 
   docs:
     name: cargo doc (deny warnings)
@@ -38,22 +59,28 @@ jobs:
     env:
       RUSTDOCFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo doc --all-features --no-deps
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo doc --locked --all-features --no-deps
 
   msrv:
     name: build on MSRV (parser only + all features)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: "1.94"
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --no-default-features --features fetch
-      - run: cargo build --all-features
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo build --locked --no-default-features --features fetch
+      - run: cargo build --locked --all-features
 
   test:
     name: cargo test --all-features (Postgres ${{ matrix.postgres }})
@@ -84,28 +111,36 @@ jobs:
     env:
       HARDMONEY_TEST_DATABASE_URL: postgres://hardmoney:hardmoney@localhost:5432/hardmoney_test
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: pg${{ matrix.postgres }}
       - name: Build (all features)
-        run: cargo build --all-features --verbose
+        run: cargo build --locked --all-features --verbose
       - name: Test (all features, parser + Postgres integration)
         if: matrix.postgres == 18
-        run: cargo test --all-features --verbose
+        run: cargo test --locked --all-features --verbose
       - name: Test (Postgres integration only)
         if: matrix.postgres != 18
-        run: cargo test --all-features --test postgres_integration --verbose
+        run: cargo test --locked --all-features --test postgres_integration --verbose
       - name: Test (parser only, no default features)
         if: matrix.postgres == 18
-        run: cargo test --no-default-features --features fetch
+        run: cargo test --locked --no-default-features --features fetch
 
   package:
     name: cargo package (verifies the crate builds from its tarball)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo package --all-features
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo package --locked --all-features

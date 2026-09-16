@@ -340,9 +340,11 @@ red build rather than as a stale validator.
    if enabled, publication to PyPI.
 3. crates.io: a maintainer dispatches `.github/workflows/publish.yml`
    with the version. The job verifies that `Cargo.toml` and the tag
-   agree, runs the tests, does a dry run, and publishes with a token
-   held in the `crates-io` GitHub environment. Nothing publishes on a
-   push or tag event.
+   agree, runs the whole test suite against a Postgres service (the
+   integration tests refuse to be skipped under GitHub Actions), does a
+   dry run, and publishes with a token held in the `crates-io` GitHub
+   environment. A `dry_run` input stops before the upload, for
+   rehearsing the job. Nothing publishes on a push or tag event.
 
 Configuration the maintainer must set before PyPI publication runs from
 CI (until then the `publish` job is skipped and shows as such):
