@@ -43,6 +43,28 @@
   (it ran the suite without a database before). CI workflows pin every
   action to a commit, grant `contents: read` by default, build with
   `--locked`, and cancel superseded pull-request runs.
+- **Fixtures are protected as bytes.** A new `.gitattributes` marks
+  `tests/fixtures/**` and `*.fec` as never line-ending-converted (git's
+  binary heuristic only happened to protect the FS-delimited ones; a
+  Windows checkout with `core.autocrlf=true` would have rewritten the
+  comma-delimited CRLF filings), stores all source as LF, and
+  `tests/fixtures/MANIFEST.sha256` (`scripts/fixture_manifest.py`) records
+  the committed SHA-256 of all 90 fixture files. New
+  `tests/corpus_shape.rs` fails on any byte difference, pins the corpus's
+  coverage of the line-ending and delimiter regimes the FEC produces
+  (CRLF and LF, FS and comma, non-ASCII, `[BEGINTEXT]`), and checks that
+  every fixture parses identically with CRLF and with LF line endings,
+  strictly and leniently. CI checks the manifest and that no tracked text
+  file carries CRLF. The 24 `data/fec-csv-sources/*.csv` files that
+  carried CRLF or mixed line endings (upstream fech-sources rows were
+  CRLF, rows appended here were LF) are normalised to LF; the generated
+  format tables are byte-identical. Dependabot's two cargo entries are
+  merged into one covering `/` and `/python`, so a dependency bump
+  updates both lockfiles in one pull request (as two entries, every such
+  PR failed `--locked` on the lockfile it did not touch). Book:
+  `mermaid-init.js` refreshed to the file mdbook-mermaid 0.17.1 writes;
+  the vendored copy looked up theme buttons by their mdBook 0.4 ids, so
+  switching theme did not re-render diagrams.
 
 ## 3.2.0 — 2026-09-16
 

@@ -68,9 +68,20 @@ check.
 
 ### 5. Test against the truth, not against yourself
 
-* **Real filings**: every parser change runs over `tests/fixtures/` (25
-  real filings, spec 3.00 through 8.5). Assertions there were checked by
+* **Real filings**: every parser change runs over `tests/fixtures/` (61
+  real filings, spec 3.00 through 8.5, across `tests/fixtures/`,
+  `chain/`, `rad/`, and `golden/`). Assertions there were checked by
   hand against the raw bytes.
+* **Fixtures are bytes, not text.** The FEC's files come CRLF- and
+  LF-terminated, FS- and comma-delimited, ASCII and Windows-1252; the
+  corpus keeps every regime (`tests/corpus_shape.rs` pins the floors) and
+  nothing may rewrite one. `.gitattributes` marks `tests/fixtures/**`
+  `-text` so git never converts them, and `tests/fixtures/MANIFEST.sha256`
+  records the committed SHA-256 of each; the suite (and CI) fails if a
+  file on disk differs. Adding or deliberately changing a fixture:
+  `git add` it, run `python3 scripts/fixture_manifest.py`, commit both.
+  Never open a fixture in an editor that normalises line endings or
+  encodings.
 * **Oracle tests**: where the FEC publishes an implementation or expected
   values (`fecfile-web-api`'s summary calculator and its test data, the
   spec workbook's rule column, WebCheck), encode the FEC's own expected
@@ -81,8 +92,9 @@ check.
   property tests (`proptest`) over arbitrary field values.
 * **Negative tests**: every error variant has a test that provokes it.
 * Integration tests that need Postgres self-skip without
-  `HARDMONEY_TEST_DATABASE_URL` and use unique names per test (they run in
-  parallel).
+  `HARDMONEY_TEST_DATABASE_URL` (except under GitHub Actions, where a
+  missing database is a failure) and use unique names per test (they run
+  in parallel).
 
 ### 6. Dependencies
 

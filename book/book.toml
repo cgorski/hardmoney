@@ -6,10 +6,12 @@ language = "en"
 src = "src"
 
 # Mermaid diagrams (the architecture chapter) are rendered by mdbook-mermaid.
-# `mermaid.min.js` and `mermaid-init.js` were written by
-# `mdbook-mermaid install book`. The mdbook and mdbook-mermaid versions must
-# move together: mdbook 0.5.x needs mdbook-mermaid 0.17.x (pinned in
-# .github/workflows/book.yml).
+# `mermaid.min.js` (Mermaid 11.6.0, MIT) and `mermaid-init.js` are the
+# unmodified files `mdbook-mermaid install book` writes at 0.17.1; re-run
+# it when bumping. The mdbook and mdbook-mermaid versions must move
+# together: mdbook 0.5.x needs mdbook-mermaid 0.17.x (pinned in
+# .github/workflows/book.yml), and mermaid-init.js must match the theme
+# button ids the mdbook version renders (`mdbook-theme-<name>` since 0.5).
 [preprocessor.mermaid]
 command = "mdbook-mermaid"
 

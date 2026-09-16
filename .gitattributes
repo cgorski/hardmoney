@@ -1,0 +1,29 @@
+# Line endings and binary handling.
+#
+# Source is stored and checked out with LF everywhere, so a Windows clone
+# builds and formats exactly like the CI runners (rustfmt wants LF; the
+# .csv tables below are compiled into the crate by build.rs).
+* text=auto eol=lf
+
+# Test fixtures are real FEC filings and must reach the parser byte for
+# byte. The FEC's own files come in both CRLF and LF, and git's binary
+# heuristic only happens to protect the FS-delimited ones (0x1C looks
+# binary); the comma-delimited ones would be rewritten by a checkout with
+# core.autocrlf=true. Nothing under tests/fixtures is ever converted.
+# tests/corpus_shape.rs checks the bytes against tests/fixtures/MANIFEST.sha256.
+tests/fixtures/** -text
+*.fec -text
+
+# Reference copies of the FEC header tables, kept as downloaded.
+data/fec-csv-sources/headers/** -text
+
+# Binary artifacts.
+*.xlsx binary
+*.dump binary
+*.whl  binary
+*.png  binary
+*.ico  binary
+
+# Vendored minified library: not ours to diff, and not "our" JavaScript
+# for GitHub's language statistics.
+book/mermaid.min.js -diff linguist-vendored
