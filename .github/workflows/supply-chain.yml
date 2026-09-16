@@ -9,8 +9,10 @@ name: Supply chain
 #   sbom    CycloneDX 1.5 JSON for the crate (all features, all targets),
 #           for the Python extension crate, and for the built wheel's Python
 #           environment, plus the wheel's METADATA. Uploaded as the `sbom`
-#           artifact on every run; on a `v*` tag the artifact is the
-#           release's SBOM (attach it to the GitHub release by hand).
+#           artifact on every run; on a `v*` tag the files are also
+#           attached to the tag's draft GitHub Release (created by whichever
+#           of this job and the Python workflow's `release` job gets there
+#           first; the maintainer publishes the draft).
 #
 # Runs on push, pull request, weekly (so a new advisory against an
 # unchanged lockfile still turns the badge red), and on demand.
@@ -163,3 +165,41 @@ jobs:
           name: sbom
           path: sbom/
           if-no-files-found: error
+
+  # On a tag: put the SBOMs on the draft GitHub Release for the tag, so the
+  # release page carries the bill of materials next to the wheels. Only
+  # this job writes to the repository, and only to the release.
+  sbom-release:
+    name: attach SBOM to the draft release
+    needs: [sbom]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: sbom
+          path: sbom
+      - name: Create the draft release if the tag has none
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "release $TAG exists; leaving its notes and state alone"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+              --title "hardmoney $TAG" \
+              --notes "Draft created by the Supply chain workflow; the Python workflow fills in the notes from CHANGELOG.md and attaches the wheels." \
+              || gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null
+          fi
+      - name: Attach the SBOMs
+        run: |
+          set -euo pipefail
+          ls -l sbom
+          gh release upload "$TAG" sbom/* --repo "$GITHUB_REPOSITORY" --clobber

@@ -39,6 +39,27 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  fixtures:
+    name: fixture manifest and line endings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      # tests/fixtures/MANIFEST.sha256 must describe the committed fixture
+      # bytes (a new or changed fixture needs `python3 scripts/fixture_manifest.py`),
+      # and no tracked text file may carry CRLF: .gitattributes normalises
+      # to LF, and a CRLF here means a file was added without it applying.
+      - run: python3 scripts/fixture_manifest.py --check
+      - name: No CRLF in tracked text files
+        run: |
+          set -euo pipefail
+          if git ls-files --eol | grep -E '^i/(crlf|mixed)'; then
+            echo "::error::tracked text files with CRLF or mixed line endings (see .gitattributes)"
+            exit 1
+          fi
+          echo "all tracked text files are LF"
+
   clippy:
     name: cargo clippy --all-features
     runs-on: ubuntu-latest

@@ -10,6 +10,11 @@ name: Python
 # On a `v*` tag, additionally:
 #   * `attest` signs a build-provenance attestation for every wheel and the
 #     sdist (verify with `gh attestation verify <file> --repo cgorski/hardmoney`);
+#   * `release` creates a DRAFT GitHub Release for the tag -- notes from the
+#     version's CHANGELOG.md section, the attested wheels and sdist
+#     attached -- for the maintainer to publish once the registries are
+#     updated (the supply-chain workflow attaches the SBOM to the same
+#     draft). A draft is visible to maintainers only;
 #   * `publish` uploads to PyPI, but only when the repository variable
 #     PYPI_PUBLISH is `true` and the secret PYPI_API_TOKEN is set. Until the
 #     maintainer sets both, the job is skipped and nothing leaves GitHub.
@@ -213,6 +218,76 @@ jobs:
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/*
+
+  # A draft GitHub Release for the tag, holding the CHANGELOG section as
+  # notes and the exact files attested above. Only this job may write to
+  # the repository, and only to create or update the draft; publishing it
+  # is the maintainer's click after PyPI and crates.io are done.
+  release:
+    name: draft GitHub Release
+    needs: [attest]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: sdist
+          path: dist
+      - name: Release notes from CHANGELOG.md
+        run: |
+          python3 - "$TAG" > "$RUNNER_TEMP/notes.md" <<'EOF'
+          import re, sys
+          version = sys.argv[1].removeprefix("v")
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+          # "## 3.2.0 — 2026-09-16" up to the next "## " heading.
+          m = re.search(rf"^## {re.escape(version)}\b[^\n]*\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+          body = m.group(1).strip() if m else f"See `CHANGELOG.md` for {version}."
+          print(body)
+          print()
+          print("---")
+          print("The wheels and sdist attached here are the files this workflow built and attested;")
+          print("verify one with `gh attestation verify <file> --repo cgorski/hardmoney`. The")
+          print("CycloneDX SBOMs are attached by the Supply chain workflow. Provenance, licences,")
+          print("and how releases are cut: https://cgorski.github.io/hardmoney/security-and-provenance.html")
+          EOF
+          cat "$RUNNER_TEMP/notes.md"
+      # No release for the tag yet: create a draft with these notes. A
+      # draft already there (the supply-chain run may create one with
+      # placeholder notes): fill in the notes. A release the maintainer
+      # has published: leave its notes and state alone, only attach files.
+      - name: Create or fill in the draft release
+        run: |
+          set -euo pipefail
+          if is_draft=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft 2>/dev/null); then
+            if [ "$is_draft" = "true" ]; then
+              gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+                --title "hardmoney $TAG" --notes-file "$RUNNER_TEMP/notes.md"
+            else
+              echo "release $TAG is already published; leaving its notes alone"
+            fi
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+              --title "hardmoney $TAG" --notes-file "$RUNNER_TEMP/notes.md" \
+              || gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null
+          fi
+      - name: Attach the wheels and sdist
+        run: |
+          set -euo pipefail
+          ls -l dist
+          gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
 
   # Publishes to PyPI on a `v*` tag, gated twice:
   #   * the repository variable PYPI_PUBLISH must be exactly `true`

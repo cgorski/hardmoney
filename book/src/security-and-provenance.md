@@ -336,8 +336,12 @@ red build rather than as a stale validator.
    warnings denied, tests, `cargo package`, `mdbook build`) passes.
 2. The commit is tagged `vX.Y.Z` and pushed. The tag triggers the Python
    workflow: lint, tests on Linux, macOS, and Windows with Python 3.9 and
-   3.13, five wheels and the sdist, the provenance attestations, and,
-   if enabled, publication to PyPI.
+   3.13, five wheels and the sdist, the provenance attestations, a
+   **draft** GitHub Release for the tag (notes taken from the version's
+   `CHANGELOG.md` section, the attested wheels and sdist attached; the
+   supply-chain workflow attaches the CycloneDX SBOMs), and, if enabled,
+   publication to PyPI. The draft is visible to maintainers only; the
+   maintainer publishes it once the registries are updated.
 3. crates.io: a maintainer dispatches `.github/workflows/publish.yml`
    with the version. The job verifies that `Cargo.toml` and the tag
    agree, runs the whole test suite against a Postgres service (the
@@ -365,7 +369,8 @@ alongside the GitHub ones.
 
 Release artefacts per version: the crate on crates.io, five wheels and an
 sdist on PyPI (Linux x86_64 and aarch64, macOS Intel and Apple silicon,
-Windows x86_64), the `sbom` artifact, and the attestations.
+Windows x86_64), the GitHub Release carrying the same wheels and sdist
+plus the SBOMs, and the attestations.
 
 ## Support plan
 

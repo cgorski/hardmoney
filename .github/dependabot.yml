@@ -4,9 +4,19 @@
 # current in between.
 version: 2
 updates:
-  # The crate (Cargo.lock at the repository root).
+  # The crate (Cargo.lock at the repository root) and the Python extension
+  # crate (python/Cargo.lock; PyO3 and maturin live there) in ONE entry.
+  # python/ is a standalone package that path-depends on `..`, so the two
+  # lockfiles must move together: a bump to a dependency of the root crate
+  # has to land in python/Cargo.lock as well, and Dependabot's cargo
+  # updater follows the path dependency and edits the root Cargo.toml from
+  # the python side. As two separate entries every such PR failed CI
+  # (`--locked` on the lockfile the other entry did not update); with both
+  # directories in one grouped entry, one PR updates both.
   - package-ecosystem: cargo
-    directory: /
+    directories:
+      - /
+      - /python
     schedule:
       interval: weekly
       day: monday
@@ -16,24 +26,9 @@ updates:
     commit-message:
       prefix: "deps(cargo)"
     groups:
-      # Lockfile-only bumps of transitive crates arrive as one PR.
-      patch-and-minor:
-        update-types: ["minor", "patch"]
-
-  # The Python extension crate (python/Cargo.lock; PyO3 and maturin live here).
-  - package-ecosystem: cargo
-    directory: /python
-    schedule:
-      interval: weekly
-      day: monday
-      time: "06:00"
-      timezone: Etc/UTC
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "deps(python-cargo)"
-    groups:
-      patch-and-minor:
-        update-types: ["minor", "patch"]
+      # Every cargo bump arrives as one PR touching both lockfiles.
+      cargo:
+        patterns: ["*"]
 
   # python/pyproject.toml: the maturin build requirement and the pytest
   # test extra. The wheel itself has no Python dependencies.
