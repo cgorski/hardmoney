@@ -1,0 +1,48 @@
+[package]
+name = "hardmoney-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Coverage-guided fuzz targets for the hardmoney .fec parser, writer, validator, and reconciler (cargo-fuzz; nightly)."
+
+[package.metadata]
+cargo-fuzz = true
+
+# A standalone package, like /python: the crate root is not a workspace,
+# and this must never be pulled into `cargo package`, `cargo deny`, or the
+# SBOM of the crate (see `exclude` in ../Cargo.toml).
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# Parser only: every target's entry point builds with no features, so a
+# fuzz build compiles none of sqlx/axum/arrow.
+hardmoney = { path = "..", default-features = false }
+
+[[bin]]
+name = "parse_bytes"
+path = "fuzz_targets/parse_bytes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stream_vs_eager"
+path = "fuzz_targets/stream_vs_eager.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "validate_reconcile"
+path = "fuzz_targets/validate_reconcile.rs"
+test = false
+doc = false
+bench = false

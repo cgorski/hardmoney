@@ -90,6 +90,25 @@ check.
 * **Round trips**: anything that writes must round-trip through the
   parser (`parse(write(parse(f))) == parse(f)`) on every fixture, plus
   property tests (`proptest`) over arbitrary field values.
+* **Fuzzing** (`fuzz/`, [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz),
+  nightly): four coverage-guided targets -- `parse_bytes` (no panics;
+  lenient accepts what strict accepts), `stream_vs_eager` (the two
+  parsers agree on arbitrary bytes), `roundtrip` (the writer is the
+  parser's inverse and its output is a fixed point), `validate_reconcile`
+  (validator, reconciler, reviewer never panic). CI runs them nightly
+  (`fuzz.yml`) and type-checks them on stable on every push. Locally:
+
+  ```bash
+  cargo install cargo-fuzz --locked
+  ./fuzz/seed.sh                                  # corpora from tests/fixtures
+  cargo +nightly fuzz run roundtrip -- -dict=fuzz/dictionary.dict -max_len=65536
+  cargo +nightly fuzz tmin roundtrip fuzz/artifacts/roundtrip/crash-…   # minimise a find
+  ```
+
+  A find becomes a regression test next to the code it exercised (the
+  writer's tests, `tests/parser_adversarial.rs`), never a corpus entry;
+  the corpus is not committed. Five minutes of `roundtrip` found three
+  writer bugs the fixture round-trip tests had never hit.
 * **Negative tests**: every error variant has a test that provokes it.
 * Integration tests that need Postgres self-skip without
   `HARDMONEY_TEST_DATABASE_URL` (except under GitHub Actions, where a

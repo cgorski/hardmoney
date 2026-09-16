@@ -153,6 +153,24 @@ jobs:
         if: matrix.postgres == 18
         run: cargo test --locked --no-default-features --features fetch
 
+  fuzz-targets:
+    name: fuzz targets type-check on stable
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: fuzz
+      # Running them needs nightly (fuzz.yml); compiling them does not, so
+      # a parser API change that breaks a target is caught here, not at
+      # 03:17 UTC.
+      - run: cargo check --locked --manifest-path fuzz/Cargo.toml
+
   package:
     name: cargo package (verifies the crate builds from its tarball)
     runs-on: ubuntu-latest
