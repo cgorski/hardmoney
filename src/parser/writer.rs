@@ -14,31 +14,43 @@
 //!
 //! * Line endings are always `CRLF` (the FEC's convention).
 //! * Spec 6.0+ filings use the ASCII-28 delimiter; 3.x-5.x filings are
-//!   comma-delimited with CSV quoting applied only where needed.
+//!   comma-delimited with CSV quoting applied only where needed. The
+//!   version decides: the parser accepts a file whose header line is
+//!   ASCII-28-delimited but declares a pre-6.0 version (it sniffs the
+//!   delimiter from the header line), and such a file is written back in
+//!   its version's comma format. A `[BEGINTEXT]` block in that
+//!   inconsistent file is the one thing the comma format cannot carry:
+//!   its line breaks become spaces.
 //! * Every record is emitted with the full column count of its layout;
 //!   trailing empty columns the original omitted (or padded) are
 //!   normalised.
 //! * Surrounding whitespace and one pair of wrapping quotes per field --
 //!   both removed by the parser as wire conventions -- are not re-emitted.
+//!   A value that itself begins and ends with `"` (the parser hands back
+//!   `"-"` for the wire cell `""-""`) is written with one extra pair, so
+//!   the re-parse strips exactly the pair the writer added.
 //! * A Form 99's free text is emitted as a `[BEGINTEXT]`/`[ENDTEXT]` block
 //!   after the cover line, with the cover's `text` column left blank, which
 //!   is how the FEC's own software files it. Any other record whose `text`
-//!   contains a line break -- what the parser yields for a block that
-//!   followed a body line -- is written the same way, so the breaks
-//!   survive; single-line text stays inline. Spec 3.x-5.x filings predate
-//!   the block convention (their parser reads `[BEGINTEXT]` as a record),
-//!   so there text is always inline.
+//!   contains a line break or an ASCII-28 -- what the parser yields for a
+//!   block that followed a body line, since block lines are not split on
+//!   the delimiter -- is written the same way, so both survive; text
+//!   without either stays inline. Spec 3.x-5.x filings predate the block
+//!   convention (their parser reads `[BEGINTEXT]` as a record), so there
+//!   text is always inline.
 //! * Blank lines are dropped.
-//! * A value can only contain what the parser can hand back. An ASCII-28
-//!   inside a value, or a line feed where a block cannot carry it (a
-//!   record without a `text` column, or a pre-6.0 filing) -- possible only
-//!   through [`ParsedLine::set`], never from a parse -- is replaced with a
-//!   space rather than corrupting the record structure (an ASCII-28 in a
-//!   comma-delimited file would make the re-parse pick the wrong
-//!   delimiter). A bare carriage return *does* survive a parse (only `\n`
-//!   ends a record) and is written back verbatim so the round trip stays
-//!   exact; the FEC's validator flags it as an illegal character either
-//!   way.
+//! * A value can only contain what the parser can hand back. Anything
+//!   structural for the file's own format is replaced with a space rather
+//!   than corrupting the record: in an ASCII-28 file, an ASCII-28 or a
+//!   line feed inside a value (the parser splits on both, so they can
+//!   only arrive through [`ParsedLine::set`]); in a comma-delimited file,
+//!   a line feed (records are one physical line). Everything else the
+//!   parser hands back is written back verbatim so the round trip stays
+//!   exact -- a bare carriage return in either format, and in a
+//!   comma-delimited file an ASCII-28 inside a quoted value (the
+//!   delimiter is decided by the header line alone, so a body value may
+//!   contain one). The FEC's validator flags both as illegal characters
+//!   either way.
 //!
 //! # Encoding
 //!
@@ -114,10 +126,11 @@ fn encode(text: &str) -> Vec<u8> {
 
 /// Writes one record, hoisting its `text` into a `[BEGINTEXT]`/`[ENDTEXT]`
 /// block after it when the format allows blocks (spec 6.0+) and either
-/// `always` is set (the Form 99 cover) or the text has a line break that
-/// an inline column cannot carry. The parser splices a block back into
-/// the record it follows, so this is the exact inverse of how the text
-/// was read.
+/// `always` is set (the Form 99 cover) or the text has a line break or an
+/// ASCII-28, which an inline column cannot carry (the parser splits
+/// records on both but block lines on neither). The parser splices a
+/// block back into the record it follows, so this is the exact inverse of
+/// how the text was read.
 fn write_record_with_text(
     w: &mut LineWriter,
     out: &mut String,
@@ -128,7 +141,7 @@ fn write_record_with_text(
     let hoisted = blocks_allowed
         .then(|| record.get_non_empty("text"))
         .flatten()
-        .filter(|text| always || text.contains('\n'));
+        .filter(|text| always || text.contains(['\n', NEW_DELIMITER]));
     match hoisted {
         Some(text) => {
             let mut cells = record.to_cells();
@@ -175,11 +188,12 @@ impl LineWriter {
                     if i > 0 {
                         out.push(NEW_DELIMITER);
                     }
+                    let cell = wire_cell(cell);
                     // A delimiter or line feed inside a value would corrupt
                     // the record structure; neither can survive a parse
                     // (the parser splits on them), so replace with a space.
                     // A bare `\r` is data to the parser and stays.
-                    push_sanitised(out, cell, &[NEW_DELIMITER, '\n']);
+                    push_sanitised(out, &cell, &[NEW_DELIMITER, '\n']);
                 }
             }
             Self::Csv => {
@@ -187,26 +201,44 @@ impl LineWriter {
                     if i > 0 {
                         out.push(',');
                     }
-                    // Quote when needed; `\r` is quoted (so a CSV consumer
-                    // sees it as field content) but kept, since the
-                    // per-line reader does not treat it as a terminator.
+                    let cell = wire_cell(cell);
+                    // Quote when needed. `\r` and ASCII-28 are quoted (so a
+                    // CSV consumer sees them as field content) but kept:
+                    // the per-line reader treats neither as structure, so
+                    // both survive a parse and must survive the write. Only
+                    // a line feed cannot be carried (one record per
+                    // physical line) and could not have been parsed.
                     if cell.contains([',', '"', '\r', '\n', NEW_DELIMITER]) {
                         out.push('"');
                         for ch in cell.chars() {
                             match ch {
                                 '"' => out.push_str("\"\""),
-                                '\n' | NEW_DELIMITER => out.push(' '),
+                                '\n' => out.push(' '),
                                 c => out.push(c),
                             }
                         }
                         out.push('"');
                     } else {
-                        out.push_str(cell);
+                        out.push_str(&cell);
                     }
                 }
             }
         }
         out.push_str(CRLF);
+    }
+}
+
+/// The parser strips one pair of wrapping quotes from every cell as a
+/// wire convention (`normalize_field`), so a value that begins and ends
+/// with `"` must go out wrapped in one more pair, or the re-parse hands
+/// back the value with its own quotes gone. The exact inverse: the parser
+/// strips only a genuine pair (two or more characters), so that is the
+/// only case wrapped here.
+fn wire_cell(cell: &str) -> std::borrow::Cow<'_, str> {
+    if cell.len() >= 2 && cell.starts_with('"') && cell.ends_with('"') {
+        std::borrow::Cow::Owned(format!("\"{cell}\""))
+    } else {
+        std::borrow::Cow::Borrowed(cell)
     }
 }
 
@@ -322,6 +354,18 @@ mod tests {
             filing.lines[0].get("text"),
             Some("Line one of the note.\nLine two.")
         );
+
+        // Block lines are not split on the delimiter, so a block can carry
+        // an ASCII-28 that an inline column cannot; a one-line block with
+        // one must stay a block. (Found by the `roundtrip` fuzz target.)
+        let with_fs = "HDR\u{1c}FEC\u{1c}8.5\u{1c}X\u{1c}1\nTEXT\u{1c}C00944124\u{1c}T1\n[BEGINTEXT]\nsplit\u{1c}here\n[ENDTEXT]\n";
+        let f = Filing::parse(with_fs).unwrap();
+        assert_eq!(f.summary.get("text"), Some("split\u{1c}here"));
+        assert!(
+            f.to_fec_string()
+                .contains("[BEGINTEXT]\r\nsplit\u{1c}here\r\n[ENDTEXT]")
+        );
+        assert_round_trip(&f);
         let out = filing.to_fec_string();
         assert!(
             out.contains(
@@ -425,6 +469,26 @@ mod tests {
         assert_eq!(again.lines.len(), 0);
     }
 
+    /// In a comma-delimited filing the delimiter is decided by the header
+    /// line alone, so an ASCII-28 inside a body value is data the parser
+    /// hands back; the writer must hand it back too. (Found by the
+    /// `roundtrip` fuzz target on a mutated 3.00 fixture.)
+    #[test]
+    fn ascii_28_inside_a_comma_delimited_value_round_trips() {
+        let text = "HDR,FEC,5.3,X,1\r\nF3XN,C00123456,\"odd\u{1c}name\"\r\nSA11AI,C00123456,,,,IND,\"Bank\u{1c}of Amory\"\r\n";
+        let filing = Filing::parse(text).unwrap();
+        assert_eq!(filing.summary.get("committee_name"), Some("odd\u{1c}name"));
+        let out = filing.to_fec_string();
+        assert!(
+            out.contains("\"odd\u{1c}name\""),
+            "the ASCII-28 must be written back, quoted: {out:?}"
+        );
+        let again = Filing::parse(&out).unwrap();
+        assert_eq!(again.summary.get("committee_name"), Some("odd\u{1c}name"));
+        assert_eq!(again.version, filing.version, "still comma-delimited");
+        assert_round_trip(&filing);
+    }
+
     /// A bare carriage return inside a value is what the parser yields for
     /// one on the wire (only `\n` ends a record), so the writer must hand
     /// it back unchanged on both delimiter paths.
@@ -448,17 +512,48 @@ mod tests {
         }
     }
 
+    /// A value the parser hands back as itself once its own wrapping pair
+    /// (if any) is written and stripped: quote-wrapped values are what the
+    /// wire cell `""x""` parses to, so the round trip must carry them.
+    #[test]
+    fn quote_wrapped_values_round_trip_in_both_formats() {
+        // Found by the `roundtrip` fuzz target: a Schedule B purpose of
+        // `"-"` (with its quotes) came back as `-`. `wire` is the cell as
+        // an ASCII-28 file carries it; `csv` the same cell CSV-quoted.
+        for (wire, csv, value) in [
+            ("\"\"-\"\"", "\"\"\"\"\"-\"\"\"\"\"", "\"-\""),
+            ("\"\"\"\"", "\"\"\"\"\"\"\"\"\"\"", "\"\""),
+            // Starts with a quote but does not end with one: no pair to
+            // strip, so the value is the wire cell itself.
+            ("\"Bob\" Smith", "\"\"\"Bob\"\" Smith\"", "\"Bob\" Smith"),
+            ("\"", "\"\"\"\"", "\""),
+            ("abc\"", "\"abc\"\"\"", "abc\""),
+        ] {
+            let fs =
+                format!("HDR\u{1c}FEC\u{1c}8.5\u{1c}X\u{1c}1\nF3XN\u{1c}C00123456\u{1c}{wire}\n");
+            let filing = Filing::parse(&fs).unwrap();
+            assert_eq!(
+                filing.summary.get("committee_name"),
+                Some(value),
+                "{wire:?}"
+            );
+            assert_round_trip(&filing);
+
+            let old = Filing::parse(&format!("HDR,FEC,5.3,X,1\nF3XN,C00123456,{csv}\n")).unwrap();
+            assert_eq!(old.summary.get("committee_name"), Some(value), "{csv:?}");
+            assert_round_trip(&old);
+        }
+    }
+
     /// Values that survive the parser's normalisation unchanged: no
-    /// delimiter/CR/LF (structural), no leading/trailing whitespace, not
-    /// wrapped in a quote pair (wire conventions the parser strips), and
-    /// no characters the FEC forbids.
+    /// delimiter/CR/LF (structural), no leading/trailing whitespace, and
+    /// no characters the FEC forbids. Quote-wrapped values are included:
+    /// the writer re-wraps them so the parser's one-pair strip lands on
+    /// the pair the writer added.
     fn wire_safe_value() -> impl Strategy<Value = String> {
         proptest::string::string_regex("[ -~\u{a0}-\u{a8}\u{ad}]{0,40}")
             .expect("valid regex")
             .prop_map(|s| s.trim().to_string())
-            .prop_filter("not quote-wrapped", |s| {
-                !(s.len() >= 2 && s.starts_with('"') && s.ends_with('"'))
-            })
     }
 
     proptest! {

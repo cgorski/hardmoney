@@ -43,16 +43,32 @@
   (it ran the suite without a database before). CI workflows pin every
   action to a commit, grant `contents: read` by default, build with
   `--locked`, and cancel superseded pull-request runs.
-- **Writer: a `[BEGINTEXT]` block after a body line round-trips.** The
-  parser splices such a block into that line's `text` with its line
-  breaks; the writer wrote the value back inline with the breaks turned
-  into spaces, so `parse(to_fec(parse(f)))` was not `parse(f)` for those
-  filings (none of the corpus fixtures, all of whose blocks follow the
-  cover). Now any record whose `text` contains a line break is written
-  with a block after it, exactly as read; single-line text stays inline.
-  Also fixed: a spec 3.x-5.x Form 99 with text had its text hoisted into
-  a block those formats do not have, which the parser then read as a bad
-  record; pre-6.0 text is always written inline.
+- **Writer: three round-trip gaps closed, found by fuzzing.** (1) A
+  `[BEGINTEXT]` block after a body line: the parser splices it into that
+  line's `text` with its line breaks (and any ASCII-28, since block lines
+  are not split on the delimiter); the writer wrote the value back inline
+  with both turned into spaces. Now any record whose `text` contains
+  either is written with a block after it, exactly as read; other text
+  stays inline. (2) A value that itself begins and ends with `"` -- what
+  the wire cell `""-""` parses to, seen in a real Schedule B purpose --
+  lost its own quotes on re-parse, because the parser strips one wrapping
+  pair as a wire convention and the writer did not add one back; it now
+  does, in both formats, and the property tests no longer exclude such
+  values. (3) In a comma-delimited filing an ASCII-28 inside a quoted
+  value is data (the delimiter is decided by the header line alone); the
+  writer replaced it with a space. Also fixed: a spec 3.x-5.x Form 99 with
+  text had its text hoisted into a block those formats do not have, which
+  the parser then read as a bad record; pre-6.0 text is always inline.
+  None of the corpus fixtures' canonical output changes.
+- **Fuzzing.** `fuzz/` holds four cargo-fuzz targets -- `parse_bytes`,
+  `stream_vs_eager`, `roundtrip`, `validate_reconcile` -- with a `.fec`
+  token dictionary and a seed script over the fixtures. `fuzz.yml` runs
+  each nightly for ten minutes, keeps the evolved corpus in the Actions
+  cache, and uploads crashes; CI type-checks the targets on stable on
+  every push. The two documented parser contracts (eager and streaming
+  decode differently on a file that mixes UTF-8 and Windows-1252 lines;
+  a file whose header delimiter disagrees with its version is written in
+  the version's format) are encoded in the targets rather than reported.
 - **Blocking work leaves the async runtime.** The `/tools/*` handlers
   parse, validate, reconcile, and write a filing on tokio's blocking pool
   instead of a runtime worker, so one 32 MiB upload no longer stalls every
