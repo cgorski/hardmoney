@@ -16,9 +16,11 @@ name: Python
 #     updated (the supply-chain workflow attaches the SBOM to the same
 #     draft). A draft is visible to maintainers only;
 #   * `publish` uploads to PyPI, but only when the repository variable
-#     PYPI_PUBLISH is `true` and the secret PYPI_API_TOKEN is set. Until the
-#     maintainer sets both, the job is skipped and nothing leaves GitHub.
-#     See book/src/security-and-provenance.md ("How releases are cut").
+#     PYPI_PUBLISH is `true` and the secret PYPI_API_TOKEN is set (both are;
+#     without them the job is skipped and nothing leaves GitHub), and only
+#     after the maintainer approves the run in the `pypi` environment, which
+#     admits `v*` tags alone. See book/src/security-and-provenance.md
+#     ("How releases are cut").
 
 on:
   push:

@@ -60,6 +60,13 @@
   text had its text hoisted into a block those formats do not have, which
   the parser then read as a bad record; pre-6.0 text is always inline.
   None of the corpus fixtures' canonical output changes.
+- **Releases from CI, gated.** A `v*` tag now publishes the wheels and
+  sdist to PyPI from the workflow that built and attested them, after the
+  maintainer approves the run in the `pypi` GitHub environment (which
+  admits only `v*` tags); the crates.io publish workflow likewise waits
+  for approval in the `crates-io` environment (which admits only `main`)
+  and can be rehearsed with its `dry_run` input. The default branch has a
+  ruleset forbidding force-pushes, deletion, and merge commits.
 - **Fuzzing.** `fuzz/` holds four cargo-fuzz targets -- `parse_bytes`,
   `stream_vs_eager`, `roundtrip`, `validate_reconcile` -- with a `.fec`
   token dictionary and a seed script over the fixtures. `fuzz.yml` runs

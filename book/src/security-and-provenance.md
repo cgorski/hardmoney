@@ -339,9 +339,11 @@ red build rather than as a stale validator.
    3.13, five wheels and the sdist, the provenance attestations, a
    **draft** GitHub Release for the tag (notes taken from the version's
    `CHANGELOG.md` section, the attested wheels and sdist attached; the
-   supply-chain workflow attaches the CycloneDX SBOMs), and, if enabled,
-   publication to PyPI. The draft is visible to maintainers only; the
-   maintainer publishes it once the registries are updated.
+   supply-chain workflow attaches the CycloneDX SBOMs), and publication
+   to PyPI, which stops at the `pypi` environment until the maintainer
+   approves the run (the environment admits only `v*` tags). The draft
+   is visible to maintainers only; the maintainer publishes it once the
+   registries are updated.
 3. crates.io: a maintainer dispatches `.github/workflows/publish.yml`
    with the version. The job verifies that `Cargo.toml` and the tag
    agree, runs the whole test suite against a Postgres service (the
@@ -350,14 +352,18 @@ red build rather than as a stale validator.
    environment. A `dry_run` input stops before the upload, for
    rehearsing the job. Nothing publishes on a push or tag event.
 
-Configuration the maintainer must set before PyPI publication runs from
-CI (until then the `publish` job is skipped and shows as such):
+Configuration PyPI publication from CI depends on (all set; without
+the first two the `publish` job is skipped and shows as such):
 
 | Setting | Where | Value |
 |---|---|---|
 | `PYPI_PUBLISH` | repository variable (Settings, Secrets and variables, Actions, Variables) | `true` |
-| `PYPI_API_TOKEN` | secret in the `pypi` GitHub environment (exists, with the maintainer as required reviewer) | a PyPI API token scoped to the `hardmoney` project |
-| `CRATES_IO` | secret in the `crates-io` environment (exists, with the maintainer as required reviewer, so a dispatched publish waits for an approval click) | a crates.io token scoped to publishing `hardmoney` |
+| `PYPI_API_TOKEN` | secret in the `pypi` GitHub environment, which admits only `v*` tags and requires the maintainer's approval | a PyPI API token for the `hardmoney` project |
+| `CRATES_IO` | secret in the `crates-io` environment, which admits only `main` and requires the maintainer's approval, so a dispatched publish waits for an approval click | a crates.io token scoped to publishing `hardmoney` |
+
+Because CI now uploads the wheels, a maintainer must not also upload
+them by hand for the same version: PyPI refuses a second file of the
+same name, and the job would fail after the fact.
 
 The repository itself: the default branch has a ruleset forbidding
 force-pushes, deletion, and merge commits; secret scanning with push
@@ -371,7 +377,10 @@ or uploaded. The next step after tokens is PyPI
 [Trusted Publishing](https://docs.pypi.org/trusted-publishers/)
 (OIDC from the `pypi` environment, no long-lived secret), which also
 lets `pypa/gh-action-pypi-publish` upload PEP 740 attestations to PyPI
-alongside the GitHub ones.
+alongside the GitHub ones; it is configured on PyPI's side (project
+settings, "Publishing": owner `cgorski`, repository `hardmoney`,
+workflow `python.yml`, environment `pypi`) and then `attestations:
+false` and the token go away.
 
 Release artefacts per version: the crate on crates.io, five wheels and an
 sdist on PyPI (Linux x86_64 and aarch64, macOS Intel and Apple silicon,
