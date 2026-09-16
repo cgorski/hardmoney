@@ -7,7 +7,7 @@ use hardmoney::Cycle;
 use hardmoney::bulk::{self, Input, LoadMode, LoadOptions, LoadReport, dump};
 
 use super::db_args::DbArgs;
-use super::shared::{EndpointArgs, columns, default_dump_cache_dir};
+use super::shared::{EndpointArgs, blocking, columns, default_dump_cache_dir};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum ModeArg {
@@ -620,10 +620,12 @@ pub async fn load_filing(args: BulkLoadFilingArgs) -> super::CliResult {
             "fetching filing {id} from {} ...",
             endpoints.docquery_filing(id)
         );
-        (
-            args.filing_id.unwrap_or(id_i64),
-            hardmoney::fec::download_filing_bytes(id, &endpoints)?,
-        )
+        // The pool is open already; the download must not block a worker.
+        let bytes = {
+            let endpoints = endpoints.clone();
+            blocking(move || hardmoney::fec::download_filing_bytes(id, &endpoints)).await??
+        };
+        (args.filing_id.unwrap_or(id_i64), bytes)
     } else {
         let path = std::path::Path::new(&args.filing);
         let id = match args.filing_id.or_else(|| bulk::filing_id_from_path(path)) {

@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use clap::Args;
 use hardmoney::Cycle;
@@ -19,7 +20,7 @@ use serde::Serialize;
 
 use super::CliResult;
 use super::db_args::DbArgs;
-use super::shared::{EndpointArgs, columns};
+use super::shared::{EndpointArgs, blocking, columns};
 
 /// `--cache-dir`, shared by every command that downloads raw filings.
 #[derive(Args, Debug, Clone)]
@@ -155,14 +156,64 @@ pub struct ExecSummary {
     pub exit_code: Option<i32>,
 }
 
+/// The parse-dependent part of an [`Outcome`]: what [`analyze`] fills in.
+#[derive(Default)]
+struct Analysis {
+    parse_error: Option<String>,
+    validation: Option<ValidationSummary>,
+    reconciliation: Option<ReconcileSummary>,
+}
+
+/// Parses `bytes` leniently and runs the validator and/or reconciler.
+/// Pure CPU on a whole filing (seconds for a large one), so [`apply`]
+/// runs it off the async runtime.
+fn analyze(bytes: &[u8], validate: bool, reconcile: bool) -> Analysis {
+    let mut out = Analysis::default();
+    match Filing::parse_bytes_with(bytes, &ParseOptions::LENIENT) {
+        Ok(lenient) => {
+            if validate {
+                let v = lenient.validate();
+                out.validation = Some(ValidationSummary {
+                    form_type: lenient.value().raw_form_type.to_string(),
+                    acceptable: v.is_acceptable(),
+                    errors: v.error_count(),
+                    warnings: v.warning_count(),
+                });
+            }
+            if reconcile {
+                let filing = lenient.value();
+                out.reconciliation = Some(match filing.reconcile() {
+                    Ok(r) => ReconcileSummary {
+                        form: r.form.to_string(),
+                        checks: Some(r.checks.len()),
+                        disagreeing: Some(r.mismatches().count()),
+                        balances: Some(r.balances()),
+                    },
+                    Err(_) => ReconcileSummary {
+                        form: filing.summary.table().to_string(),
+                        checks: None,
+                        disagreeing: None,
+                        balances: None,
+                    },
+                });
+            }
+        }
+        Err(e) => out.parse_error = Some(e.to_string()),
+    }
+    out
+}
+
 /// Runs every requested action on one filing. `path` is where the bytes
-/// live on disk (the cache), for `--exec`.
-pub async fn apply(actions: &Actions, id: u64, bytes: &[u8], path: Option<&Path>) -> Outcome {
+/// live on disk (the cache), for `--exec`. Takes the bytes by value so the
+/// CPU-bound checks and the `--exec` child can run off the runtime without
+/// copying a filing that may be tens of megabytes.
+pub async fn apply(actions: &Actions, id: u64, bytes: Vec<u8>, path: Option<&Path>) -> Outcome {
     let mut out = Outcome::default();
+    let bytes: Arc<[u8]> = Arc::from(bytes);
 
     if let Some(dir) = &actions.out_dir {
         let dest = dir.join(format!("{id}.fec"));
-        match std::fs::create_dir_all(dir).and_then(|()| std::fs::write(&dest, bytes)) {
+        match std::fs::create_dir_all(dir).and_then(|()| std::fs::write(&dest, &bytes)) {
             Ok(()) => out.saved = Some(dest),
             Err(e) => out
                 .errors
@@ -171,36 +222,15 @@ pub async fn apply(actions: &Actions, id: u64, bytes: &[u8], path: Option<&Path>
     }
 
     if actions.validate || actions.reconcile {
-        match Filing::parse_bytes_with(bytes, &ParseOptions::LENIENT) {
-            Ok(lenient) => {
-                if actions.validate {
-                    let v = lenient.validate();
-                    out.validation = Some(ValidationSummary {
-                        form_type: lenient.value().raw_form_type.to_string(),
-                        acceptable: v.is_acceptable(),
-                        errors: v.error_count(),
-                        warnings: v.warning_count(),
-                    });
-                }
-                if actions.reconcile {
-                    let filing = lenient.value();
-                    out.reconciliation = Some(match filing.reconcile() {
-                        Ok(r) => ReconcileSummary {
-                            form: r.form.to_string(),
-                            checks: Some(r.checks.len()),
-                            disagreeing: Some(r.mismatches().count()),
-                            balances: Some(r.balances()),
-                        },
-                        Err(_) => ReconcileSummary {
-                            form: filing.summary.table().to_string(),
-                            checks: None,
-                            disagreeing: None,
-                            balances: None,
-                        },
-                    });
-                }
+        let (validate, reconcile) = (actions.validate, actions.reconcile);
+        let shared = Arc::clone(&bytes);
+        match blocking(move || analyze(&shared, validate, reconcile)).await {
+            Ok(analysis) => {
+                out.parse_error = analysis.parse_error;
+                out.validation = analysis.validation;
+                out.reconciliation = analysis.reconciliation;
             }
-            Err(e) => out.parse_error = Some(e.to_string()),
+            Err(e) => out.errors.push(e.to_string()),
         }
     }
 
@@ -210,7 +240,7 @@ pub async fn apply(actions: &Actions, id: u64, bytes: &[u8], path: Option<&Path>
                 match hardmoney::bulk::ingest::ingest_filing_bytes(
                     pool,
                     filing_id,
-                    bytes,
+                    &bytes,
                     &ParseOptions::LENIENT,
                 )
                 .await
@@ -234,14 +264,23 @@ pub async fn apply(actions: &Actions, id: u64, bytes: &[u8], path: Option<&Path>
 
     if let Some(program) = &actions.exec {
         let path_arg = path.map(Path::to_path_buf).unwrap_or_default();
-        let status = std::process::Command::new(program)
-            .arg(id.to_string())
-            .arg(&path_arg)
-            .env("HARDMONEY_FILING_ID", id.to_string())
-            .env("HARDMONEY_FILING_PATH", &path_arg)
-            .status();
+        // A user's hook can run for as long as it likes; wait for it off
+        // the runtime.
+        let status = {
+            let program = program.clone();
+            let path_arg = path_arg.clone();
+            blocking(move || {
+                std::process::Command::new(&program)
+                    .arg(id.to_string())
+                    .arg(&path_arg)
+                    .env("HARDMONEY_FILING_ID", id.to_string())
+                    .env("HARDMONEY_FILING_PATH", &path_arg)
+                    .status()
+            })
+            .await
+        };
         match status {
-            Ok(s) => {
+            Ok(Ok(s)) => {
                 if !s.success() {
                     out.errors
                         .push(format!("{} exited with {s}", program.display()));
@@ -251,9 +290,10 @@ pub async fn apply(actions: &Actions, id: u64, bytes: &[u8], path: Option<&Path>
                     exit_code: s.code(),
                 });
             }
-            Err(e) => out
+            Ok(Err(e)) => out
                 .errors
                 .push(format!("could not run {}: {e}", program.display())),
+            Err(e) => out.errors.push(e.to_string()),
         }
     }
 
@@ -631,14 +671,20 @@ pub async fn run(args: FilingsArgs) -> CliResult {
         query = query.per_page(per_page);
     }
 
+    // Paging through openFEC is a chain of blocking GETs; the pool (with
+    // --ingest) is already open, so run them off the runtime.
     let limit = args.limit.unwrap_or(usize::MAX);
-    let mut records: Vec<FilingRecord> = Vec::new();
-    for record in api.filings_all(&query) {
-        records.push(record?);
-        if records.len() >= limit {
-            break;
+    let records: Vec<FilingRecord> = blocking(move || {
+        let mut records: Vec<FilingRecord> = Vec::new();
+        for record in api.filings_all(&query) {
+            records.push(record?);
+            if records.len() >= limit {
+                break;
+            }
         }
-    }
+        Ok::<_, hardmoney::fec::FecApiError>(records)
+    })
+    .await??;
 
     let actions = Actions {
         out_dir: args.fetch.clone(),
@@ -659,18 +705,30 @@ pub async fn run(args: FilingsArgs) -> CliResult {
         let mut outcome = None;
         if actions.any() {
             outcome = Some(match record.filing_id() {
-                Some(id) => match fetch_filing_bytes_with(
-                    id,
-                    &cache,
-                    record.raw_url().as_deref(),
-                    &endpoints,
-                ) {
-                    Ok(bytes) => apply(&actions, id, &bytes, Some(&cache.filing_path(id))).await,
-                    Err(e) => Outcome {
-                        errors: vec![format!("download failed: {e}")],
-                        ..Outcome::default()
-                    },
-                },
+                Some(id) => {
+                    let fetched = {
+                        let cache = cache.clone();
+                        let endpoints = endpoints.clone();
+                        let url_hint = record.raw_url();
+                        blocking(move || {
+                            fetch_filing_bytes_with(id, &cache, url_hint.as_deref(), &endpoints)
+                        })
+                        .await
+                    };
+                    match fetched {
+                        Ok(Ok(bytes)) => {
+                            apply(&actions, id, bytes, Some(&cache.filing_path(id))).await
+                        }
+                        Ok(Err(e)) => Outcome {
+                            errors: vec![format!("download failed: {e}")],
+                            ..Outcome::default()
+                        },
+                        Err(e) => Outcome {
+                            errors: vec![e.to_string()],
+                            ..Outcome::default()
+                        },
+                    }
+                }
                 None => Outcome {
                     skipped: Some(if record.is_paper() {
                         "paper filing; there is no raw .fec".to_string()
@@ -699,7 +757,13 @@ pub async fn run(args: FilingsArgs) -> CliResult {
     }
 
     if args.reconcile_chain {
-        let rows = reconcile_chain(&records, &cache, &endpoints);
+        // Downloads and parses every report in the chain: off the runtime.
+        let rows = {
+            let records = records.clone();
+            let cache = cache.clone();
+            let endpoints = endpoints.clone();
+            blocking(move || reconcile_chain(&records, &cache, &endpoints)).await?
+        };
         if args.json {
             let by_id: HashMap<u64, &ChainSummary> = rows.iter().map(|(id, s)| (*id, s)).collect();
             for row in &mut json_rows {

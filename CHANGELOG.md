@@ -43,6 +43,27 @@
   (it ran the suite without a database before). CI workflows pin every
   action to a commit, grant `contents: read` by default, build with
   `--locked`, and cancel superseded pull-request runs.
+- **Blocking work leaves the async runtime.** The `/tools/*` handlers
+  parse, validate, reconcile, and write a filing on tokio's blocking pool
+  instead of a runtime worker, so one 32 MiB upload no longer stalls every
+  other request (and the database pool's housekeeping) on that worker; a
+  worker failure is a 500 (`ToolsError::Internal`) rather than a
+  misreported 502. The CLI does the same for every `ureq` call it makes
+  while a Postgres pool may be open -- `efile watch`/`backfill` polls and
+  downloads, `filings` paging, downloads, `--reconcile-chain`, and the
+  parse/validate/reconcile and `--exec` hook in `apply`, and
+  `bulk-load-filing`'s download -- and `dumps` preflight runs its
+  `pg_restore --version` and `df` children off the runtime. `bulk-load`
+  from a URL no longer sends a HEAD request on every load: the download's
+  own `ETag`/`Last-Modified` are recorded (a HEAD is made only for
+  `--if-changed`, off the runtime), and the download goes through the
+  crate's shared HTTP agent, so it carries the `hardmoney/<version>`
+  User-Agent, has a connect timeout, and turns a non-2xx answer into an
+  error naming the URL instead of trying to unzip an HTML error page.
+  Tests: a `/tools/parse` of a 2 MB filing on a single-threaded runtime
+  must let a concurrent timer fire (it fires ~370 times; the old inline
+  handler let it fire 0 times); staging from a URL records the response
+  headers and sends the User-Agent; a 404 is a typed error.
 - **Fixtures are protected as bytes.** A new `.gitattributes` marks
   `tests/fixtures/**` and `*.fec` as never line-ending-converted (git's
   binary heuristic only happened to protect the FS-delimited ones; a

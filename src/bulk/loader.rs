@@ -154,26 +154,28 @@ pub async fn load(
         });
     }
 
-    // `--if-changed`: one HEAD request against the last recorded full load.
-    let remote_meta = match &input {
-        Input::Url(url) => head_metadata(url),
-        Input::LocalFile(_) => RemoteMeta::default(),
-    };
+    // `--if-changed`: one HEAD request (off the runtime) against the last
+    // recorded full load. Without the flag there is no HEAD at all; the
+    // GET that stages the file carries the same headers, and those are
+    // what the `loads` row records.
     if options.if_changed
-        && let Input::Url(_) = &input
+        && let Input::Url(url) = &input
         && let Some(prev) = last_full_load(pool, source, options.cycle).await?
-        && remote_meta.matches(&prev)
     {
-        return Ok(LoadReport {
-            table: source.table,
-            cycle: options.cycle,
-            mode: options.mode,
-            rows_loaded: 0,
-            rows_replaced: 0,
-            dates_nulled: 0,
-            skipped_unchanged: true,
-            load_id: None,
-        });
+        let url = url.clone();
+        let remote_meta = tokio::task::spawn_blocking(move || head_metadata(&url)).await?;
+        if remote_meta.matches(&prev) {
+            return Ok(LoadReport {
+                table: source.table,
+                cycle: options.cycle,
+                mode: options.mode,
+                rows_loaded: 0,
+                rows_replaced: 0,
+                dates_nulled: 0,
+                skipped_unchanged: true,
+                load_id: None,
+            });
+        }
     }
 
     // Replace-mode guard runs before the (possibly multi-GB) download.
@@ -238,8 +240,8 @@ pub async fn load(
     .bind(options.limit.map(|l| i64::try_from(l).unwrap_or(i64::MAX)))
     .bind(i64::try_from(staged.dates_nulled).unwrap_or(i64::MAX))
     .bind(source_url)
-    .bind(&remote_meta.etag)
-    .bind(remote_meta.last_modified)
+    .bind(&staged.remote_meta.etag)
+    .bind(staged.remote_meta.last_modified)
     .bind(env!("CARGO_PKG_VERSION"))
     .fetch_one(&mut *tx)
     .await?;
@@ -312,18 +314,27 @@ impl RemoteMeta {
     }
 }
 
+impl RemoteMeta {
+    /// The `ETag` and `Last-Modified` of a response, as the FEC's
+    /// download host sends them (the ETag with its quotes removed).
+    fn from_headers(headers: &ureq::http::HeaderMap) -> RemoteMeta {
+        let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+        RemoteMeta {
+            etag: header("etag").map(|s| s.trim_matches('"').to_string()),
+            last_modified: header("last-modified")
+                .and_then(|s| chrono::DateTime::parse_from_rfc2822(s).ok())
+                .map(|d| d.with_timezone(&chrono::Utc)),
+        }
+    }
+}
+
+/// Blocking: one HEAD request through the crate's shared agent (its
+/// `User-Agent` and connect timeout). A failure is "unknown", which
+/// [`RemoteMeta::matches`] treats as changed.
 fn head_metadata(url: &str) -> RemoteMeta {
-    let Ok(resp) = ureq::head(url).call() else {
-        return RemoteMeta::default();
-    };
-    let header = |name: &str| resp.headers().get(name).and_then(|v| v.to_str().ok());
-    let etag = header("etag").map(|s| s.trim_matches('"').to_string());
-    let last_modified = header("last-modified")
-        .and_then(|s| chrono::DateTime::parse_from_rfc2822(s).ok())
-        .map(|d| d.with_timezone(&chrono::Utc));
-    RemoteMeta {
-        etag,
-        last_modified,
+    match crate::fec::agent().head(url).call() {
+        Ok(resp) => RemoteMeta::from_headers(resp.headers()),
+        Err(_) => RemoteMeta::default(),
     }
 }
 
@@ -338,6 +349,9 @@ impl Drop for RemoveOnDrop {
 struct StagedFile {
     path: PathBuf,
     dates_nulled: u64,
+    /// What the download's response headers said, for the `loads` row and
+    /// the next `--if-changed`; default for a local file.
+    remote_meta: RemoteMeta,
 }
 
 /// A reader that can be told to report EOF immediately.
@@ -371,13 +385,21 @@ fn stage_to_temp_csv(
     cycle: Cycle,
     limit: Option<u64>,
 ) -> Result<StagedFile> {
+    let mut remote_meta = RemoteMeta::default();
     let raw_reader: Box<dyn Read> = match input {
         Input::LocalFile(path) => Box::new(BufReader::new(File::open(path)?)),
         Input::Url(url) => {
-            let resp = ureq::get(&url).call().map_err(|e| BulkError::Http {
-                url: url.clone(),
-                detail: e.to_string(),
-            })?;
+            // The shared agent: `User-Agent` names the client to the FEC
+            // and the connect/response-header timeouts stop a stalled
+            // connection from hanging the load; the body itself has no
+            // deadline (these files run to gigabytes). A non-2xx status is
+            // an error naming the URL, not a body to unzip.
+            let resp =
+                crate::fec::get_ok(crate::fec::agent(), &url).map_err(|e| BulkError::Http {
+                    url: url.clone(),
+                    detail: e.to_string(),
+                })?;
+            remote_meta = RemoteMeta::from_headers(resp.headers());
             let body = resp.into_body();
             let pb = match body.content_length() {
                 Some(len) => indicatif::ProgressBar::new(len).with_style(
@@ -501,6 +523,7 @@ fn stage_to_temp_csv(
     Ok(StagedFile {
         path: out_path,
         dates_nulled,
+        remote_meta,
     })
 }
 
@@ -683,11 +706,10 @@ mod tests {
         assert!(!a.matches(&c));
     }
 
-    #[test]
-    fn stages_a_local_zip_with_dates_limit_and_extra_fields() {
-        // Build a tiny `oppexp`-shaped zip in memory: 25 columns + the
-        // known trailing extra field, MM/DD/YYYY dates, one blank date,
-        // one bogus date, four rows, limit 3.
+    /// A tiny `oppexp`-shaped zip in memory: 25 columns + the known
+    /// trailing extra field, MM/DD/YYYY dates, one blank date, one bogus
+    /// date, four rows.
+    fn oppexp_zip() -> Vec<u8> {
         use std::io::Write as _;
         let src = &super::super::source::DISBURSEMENTS;
         let mk = |sub_id: &str, dt: &str| {
@@ -715,10 +737,36 @@ mod tests {
             zw.write_all(body.as_bytes()).unwrap();
             zw.finish().unwrap();
         }
+        zip_bytes.into_inner()
+    }
+
+    #[test]
+    fn remote_meta_reads_etag_and_last_modified_from_headers() {
+        let mut h = ureq::http::HeaderMap::new();
+        h.insert("etag", "\"abc123\"".parse().unwrap());
+        h.insert(
+            "last-modified",
+            "Mon, 14 Sep 2026 06:00:00 GMT".parse().unwrap(),
+        );
+        let m = RemoteMeta::from_headers(&h);
+        assert_eq!(m.etag.as_deref(), Some("abc123"), "quotes stripped");
+        assert_eq!(
+            m.last_modified.map(|d| d.to_rfc3339()),
+            Some("2026-09-14T06:00:00+00:00".to_string())
+        );
+        // Missing or unparseable headers are simply absent.
+        let mut h = ureq::http::HeaderMap::new();
+        h.insert("last-modified", "yesterday".parse().unwrap());
+        assert_eq!(RemoteMeta::from_headers(&h), RemoteMeta::default());
+    }
+
+    #[test]
+    fn stages_a_local_zip_with_dates_limit_and_extra_fields() {
+        let src = &super::super::source::DISBURSEMENTS;
         let dir = std::env::temp_dir().join(format!("hardmoney-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let zip_path = dir.join("oppexp_test.zip");
-        std::fs::write(&zip_path, zip_bytes.into_inner()).unwrap();
+        std::fs::write(&zip_path, oppexp_zip()).unwrap();
 
         let staged = stage_to_temp_csv(
             src,
@@ -727,6 +775,11 @@ mod tests {
             Some(3),
         )
         .unwrap();
+        assert_eq!(
+            staged.remote_meta,
+            RemoteMeta::default(),
+            "a local file has no remote metadata"
+        );
         let out = std::fs::read_to_string(&staged.path).unwrap();
         let rows: Vec<&str> = out.lines().collect();
         assert_eq!(rows.len(), 3, "{out}");
@@ -742,5 +795,81 @@ mod tests {
 
         let _ = std::fs::remove_file(&staged.path);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A one-shot local server for the URL path: answers one request with
+    /// `status` and `body` plus ETag/Last-Modified headers, and returns
+    /// the request headers it saw.
+    fn serve_once(
+        status: &'static str,
+        body: Vec<u8>,
+    ) -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = vec![0u8; 16384];
+            let n = stream.read(&mut buf).unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/zip\r\nContent-Length: {}\r\nETag: \"etag-1\"\r\nLast-Modified: Mon, 14 Sep 2026 06:00:00 GMT\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+            request
+        });
+        (
+            format!("http://{addr}/bulk-downloads/2026/oppexp26.zip"),
+            handle,
+        )
+    }
+
+    /// Staging from a URL records the download's ETag and Last-Modified
+    /// (what the `loads` row and the next `--if-changed` use, with no
+    /// separate HEAD) and identifies itself with the crate's User-Agent.
+    #[test]
+    fn staging_from_a_url_records_the_response_headers() {
+        let src = &super::super::source::DISBURSEMENTS;
+        let (url, server) = serve_once("200 OK", oppexp_zip());
+        let staged =
+            stage_to_temp_csv(src, Input::Url(url), Cycle::new(2026).unwrap(), None).unwrap();
+        let _ = std::fs::remove_file(&staged.path);
+        assert_eq!(staged.remote_meta.etag.as_deref(), Some("etag-1"));
+        assert_eq!(
+            staged.remote_meta.last_modified.map(|d| d.to_rfc3339()),
+            Some("2026-09-14T06:00:00+00:00".to_string())
+        );
+        let request = server.join().unwrap().to_ascii_lowercase();
+        assert!(
+            request.contains("user-agent: hardmoney/"),
+            "the shared agent's User-Agent is missing: {request}"
+        );
+    }
+
+    /// A non-2xx answer (the FEC's host serves an HTML 404 page) is an
+    /// HTTP error naming the URL, not an attempt to unzip the page.
+    #[test]
+    fn staging_from_a_url_reports_a_non_2xx_status() {
+        let src = &super::super::source::DISBURSEMENTS;
+        let (url, server) = serve_once("404 Not Found", b"<html>no such file</html>".to_vec());
+        let err = stage_to_temp_csv(
+            src,
+            Input::Url(url.clone()),
+            Cycle::new(2026).unwrap(),
+            None,
+        )
+        .err()
+        .expect("a 404 must be an error");
+        match err {
+            BulkError::Http { url: u, detail } => {
+                assert_eq!(u, url);
+                assert!(detail.contains("404"), "{detail}");
+            }
+            other => panic!("expected BulkError::Http, got {other:?}"),
+        }
+        server.join().unwrap();
     }
 }

@@ -119,6 +119,10 @@ pub enum ToolsError {
     /// The FEC's document store could not be reached or refused the id.
     #[error("{0}")]
     UpstreamFailed(String),
+    /// The server's own worker failed (a background task panicked or was
+    /// cancelled); nothing about the request caused it.
+    #[error("{0}")]
+    Internal(String),
 }
 
 impl IntoResponse for ToolsError {
@@ -130,9 +134,24 @@ impl IntoResponse for ToolsError {
             ToolsError::UnsupportedMediaType(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             ToolsError::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
             ToolsError::UpstreamFailed(_) => StatusCode::BAD_GATEWAY,
+            ToolsError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(json!({ "error": self.to_string() }))).into_response()
     }
+}
+
+/// Runs `f` on tokio's blocking pool. Parsing, validating, reconciling, or
+/// writing a filing of up to [`Limits::max_body_bytes`] takes real CPU
+/// time; on a runtime worker it would stall every other request on that
+/// worker (and the database pool's housekeeping) for the duration.
+async fn offload<T, F>(f: F) -> Result<T, ToolsError>
+where
+    F: FnOnce() -> Result<T, ToolsError> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| ToolsError::Internal(format!("worker task failed: {e}")))?
 }
 
 fn too_large(limits: Limits) -> ToolsError {
@@ -248,7 +267,7 @@ pub async fn parse(
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<ParsedDocument>, ToolsError> {
     let bytes = body.map_err(|rej| bytes_rejection(rej, limits))?;
-    parse_document(&bytes).map(Json)
+    offload(move || parse_document(&bytes)).await.map(Json)
 }
 
 /// `GET /tools/fetch/{filing_id}`: downloads the filing from the
@@ -278,26 +297,36 @@ pub async fn fetch(
         .await
         .map_err(|e| ToolsError::UpstreamFailed(format!("download slot unavailable: {e}")))?;
     let max_bytes = u64::try_from(limits.max_body_bytes).unwrap_or(u64::MAX);
-    let bytes = tokio::task::spawn_blocking(move || {
+    // Download and parse in one blocking task: both are off the runtime,
+    // and the bytes never cross back to it.
+    offload(move || {
         let endpoints = match endpoints {
             Some(Extension(endpoints)) => endpoints,
-            None => Endpoints::from_env()?,
+            None => Endpoints::from_env().map_err(|e| upstream(filing_id, &e.into()))?,
         };
-        download_filing_bytes_capped(filing_id, &endpoints, max_bytes)
+        let bytes = download_filing_bytes_capped(filing_id, &endpoints, max_bytes).map_err(
+            |e| match e {
+                FecApiError::TooLarge { content_length, .. } => {
+                    ToolsError::PayloadTooLarge(format!(
+                        "filing {filing_id} is{} larger than this server's {} byte limit; use `hardmoney parse {filing_id}` instead",
+                        content_length.map_or(String::new(), |n| format!(" {n} bytes,")),
+                        limits.max_body_bytes
+                    ))
+                }
+                other => upstream(filing_id, &other),
+            },
+        )?;
+        parse_document(&bytes)
     })
     .await
-    .map_err(|e| ToolsError::UpstreamFailed(format!("download task failed: {e}")))?
-    .map_err(|e| match e {
-        FecApiError::TooLarge { content_length, .. } => ToolsError::PayloadTooLarge(format!(
-            "filing {filing_id} is{} larger than this server's {} byte limit; use `hardmoney parse {filing_id}` instead",
-            content_length.map_or(String::new(), |n| format!(" {n} bytes,")),
-            limits.max_body_bytes
-        )),
-        other => ToolsError::UpstreamFailed(format!(
-            "could not download filing {filing_id} from the FEC: {other}"
-        )),
-    })?;
-    parse_document(&bytes).map(Json)
+    .map(Json)
+}
+
+#[cfg(feature = "fetch")]
+fn upstream(filing_id: u64, e: &crate::fec::FecApiError) -> ToolsError {
+    ToolsError::UpstreamFailed(format!(
+        "could not download filing {filing_id} from the FEC: {e}"
+    ))
 }
 
 /// `GET /tools/fetch/{filing_id}` in a build without the `fetch` feature:
@@ -540,8 +569,10 @@ pub async fn validate(
     Extension(limits): Extension<Limits>,
     body: Result<Json<Document>, JsonRejection>,
 ) -> Result<Json<Validation>, ToolsError> {
-    let filing = build_filing(&take_document(body, limits)?, limits)?;
-    Ok(Json(filing.validate()))
+    let doc = take_document(body, limits)?;
+    offload(move || Ok(build_filing(&doc, limits)?.validate()))
+        .await
+        .map(Json)
 }
 
 /// `POST /tools/reconcile`: [`Filing::reconcile`] on a [`Document`]; 400
@@ -550,11 +581,14 @@ pub async fn reconcile(
     Extension(limits): Extension<Limits>,
     body: Result<Json<Document>, JsonRejection>,
 ) -> Result<Json<Reconciliation>, ToolsError> {
-    let filing = build_filing(&take_document(body, limits)?, limits)?;
-    filing
-        .reconcile()
-        .map(Json)
-        .map_err(|e| ToolsError::BadRequest(e.to_string()))
+    let doc = take_document(body, limits)?;
+    offload(move || {
+        build_filing(&doc, limits)?
+            .reconcile()
+            .map_err(|e| ToolsError::BadRequest(e.to_string()))
+    })
+    .await
+    .map(Json)
 }
 
 /// Keeps ASCII letters, digits, `-`, and `_` for a download filename.
@@ -579,19 +613,23 @@ pub async fn write(
     Extension(limits): Extension<Limits>,
     body: Result<Json<Document>, JsonRejection>,
 ) -> Result<Response, ToolsError> {
-    let filing = build_filing(&take_document(body, limits)?, limits)?;
-    let errors = filing.validate().error_count();
-    let committee = filing
-        .summary
-        .get_non_empty("filer_committee_id_number")
-        .or_else(|| filing.summary.get_non_empty("candidate_id_number"))
-        .unwrap_or("filing");
-    let filename = format!(
-        "{}-{}.fec",
-        filename_token(&filing.raw_form_type, "filing"),
-        filename_token(committee, "filing")
-    );
-    let bytes = filing.to_fec();
+    let doc = take_document(body, limits)?;
+    let (filename, errors, bytes) = offload(move || {
+        let filing = build_filing(&doc, limits)?;
+        let errors = filing.validate().error_count();
+        let committee = filing
+            .summary
+            .get_non_empty("filer_committee_id_number")
+            .or_else(|| filing.summary.get_non_empty("candidate_id_number"))
+            .unwrap_or("filing");
+        let filename = format!(
+            "{}-{}.fec",
+            filename_token(&filing.raw_form_type, "filing"),
+            filename_token(committee, "filing")
+        );
+        Ok((filename, errors, filing.to_fec()))
+    })
+    .await?;
 
     let mut response = (StatusCode::OK, bytes).into_response();
     let headers = response.headers_mut();

@@ -929,10 +929,17 @@ pub async fn check_database_space(
             need_phrase(needed),
         );
     }
+    // `df` is a child process; off the runtime like the other spawns.
+    let free = {
+        let dir = data_dir.clone();
+        tokio::task::spawn_blocking(move || free_disk_space(Path::new(&dir)))
+            .await
+            .unwrap_or(None)
+    };
     space_check(
         NAME,
         &data_dir,
-        free_disk_space(Path::new(&data_dir)),
+        free,
         needed.filter(|n| *n > 0),
         "free some space on the disk that holds the Postgres data directory, or choose a smaller import (fewer --cycles, or the small files first)",
     )
@@ -1289,22 +1296,24 @@ pub struct PreflightInput<'a> {
 /// downloads`, `disk space for the database`, `namespace`.
 pub async fn run(input: &PreflightInput<'_>) -> Preflight {
     let mut pf = Preflight::new();
-    pf.push(check_pg_restore());
+    pf.push(off_runtime("pg_restore", check_pg_restore).await);
     let url_check = check_database_url(input.database_url);
     let url_ok = url_check.status != Status::Fail;
     pf.push(url_check);
     let download_bytes = input.needs.map(|n| n.download_bytes);
     let database_bytes = input.needs.map(|n| n.database_bytes);
+    let cache_dir = input.cache_dir.to_path_buf();
+    let cache_space = move || check_cache_space(&cache_dir, download_bytes);
 
     let Some(url) = input.database_url.filter(|_| url_ok) else {
-        pf.push(check_cache_space(input.cache_dir, download_bytes));
+        pf.push(off_runtime("disk space for downloads", cache_space).await);
         return pf;
     };
     let pool = match check_connection(url, input.namespace, 2).await {
         Ok(pool) => pool,
         Err(check) => {
             pf.push(check);
-            pf.push(check_cache_space(input.cache_dir, download_bytes));
+            pf.push(off_runtime("disk space for downloads", cache_space).await);
             return pf;
         }
     };
@@ -1332,11 +1341,27 @@ pub async fn run(input: &PreflightInput<'_>) -> Preflight {
     pf.push(check_server_version(&pool).await);
     pf.push(check_disclosure_schema(&pool).await);
     pf.push(check_extensions(&pool).await);
-    pf.push(check_cache_space(input.cache_dir, download_bytes));
+    pf.push(off_runtime("disk space for downloads", cache_space).await);
     pf.push(check_database_space(&pool, summary.as_ref(), database_bytes).await);
     pf.push(check_namespace(&pool, input.namespace).await);
     pool.close().await;
     pf
+}
+
+/// Runs a check that spawns a process (`pg_restore --version`, `df`) on
+/// the blocking pool, so it does not hold a runtime worker while the
+/// connection pool opened above needs one. A worker failure becomes a
+/// warning under `name`, never a panic.
+async fn off_runtime(name: &'static str, check: impl FnOnce() -> Check + Send + 'static) -> Check {
+    tokio::task::spawn_blocking(check)
+        .await
+        .unwrap_or_else(|e| {
+            Check::warn(
+                name,
+                format!("could not run this check: {e}"),
+                "check it by hand",
+            )
+        })
 }
 
 #[cfg(test)]

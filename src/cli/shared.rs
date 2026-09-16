@@ -1,10 +1,33 @@
 //! Helpers more than one subcommand module needs: the FEC endpoint flags,
-//! the default dump cache directory, and a fixed-width column renderer.
+//! the default dump cache directory, a fixed-width column renderer, and
+//! [`blocking`] for work that must leave the async runtime.
 
 use std::path::PathBuf;
 
 use clap::Args;
 use hardmoney::fec::Endpoints;
+
+use super::CliResult;
+
+/// Runs `f` on tokio's blocking pool and waits for it.
+///
+/// The CLI is one `#[tokio::main]` runtime. Its blocking work -- `ureq`
+/// requests, parsing and checking a whole filing, waiting on a child
+/// process -- must not run on a runtime worker while anything else is
+/// live there: with `--ingest` a `sqlx` pool's keepalive and reaper tasks
+/// share those workers, and a stalled docquery download would stall them
+/// too. Everything a closure captures must be owned (`Send + 'static`);
+/// the FEC client types (`Endpoints`, `Cache`, `EfileFeed`, `OpenFec`)
+/// are cheap to clone for that.
+pub async fn blocking<T, F>(f: F) -> CliResult<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| format!("a background task failed: {e}").into())
+}
 
 /// The flags that move a command off the FEC's production hosts, one per
 /// base in [`Endpoints`]. Each reads the matching `HARDMONEY_*` variable

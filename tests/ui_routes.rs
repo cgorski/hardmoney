@@ -876,6 +876,67 @@ async fn tools_fetch_downloads_from_the_configured_docquery_base() {
     assert_eq!(seen, ["GET /mirror/dcdev/posted/2011827.fec HTTP/1.1"]);
 }
 
+/// The CPU-bound tools handlers run on the blocking pool, not on the
+/// runtime's worker. On a single-threaded runtime a handler that parsed
+/// and validated inline would hold the only worker for the duration, so
+/// a concurrent timer task could not fire until it finished; here the
+/// timer fires while the request is in flight. (Each `#[tokio::test]` is
+/// already a current_thread runtime, which is what makes this observable.)
+#[tokio::test]
+async fn tools_handlers_do_not_block_the_runtime_worker() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    // Enough work to take a while: the fixture repeated many times over.
+    let mut big = Vec::new();
+    let mut lines = FIXTURE.split(|&b| b == b'\n');
+    let header = lines.next().unwrap();
+    let cover = lines.next().unwrap();
+    big.extend_from_slice(header);
+    big.push(b'\n');
+    big.extend_from_slice(cover);
+    big.push(b'\n');
+    let body: Vec<&[u8]> = lines.filter(|l| !l.is_empty()).collect();
+    for _ in 0..2000 {
+        for l in &body {
+            big.extend_from_slice(l);
+            big.push(b'\n');
+        }
+    }
+    let app = app_with_limit(big.len() + 1024);
+
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let ticker = {
+        let ticks = Arc::clone(&ticks);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                ticks.fetch_add(1, Ordering::Relaxed);
+            }
+        })
+    };
+
+    let started = std::time::Instant::now();
+    let (status, _, resp) = post_bytes(&app, "/tools/parse", big.clone()).await;
+    let elapsed = started.elapsed();
+    ticker.abort();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&resp));
+    assert_eq!(json(&resp)["line_count"], FIXTURE_LINES * 2000);
+
+    let ticks = ticks.load(Ordering::Relaxed);
+    eprintln!(
+        "parse of {} bytes took {elapsed:?}; timer fired {ticks} times",
+        big.len()
+    );
+    // A blocked worker fires the timer zero times (or once, at the very
+    // end). Off-runtime parsing lets it run throughout.
+    assert!(
+        ticks >= 5,
+        "the timer fired only {ticks} time(s) during a {elapsed:?} request: the handler blocked the runtime worker"
+    );
+}
+
 /// The tools router pointed at a local document store with `max_body_bytes`
 /// as its cap.
 fn fetch_app(addr: std::net::SocketAddr, max_body_bytes: usize) -> Router {

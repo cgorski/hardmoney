@@ -12,7 +12,7 @@ use hardmoney::fec::{Cache, Endpoints, FecApiError, fetch_filing_bytes_with};
 
 use super::CliResult;
 use super::filings::{Actions, CacheArgs, OptionalDbArgs, Outcome, apply, print_outcome};
-use super::shared::EndpointArgs;
+use super::shared::{EndpointArgs, blocking};
 
 #[derive(Args, Debug)]
 pub struct EfileArgs {
@@ -146,7 +146,10 @@ pub async fn watch(args: WatchArgs) -> CliResult {
     let mut seen: BTreeSet<u64> = cache.read_seen()?;
 
     if args.mark_seen {
-        let items = feed.poll()?;
+        let items = {
+            let feed = feed.clone();
+            blocking(move || feed.poll()).await??
+        };
         let new: Vec<u64> = items
             .iter()
             .map(|i| i.filing_id)
@@ -163,7 +166,12 @@ pub async fn watch(args: WatchArgs) -> CliResult {
     }
 
     loop {
-        let poll = feed.poll();
+        // The poll is a blocking GET; off the runtime so the pool's
+        // background tasks (with --ingest) keep running while it waits.
+        let poll = {
+            let feed = feed.clone();
+            blocking(move || feed.poll()).await?
+        };
         let items = match poll {
             Ok(items) => items,
             Err(e) if args.once => return Err(e.into()),
@@ -257,10 +265,20 @@ async fn fetch_and_apply(
     id: u64,
     url_hint: Option<&str>,
 ) -> Outcome {
-    match fetch_filing_bytes_with(id, cache, url_hint, endpoints) {
-        Ok(bytes) => apply(actions, id, &bytes, Some(&cache.filing_path(id))).await,
-        Err(e) => Outcome {
+    let fetched = {
+        let cache = cache.clone();
+        let endpoints = endpoints.clone();
+        let url_hint = url_hint.map(str::to_owned);
+        blocking(move || fetch_filing_bytes_with(id, &cache, url_hint.as_deref(), &endpoints)).await
+    };
+    match fetched {
+        Ok(Ok(bytes)) => apply(actions, id, bytes, Some(&cache.filing_path(id))).await,
+        Ok(Err(e)) => Outcome {
             errors: vec![format!("download failed: {e}")],
+            ..Outcome::default()
+        },
+        Err(e) => Outcome {
+            errors: vec![e.to_string()],
             ..Outcome::default()
         },
     }
@@ -340,7 +358,14 @@ pub async fn backfill(args: BackfillArgs) -> CliResult {
     let mut days_failed = 0usize;
     let mut day = args.from;
     loop {
-        match daily_zip_filings_with(day, &cache, &endpoints) {
+        // Downloads the day's archive (cache-first) off the runtime; the
+        // iterator it returns reads entries from the local file.
+        let filings = {
+            let cache = cache.clone();
+            let endpoints = endpoints.clone();
+            blocking(move || daily_zip_filings_with(day, &cache, &endpoints)).await?
+        };
+        match filings {
             Ok(filings) => {
                 let mut day_total = 0usize;
                 let mut day_matched = 0usize;
@@ -359,6 +384,7 @@ pub async fn backfill(args: BackfillArgs) -> CliResult {
                         continue;
                     }
                     day_matched += 1;
+                    let byte_len = bytes.len();
                     let outcome = if actions.any() {
                         // The bytes came from the archive; cache them so
                         // a later `filings`/`watch` needs no download.
@@ -369,7 +395,7 @@ pub async fn backfill(args: BackfillArgs) -> CliResult {
                                 None
                             }
                         };
-                        Some(apply(&actions, id, &bytes, path.as_deref()).await)
+                        Some(apply(&actions, id, bytes, path.as_deref()).await)
                     } else {
                         None
                     };
@@ -381,14 +407,14 @@ pub async fn backfill(args: BackfillArgs) -> CliResult {
                             "date": day.to_string(),
                             "filing_id": id,
                             "form_type": form_type,
-                            "bytes": bytes.len(),
+                            "bytes": byte_len,
                         });
                         if let (Some(o), serde_json::Value::Object(map)) = (&outcome, &mut v) {
                             map.insert("actions".to_string(), serde_json::to_value(o)?);
                         }
                         println!("{v}");
                     } else {
-                        println!("{day}  {id}  {form_type:<5} {} byte(s)", bytes.len());
+                        println!("{day}  {id}  {form_type:<5} {} byte(s)", byte_len);
                         if let Some(o) = &outcome {
                             print_outcome(id, o);
                         }
