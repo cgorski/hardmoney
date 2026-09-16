@@ -11,7 +11,9 @@ name: Publish to crates.io
 #      integration tests in tests/postgres_integration.rs run rather than
 #      skip (under GitHub Actions they fail if the database is missing).
 # Nothing here runs on push or tag events. Dispatch with `dry_run` to
-# rehearse everything up to, but not including, the upload.
+# rehearse everything up to, but not including, the upload; a dry run
+# usually happens before the tag exists, so in that mode the tag check
+# reports its result without stopping the rehearsal.
 
 on:
   workflow_dispatch:
@@ -69,6 +71,8 @@ jobs:
           test "$declared" = "$REQUESTED"
 
       - name: Verify tag v${{ inputs.version }} points at HEAD
+        # A dry run is rehearsed before tagging: report, do not stop.
+        continue-on-error: ${{ inputs.dry_run }}
         env:
           REQUESTED: ${{ inputs.version }}
         run: |
