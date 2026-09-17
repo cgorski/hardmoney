@@ -12,7 +12,7 @@ homepage = "https://github.com/cgorski/hardmoney"
 documentation = "https://docs.rs/hardmoney"
 keywords = ["fec", "campaign-finance", "election", "parser", "government-data"]
 categories = ["parser-implementations", "database"]
-exclude = ["/book", "/.github", "/scripts", "/tmp", "/.gitignore", "/data/fec-spec/*.xlsx", "/python", "/fuzz"]
+exclude = ["/book", "/.github", "/scripts", "/tmp", "/.gitignore", "/data/fec-spec/*.xlsx", "/python", "/fuzz", "/docker-compose.yml"]
 
 [package.metadata.docs.rs]
 all-features = true

@@ -112,19 +112,27 @@ Not every chapter of this book needs every dependency:
 | Restore the FEC's own `pg_dump` archives ([Bulk ETL](./bulk-etl.md#an-alternative-restoring-the-fecs-own-database-dumps)) | The same, plus `pg_restore` on your `PATH`. |
 | Run the REST API ([The REST API](./rest-api.md)) | The same Postgres database, already loaded with data. |
 
-If you don't have Postgres handy, the fastest way to get one for local
-experimentation is usually a container:
+If you don't have Postgres handy, the repository ships a compose file
+that brings up the same container the test suite runs against in CI
+(Postgres 18 by default; `PG_VERSION=15` for the major the FEC itself
+runs), on host port 5433 so a Postgres you already have on 5432 is left
+alone:
 
 ```bash
-docker run --name fec-postgres -e POSTGRES_PASSWORD=postgres \
-  -p 5432:5432 -d postgres:18
+scripts/dev-postgres.sh up      # docker compose up -d --wait, then prints the URL
+scripts/dev-postgres.sh psql    # a psql session in it
+scripts/dev-postgres.sh down    # stop and delete the data
 ```
 
-Then set:
+Then set what `up` printed:
 
 ```bash
-export DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/postgres"
+export DATABASE_URL="postgres://hardmoney:hardmoney@127.0.0.1:5433/hardmoney_test"
 ```
+
+(Without Docker Compose, the one-liner is `docker run --name fec-postgres
+-e POSTGRES_PASSWORD=postgres -p 5432:5432 -d postgres:18` and
+`export DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/postgres"`.)
 
 Two things about that URL. Include a username: if the URL has no user
 (`postgres://localhost/fec`), `sqlx` falls back to your operating-system

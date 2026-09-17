@@ -304,7 +304,8 @@ and REST references.
 
 ```bash
 cargo test --all-features                                   # no database needed
-HARDMONEY_TEST_DATABASE_URL=postgres://user@localhost/t cargo test --all-features   # with Postgres
+scripts/dev-postgres.sh test                                # with Postgres (the CI container, via docker compose)
+HARDMONEY_TEST_DATABASE_URL=postgres://user@localhost/t cargo test --all-features   # with your own Postgres
 cargo clippy --all-features --all-targets -- -D warnings
 cd python && maturin develop --release && pytest             # Python package
 ```

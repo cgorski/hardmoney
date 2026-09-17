@@ -113,7 +113,11 @@ check.
 * Integration tests that need Postgres self-skip without
   `HARDMONEY_TEST_DATABASE_URL` (except under GitHub Actions, where a
   missing database is a failure) and use unique names per test (they run
-  in parallel).
+  in parallel). To run them locally, `scripts/dev-postgres.sh test`
+  brings up the CI container (`docker-compose.yml`, Postgres 18 on host
+  port 5433; `PG_VERSION=15` for the FEC's major) and runs
+  `cargo test --all-features` against it; `scripts/dev-postgres.sh down`
+  discards it.
 
 ### 6. Dependencies
 

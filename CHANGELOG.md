@@ -43,6 +43,12 @@
   (it ran the suite without a database before). CI workflows pin every
   action to a commit, grant `contents: read` by default, build with
   `--locked`, and cancel superseded pull-request runs.
+- **A local Postgres in one command.** `docker-compose.yml` and
+  `scripts/dev-postgres.sh up|test|psql|url|down` bring up the same
+  container the CI test job uses (Postgres 18, or `PG_VERSION=15` for the
+  FEC's major; role, password, and database identical, so the test URL is
+  the same string) on host port 5433, leaving an existing Postgres on
+  5432 alone; `test` runs `cargo test --all-features` against it.
 - **Validator: 3x faster on large filings, same findings.** The
   per-field classifiers that decide what a column is (state, ZIP, date,
   district, office, election code, check-box, year, phone) and what a
