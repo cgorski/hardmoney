@@ -74,10 +74,35 @@ impl Filing {
     /// is canonicalised). Never fails: every line carries its layout.
     #[must_use]
     pub fn to_fec_string(&self) -> String {
+        self.render(false)
+    }
+
+    /// Serialises the filing to `.fec` bytes, Windows-1252 when every
+    /// character is representable in it (the FEC's character set), else
+    /// UTF-8. See the module docs.
+    #[must_use]
+    pub fn to_fec(&self) -> Vec<u8> {
+        let bytes = encode(&self.render(false));
+        // The parser strips a UTF-8 byte-order mark from the raw first
+        // bytes before decoding. A comma-delimited header cell can put
+        // those three bytes at byte 0 only through the encoding: the
+        // characters `ï»¿` -- what a quoted BOM decodes to in a file that
+        // was read as Windows-1252 -- encode back to exactly `EF BB BF`.
+        // Quoting the cell keeps the parser's strip off it, as the
+        // original's quotes did. (Found by the `roundtrip` fuzz target.)
+        if bytes.starts_with(crate::parser::filing::UTF8_BOM) && !self.version.uses_fs_delimiter() {
+            return encode(&self.render(true));
+        }
+        bytes
+    }
+
+    /// The canonical text. `force_quote_header` quotes the header's first
+    /// cell whatever it contains (see [`Filing::to_fec`]).
+    fn render(&self, force_quote_header: bool) -> String {
         let mut out = String::new();
         let blocks = self.version.uses_fs_delimiter();
         let mut w = LineWriter::for_version(blocks);
-        w.write_header(&mut out, &self.header.to_fields());
+        w.write_header(&mut out, &self.header.to_fields(), force_quote_header);
         // The FEC's own software files a Form 99's text as a block even
         // when it is one line; every other record hoists only what inline
         // cannot carry.
@@ -87,14 +112,6 @@ impl Filing {
             write_record_with_text(&mut w, &mut out, line, blocks, false);
         }
         out
-    }
-
-    /// Serialises the filing to `.fec` bytes, Windows-1252 when every
-    /// character is representable in it (the FEC's character set), else
-    /// UTF-8. See the module docs.
-    #[must_use]
-    pub fn to_fec(&self) -> Vec<u8> {
-        encode(&self.to_fec_string())
     }
 
     /// Writes [`Filing::to_fec`] to `writer`.
@@ -190,11 +207,12 @@ impl LineWriter {
     /// bare at byte 0 it would be rejected, or lose its first character,
     /// so it is written quoted, as the original was. (Both found by the
     /// `roundtrip` fuzz target.)
-    fn write_header(&mut self, out: &mut String, cells: &[&str]) {
+    fn write_header(&mut self, out: &mut String, cells: &[&str], force_quote: bool) {
         let hides_file_marker = matches!(self, Self::Csv)
-            && cells
-                .first()
-                .is_some_and(|c| c.starts_with("/*") || c.starts_with('\u{feff}'));
+            && (force_quote
+                || cells
+                    .first()
+                    .is_some_and(|c| c.starts_with("/*") || c.starts_with('\u{feff}')));
         self.write_cells(out, cells, hides_file_marker);
     }
 
@@ -540,6 +558,17 @@ mod tests {
             bom.to_fec_string()
         );
         assert_round_trip(&bom);
+
+        // The same three bytes read as Windows-1252 (the file had invalid
+        // UTF-8 elsewhere) are the characters `ï»¿`, which encode straight
+        // back to EF BB BF: the byte-level check in `to_fec` catches what
+        // the character-level one cannot.
+        let latin =
+            Filing::parse_bytes(b"\"\xEF\xBB\xBF\",FEC,5.3,X,1\nF3XN,C00123456,CAF\xC9\n").unwrap();
+        assert_eq!(latin.header.record_type, "\u{ef}\u{bb}\u{bf}");
+        let bytes = latin.to_fec();
+        assert!(bytes.starts_with(b"\"\xEF\xBB\xBF\",FEC"), "{bytes:02x?}");
+        assert_round_trip(&latin);
 
         // An ordinary header is untouched.
         let plain = Filing::parse("HDR,FEC,5.3,X,1\nF3XN,C00123456,NAME\n").unwrap();

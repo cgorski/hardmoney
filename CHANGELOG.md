@@ -81,7 +81,9 @@
   parser acts on at byte 0: the pre-3.0 comment header it rejects, and a
   UTF-8 byte-order mark it strips) but was written bare, so the output
   was rejected or lost its first character; the cell is written quoted
-  again.
+  again -- decided on the encoded bytes, since a quoted BOM read from a
+  Windows-1252 file is three Latin characters that encode back to the
+  same three bytes.
   None of the corpus fixtures' canonical output changes.
 - **Releases from CI, gated.** A `v*` tag now publishes the wheels and
   sdist to PyPI from the workflow that built and attested them, after the
