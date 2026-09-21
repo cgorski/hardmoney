@@ -77,7 +77,7 @@ impl Filing {
         let mut out = String::new();
         let blocks = self.version.uses_fs_delimiter();
         let mut w = LineWriter::for_version(blocks);
-        w.write_record(&mut out, &self.header.to_fields());
+        w.write_header(&mut out, &self.header.to_fields());
         // The FEC's own software files a Form 99's text as a block even
         // when it is one line; every other record hoists only what inline
         // cannot carry.
@@ -181,7 +181,28 @@ impl LineWriter {
         }
     }
 
+    /// The first record of the file. The parser decides the file's format
+    /// from the raw first bytes before any CSV parsing: a file starting
+    /// with `/*` is the pre-3.0 comment header and is rejected outright.
+    /// A comma-delimited filing whose header cell was `"/*..."` on the
+    /// wire parses (the quotes hide the marker) and hands back a
+    /// `record_type` starting with `/*`; written bare it would become that
+    /// rejected header, so it is written quoted, as the original was.
+    /// (Found by the `roundtrip` fuzz target.)
+    fn write_header(&mut self, out: &mut String, cells: &[&str]) {
+        let hides_legacy_marker =
+            matches!(self, Self::Csv) && cells.first().is_some_and(|c| c.starts_with("/*"));
+        self.write_cells(out, cells, hides_legacy_marker);
+    }
+
     fn write_record(&mut self, out: &mut String, cells: &[&str]) {
+        self.write_cells(out, cells, false);
+    }
+
+    /// One record. `force_quote_first` quotes the first cell even when
+    /// CSV quoting would not require it (see [`LineWriter::write_header`]);
+    /// it has no effect on the ASCII-28 format, which has no quoting.
+    fn write_cells(&mut self, out: &mut String, cells: &[&str], force_quote_first: bool) {
         match self {
             Self::FileSeparator => {
                 for (i, cell) in cells.iter().enumerate() {
@@ -201,30 +222,34 @@ impl LineWriter {
                     if i > 0 {
                         out.push(',');
                     }
-                    let cell = wire_cell(cell);
-                    // Quote when needed. `\r` and ASCII-28 are quoted (so a
-                    // CSV consumer sees them as field content) but kept:
-                    // the per-line reader treats neither as structure, so
-                    // both survive a parse and must survive the write. Only
-                    // a line feed cannot be carried (one record per
-                    // physical line) and could not have been parsed.
-                    if cell.contains([',', '"', '\r', '\n', NEW_DELIMITER]) {
-                        out.push('"');
-                        for ch in cell.chars() {
-                            match ch {
-                                '"' => out.push_str("\"\""),
-                                '\n' => out.push(' '),
-                                c => out.push(c),
-                            }
-                        }
-                        out.push('"');
-                    } else {
-                        out.push_str(&cell);
-                    }
+                    push_csv_cell(out, cell, force_quote_first && i == 0);
                 }
             }
         }
         out.push_str(CRLF);
+    }
+}
+
+/// One comma-delimited cell, quoted when needed (or when `force_quote`).
+/// `\r` and ASCII-28 are quoted (so a CSV consumer sees them as field
+/// content) but kept: the per-line reader treats neither as structure, so
+/// both survive a parse and must survive the write. Only a line feed
+/// cannot be carried (one record per physical line) and could not have
+/// been parsed.
+fn push_csv_cell(out: &mut String, cell: &str, force_quote: bool) {
+    let cell = wire_cell(cell);
+    if force_quote || cell.contains([',', '"', '\r', '\n', NEW_DELIMITER]) {
+        out.push('"');
+        for ch in cell.chars() {
+            match ch {
+                '"' => out.push_str("\"\""),
+                '\n' => out.push(' '),
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+    } else {
+        out.push_str(&cell);
     }
 }
 
@@ -487,6 +512,23 @@ mod tests {
         assert_eq!(again.summary.get("committee_name"), Some("odd\u{1c}name"));
         assert_eq!(again.version, filing.version, "still comma-delimited");
         assert_round_trip(&filing);
+    }
+
+    /// The parser rejects a file whose first bytes are `/*` (the pre-3.0
+    /// comment header) before any CSV parsing, so a header cell that was
+    /// `"/*..."` on the wire -- which parses, the quotes hiding the marker
+    /// -- must be written quoted again. (Found by the `roundtrip` fuzz
+    /// target on CI's first real run.)
+    #[test]
+    fn a_quoted_header_cell_hiding_the_legacy_marker_stays_quoted() {
+        let filing = Filing::parse("\"/*R\",FEC,5.3,X,1\nF3XN,C00123456,NAME\n").unwrap();
+        assert_eq!(filing.header.record_type, "/*R");
+        let out = filing.to_fec_string();
+        assert!(out.starts_with("\"/*R\",FEC,5.3"), "{out:?}");
+        assert_round_trip(&filing);
+        // An ordinary header is untouched.
+        let plain = Filing::parse("HDR,FEC,5.3,X,1\nF3XN,C00123456,NAME\n").unwrap();
+        assert!(plain.to_fec_string().starts_with("HDR,FEC,5.3"));
     }
 
     /// A bare carriage return inside a value is what the parser yields for
