@@ -181,18 +181,21 @@ impl LineWriter {
         }
     }
 
-    /// The first record of the file. The parser decides the file's format
-    /// from the raw first bytes before any CSV parsing: a file starting
-    /// with `/*` is the pre-3.0 comment header and is rejected outright.
-    /// A comma-delimited filing whose header cell was `"/*..."` on the
-    /// wire parses (the quotes hide the marker) and hands back a
-    /// `record_type` starting with `/*`; written bare it would become that
-    /// rejected header, so it is written quoted, as the original was.
-    /// (Found by the `roundtrip` fuzz target.)
+    /// The first record of the file. The parser looks at the raw first
+    /// bytes before any CSV parsing: a UTF-8 byte-order mark is stripped,
+    /// and a file starting with `/*` (the pre-3.0 comment header) is
+    /// rejected outright. A comma-delimited filing whose header cell was
+    /// `"/*..."` or `"<BOM>..."` on the wire parses (the quotes hide the
+    /// marker) and hands back a `record_type` beginning with it; written
+    /// bare at byte 0 it would be rejected, or lose its first character,
+    /// so it is written quoted, as the original was. (Both found by the
+    /// `roundtrip` fuzz target.)
     fn write_header(&mut self, out: &mut String, cells: &[&str]) {
-        let hides_legacy_marker =
-            matches!(self, Self::Csv) && cells.first().is_some_and(|c| c.starts_with("/*"));
-        self.write_cells(out, cells, hides_legacy_marker);
+        let hides_file_marker = matches!(self, Self::Csv)
+            && cells
+                .first()
+                .is_some_and(|c| c.starts_with("/*") || c.starts_with('\u{feff}'));
+        self.write_cells(out, cells, hides_file_marker);
     }
 
     fn write_record(&mut self, out: &mut String, cells: &[&str]) {
@@ -520,12 +523,24 @@ mod tests {
     /// -- must be written quoted again. (Found by the `roundtrip` fuzz
     /// target on CI's first real run.)
     #[test]
-    fn a_quoted_header_cell_hiding_the_legacy_marker_stays_quoted() {
+    fn a_quoted_header_cell_hiding_a_file_marker_stays_quoted() {
         let filing = Filing::parse("\"/*R\",FEC,5.3,X,1\nF3XN,C00123456,NAME\n").unwrap();
         assert_eq!(filing.header.record_type, "/*R");
         let out = filing.to_fec_string();
         assert!(out.starts_with("\"/*R\",FEC,5.3"), "{out:?}");
         assert_round_trip(&filing);
+
+        // A byte-order mark inside the quotes is data; bare at byte 0 the
+        // parser would strip it.
+        let bom = Filing::parse("\"\u{feff}HDR\",FEC,5.3,X,1\nF3XN,C00123456,NAME\n").unwrap();
+        assert_eq!(bom.header.record_type, "\u{feff}HDR");
+        assert!(
+            bom.to_fec_string().starts_with("\"\u{feff}HDR\",FEC"),
+            "{:?}",
+            bom.to_fec_string()
+        );
+        assert_round_trip(&bom);
+
         // An ordinary header is untouched.
         let plain = Filing::parse("HDR,FEC,5.3,X,1\nF3XN,C00123456,NAME\n").unwrap();
         assert!(plain.to_fec_string().starts_with("HDR,FEC,5.3"));

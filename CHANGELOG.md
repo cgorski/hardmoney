@@ -76,10 +76,12 @@
   writer replaced it with a space. Also fixed: a spec 3.x-5.x Form 99 with
   text had its text hoisted into a block those formats do not have, which
   the parser then read as a bad record; pre-6.0 text is always inline.
-  (4) A comma-delimited header whose first cell was `"/*..."` on the
-  wire parses (the quotes hide the pre-3.0 comment marker the parser
-  rejects files for) but was written bare, and the output was then
-  rejected as that legacy format; the cell is written quoted again.
+  (4) A comma-delimited header whose first cell was `"/*..."` or
+  `"<BOM>..."` on the wire parses (the quotes hide the two markers the
+  parser acts on at byte 0: the pre-3.0 comment header it rejects, and a
+  UTF-8 byte-order mark it strips) but was written bare, so the output
+  was rejected or lost its first character; the cell is written quoted
+  again.
   None of the corpus fixtures' canonical output changes.
 - **Releases from CI, gated.** A `v*` tag now publishes the wheels and
   sdist to PyPI from the workflow that built and attested them, after the
