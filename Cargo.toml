@@ -88,8 +88,8 @@ rust-embed = { version = "8", default-features = false, features = ["debug-embed
 # optional sqlx-sqlite requires libsqlite3-sys < 0.38, and Cargo allows only
 # one crate in the lockfile to `links = "sqlite3"` even when the feature
 # that would pull it in is off. Bump alongside sqlx.
-arrow = { version = "59", default-features = false, optional = true }
-parquet = { version = "59", default-features = false, features = ["arrow", "zstd"], optional = true }
+arrow = { version = "60", default-features = false, optional = true }
+parquet = { version = "60", default-features = false, features = ["arrow", "zstd"], optional = true }
 rusqlite = { version = "0.39", features = ["bundled"], optional = true }
 
 # cli (optional, required for the `hardmoney` binary)
