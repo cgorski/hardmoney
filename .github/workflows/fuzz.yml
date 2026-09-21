@@ -61,20 +61,31 @@ jobs:
       - name: Seed from the fixtures
         run: ./fuzz/seed.sh
 
+      # cargo-fuzz itself has no `--locked`; `cargo fetch --locked` fails
+      # first if fuzz/Cargo.lock is stale, and leaves nothing for the
+      # build to resolve.
+      - name: Check fuzz/Cargo.lock is current
+        run: cd fuzz && cargo fetch --locked
+
       - name: Fuzz
+        id: fuzz
         env:
           SECONDS_PER_TARGET: ${{ inputs.seconds || '600' }}
         run: |
           cd fuzz
-          cargo fuzz run --locked ${{ matrix.target }} -- \
+          cargo fuzz run ${{ matrix.target }} -- \
             -dict=dictionary.dict -max_len=65536 -rss_limit_mb=4096 -timeout=30 \
             -max_total_time="$SECONDS_PER_TARGET"
 
+      # Save the corpus only if fuzzing actually ran: to completion, or up
+      # to a crash (the artifact proves it). A build or tooling failure
+      # must not save the bare seeds over an evolved corpus -- five nights
+      # of a bad flag did exactly that before this condition existed.
       - name: Minimise the corpus for the cache
-        if: always()
-        run: cd fuzz && cargo fuzz cmin --locked ${{ matrix.target }}
+        if: always() && (steps.fuzz.outcome == 'success' || hashFiles('fuzz/artifacts/**') != '')
+        run: cd fuzz && cargo fuzz cmin ${{ matrix.target }}
       - name: Save the evolved corpus
-        if: always()
+        if: always() && (steps.fuzz.outcome == 'success' || hashFiles('fuzz/artifacts/**') != '')
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: fuzz/corpus/${{ matrix.target }}
