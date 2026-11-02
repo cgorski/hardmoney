@@ -65,7 +65,7 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 # DATABASE_URL omits the user (sqlx#4277). Enabling `std` here restores the
 # lookup. Remove once sqlx ships the fix.
 whoami = { version = "2", default-features = false, features = ["std"], optional = true }
-zip = { version = "8", default-features = false, features = ["deflate"], optional = true }
+zip = { version = "9", default-features = false, features = ["deflate"], optional = true }
 # `sync`: the semaphore bounding concurrent `GET /tools/fetch` downloads.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "net", "signal", "sync"], optional = true }
 indicatif = { version = "0.18", optional = true }
@@ -113,7 +113,7 @@ cli = ["dep:clap", "dep:dotenvy", "bulk", "api", "fetch", "export"]
 [dev-dependencies]
 rust_decimal_macros = "1"
 tower = { version = "0.5", features = ["util"] }
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 # Property tests: writer/parser round-trips over arbitrary field values.
 proptest = "1"
 # benches/parse.rs: eager `Filing::parse_bytes` vs. streaming `FilingReader`.
