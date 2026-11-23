@@ -31,7 +31,7 @@ hardmoney = { path = "..", default-features = false, features = ["fetch", "serde
 # `abi3-py39`: one wheel per platform for every CPython >= 3.9.
 # `rust_decimal`: `Decimal` -> `decimal.Decimal` via its string form (exact).
 # `chrono`: `NaiveDate` -> `datetime.date`.
-pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39", "rust_decimal", "chrono"] }
+pyo3 = { version = "0.30", features = ["extension-module", "abi3-py39", "rust_decimal", "chrono"] }
 rust_decimal = { version = "1", default-features = false, features = ["std"] }
 chrono = { version = "0.4", default-features = false }
 
